@@ -126,6 +126,13 @@ fn post_json_via_wasi_http(url: &str, bearer_token: &str, body_bytes: &[u8]) -> 
     let outgoing_body = req
         .body()
         .map_err(|_| "failed to acquire request body".to_string())?;
+
+    // IMPORTANT: Call `outgoing_handler::handle(req, None)` BEFORE writing chunks to `outgoing_body`.
+    // In `wasmtime-wasi-http`, the body stream buffer is bounded (4KB), and nothing drains it
+    // until `outgoing_handler::handle` spawns the background HTTP client task!
+    let future_resp = outgoing_handler::handle(req, None)
+        .map_err(|e| format!("wasi http outgoing_handler::handle error: {e:?}"))?;
+
     {
         let out_stream = outgoing_body
             .write()
@@ -138,9 +145,6 @@ fn post_json_via_wasi_http(url: &str, bearer_token: &str, body_bytes: &[u8]) -> 
     }
     OutgoingBody::finish(outgoing_body, None)
         .map_err(|e| format!("failed finishing outgoing body: {e:?}"))?;
-
-    let future_resp = outgoing_handler::handle(req, None)
-        .map_err(|e| format!("wasi http outgoing_handler::handle error: {e:?}"))?;
 
     let incoming_resp = loop {
         if let Some(res) = future_resp.get() {

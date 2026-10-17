@@ -5,20 +5,53 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ragents-chat · AI 多智能体协同聊天室</title>
   <style>
+    /* Default: Light Mode */
     :root {
+      --bg-dark: #f1f5f9;
+      --bg-panel: #ffffff;
+      --bg-card: #e2e8f0;
+      --bg-subpanel: #f8fafc;
+      --bg-hover: rgba(15, 23, 42, 0.04);
+      --bg-input: #ffffff;
+      --border: #cbd5e1;
+      --text-main: #0f172a;
+      --text-muted: #64748b;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --pill-text: #1d4ed8;
+      --pill-bg: rgba(37, 99, 235, 0.14);
+      --green: #059669;
+      --amber: #d97706;
+      --red: #dc2626;
+      --purple: #7c3aed;
+      --tag-think: #7c3aed;
+      --tag-tool: #0284c7;
+      --tag-compact: #d97706;
+      --tag-input: #059669;
+    }
+    /* Dark Mode */
+    [data-theme="dark"] {
       --bg-dark: #0f172a;
       --bg-panel: #1e293b;
       --bg-card: #334155;
+      --bg-subpanel: rgba(15, 23, 42, 0.6);
+      --bg-hover: rgba(255, 255, 255, 0.05);
       --bg-input: #0f172a;
       --border: #334155;
       --text-main: #f8fafc;
       --text-muted: #94a3b8;
       --accent: #3b82f6;
       --accent-hover: #2563eb;
+      --pill-text: #93c5fd;
+      --pill-bg: rgba(59, 130, 246, 0.25);
       --green: #10b981;
       --amber: #f59e0b;
       --red: #ef4444;
       --purple: #8b5cf6;
+      --tag-think: #a78bfa;
+      --tag-tool: #38bdf8;
+      --tag-compact: #fbbf24;
+      --tag-input: #34d399;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -81,9 +114,9 @@
       cursor: pointer;
       border: 1px solid transparent;
     }
-    .room-item:hover { background: rgba(255,255,255,0.04); }
+    .room-item:hover { background: var(--bg-hover); }
     .room-item.active {
-      background: rgba(59, 130, 246, 0.16);
+      background: var(--pill-bg);
       border-color: var(--accent);
     }
     .room-item-title {
@@ -101,8 +134,8 @@
       background: var(--bg-card);
       color: var(--text-muted);
     }
-    .badge.single { background: rgba(16, 185, 129, 0.2); color: #34d399; }
-    .badge.group { background: rgba(139, 92, 246, 0.2); color: #c4b5fd; }
+    .badge.single { background: rgba(16, 185, 129, 0.16); color: var(--green); }
+    .badge.group { background: rgba(139, 92, 246, 0.16); color: var(--purple); }
     .sidebar-footer {
       padding: 12px;
       border-top: 1px solid var(--border);
@@ -131,7 +164,7 @@
     .room-title-area p { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
     .peek-controls {
       padding: 8px 18px;
-      background: rgba(30, 41, 59, 0.75);
+      background: var(--bg-subpanel);
       border-bottom: 1px solid var(--border);
       display: flex;
       flex-wrap: wrap;
@@ -190,8 +223,8 @@
     .msg-sender { font-weight: 700; color: var(--text-main); }
     .mention-pill {
       display: inline-block;
-      background: rgba(59, 130, 246, 0.25);
-      color: #93c5fd;
+      background: var(--pill-bg);
+      color: var(--pill-text);
       padding: 1px 6px;
       border-radius: 4px;
       font-size: 11px;
@@ -230,8 +263,8 @@
       border: 1px solid transparent;
     }
     .mention-chip.selected {
-      background: rgba(59, 130, 246, 0.25);
-      color: #93c5fd;
+      background: var(--pill-bg);
+      color: var(--pill-text);
       border-color: var(--accent);
       font-weight: 600;
     }
@@ -270,7 +303,7 @@
     .agent-card {
       padding: 8px 10px;
       border-radius: 8px;
-      background: rgba(15, 23, 42, 0.55);
+      background: var(--bg-subpanel);
       border: 1px solid var(--border);
       margin-bottom: 6px;
       cursor: pointer;
@@ -278,7 +311,7 @@
       justify-content: space-between;
       align-items: center;
     }
-    .agent-card.selected { border-color: var(--accent); background: rgba(59, 130, 246, 0.14); }
+    .agent-card.selected { border-color: var(--accent); background: var(--pill-bg); }
     .status-dot {
       display: inline-block;
       width: 8px;
@@ -359,10 +392,10 @@
       border-bottom: 1px dashed rgba(148, 163, 184, 0.15);
     }
     .log-entry .tag { font-weight: 700; margin-right: 6px; }
-    .tag.think { color: #a78bfa; }
-    .tag.tool { color: #38bdf8; }
-    .tag.compact { color: #fbbf24; }
-    .tag.input { color: #34d399; }
+    .tag.think { color: var(--tag-think); }
+    .tag.tool { color: var(--tag-tool); }
+    .tag.compact { color: var(--tag-compact); }
+    .tag.input { color: var(--tag-input); }
 
     /* Modal */
     .modal-backdrop {
@@ -401,6 +434,7 @@
     <div id="roomList" class="room-list"></div>
     <div class="sidebar-footer">
       <button class="secondary" onclick="openManagerSettingsModal()">⚙️ Manager 设置</button>
+      <button id="themeToggleBtn" class="secondary" style="flex:0 0 auto;" onclick="toggleTheme()">🌙 深色</button>
     </div>
   </aside>
 
@@ -592,6 +626,26 @@
 
   <script>
     let authToken = localStorage.getItem('ragents_chat_token') || '';
+    let currentTheme = localStorage.getItem('ragents_chat_theme') || 'light';
+
+    function applyTheme(theme) {
+      currentTheme = theme === 'dark' ? 'dark' : 'light';
+      if (currentTheme === 'dark') {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      } else {
+        document.documentElement.removeAttribute('data-theme');
+      }
+      localStorage.setItem('ragents_chat_theme', currentTheme);
+      const btn = document.getElementById('themeToggleBtn');
+      if (btn) {
+        btn.textContent = currentTheme === 'dark' ? '☀️ 浅色' : '🌙 深色';
+      }
+    }
+
+    function toggleTheme() {
+      applyTheme(currentTheme === 'dark' ? 'light' : 'dark');
+    }
+    applyTheme(currentTheme);
     let rooms = [];
     let currentRoom = null;
     let currentAgents = [];
@@ -603,6 +657,8 @@
     let inspectedSessionId = null;
     let inspectorEventSource = null;
     let liveStreamBuffer = '';
+    let liveReasoningBuffer = '';
+    let agentActivities = {};
 
     async function apiFetch(path, options = {}) {
       const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
@@ -821,9 +877,14 @@
         const stateText = a.runtime_state === 'thinking'
           ? '🔵 思考/执行中'
           : (a.runtime_state === 'waiting_permission' ? '🟠 等待权限审批' : '🟢 空闲');
+        const actDetail = agentActivities[a.agent_id] || '';
+        const isErr = actDetail.startsWith('❌');
+        const actHtml = actDetail
+          ? `<div style="font-size:11px; margin-top:3px; color:${isErr ? '#f87171' : '#93c5fd'}; font-weight:500;">${escapeHtml(actDetail)}</div>`
+          : '';
         return `
           <div class="agent-card ${sel}" onclick="inspectAgent('${a.agent_id}')">
-            <div>
+            <div style="min-width:0; flex:1;">
               <div style="font-size:13px; font-weight:600;">
                 <span class="status-dot ${a.runtime_state}"></span>
                 ${escapeHtml(a.avatar)} @${escapeHtml(a.name)}
@@ -832,8 +893,9 @@
               <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">
                 ${stateText} · model: ${escapeHtml(a.model)} · 已读 #${a.last_delivered_seq}
               </div>
+              ${actHtml}
             </div>
-            <button class="secondary" style="font-size:11px; padding:3px 7px;" onclick="event.stopPropagation(); removeAgent('${a.agent_id}')">移除</button>
+            <button class="secondary" style="font-size:11px; padding:3px 7px; flex-shrink:0;" onclick="event.stopPropagation(); removeAgent('${a.agent_id}')">移除</button>
           </div>
         `;
       }).join('');
@@ -908,6 +970,9 @@
           if (inspectedAgent && inspectedAgent.agent_id === ev.agent_id) {
             refreshInspectorSnapshot(ev.agent_id, null);
           }
+        } else if (ev.type === 'agent_activity') {
+          agentActivities[ev.agent_id] = ev.activity || '';
+          renderAgentRoster();
         }
       };
     }
@@ -953,6 +1018,7 @@
       inspectedAgent = snap.agent;
       inspectedSessionId = snap.selected_session_id;
       liveStreamBuffer = '';
+      liveReasoningBuffer = '';
       renderAgentRoster();
       renderInspectorHeaderAndLineage();
       renderPendingPermissions(snap.pending_permissions || [], snap.agent.active_activation_id);
@@ -1031,32 +1097,76 @@
       await apiFetch(`/api/v1/agents/${inspectedAgent.agent_id}/cancel`, { method: 'POST' });
     }
 
+    function formatContextItemHtml(item) {
+      if (!item) return '';
+      if (item.type === 'message') {
+        const role = item.role || 'user';
+        const text = (item.content || []).map(c => c.text || '').join('\n');
+        if (text.startsWith('[Compaction Summary]')) {
+          return `<div class="log-entry"><span class="tag compact">[Compaction Summary]</span>${escapeHtml(text)}</div>`;
+        }
+        return `<div class="log-entry"><span class="tag input">[Context:${escapeHtml(role)}]</span>${escapeHtml(text)}</div>`;
+      } else if (item.type === 'function_call') {
+        return `<div class="log-entry"><span class="tag tool">[ToolCall:${escapeHtml(item.name)}]</span>${escapeHtml(item.arguments || '')}</div>`;
+      } else if (item.type === 'function_call_output') {
+        const out = typeof item.output === 'string' ? item.output : JSON.stringify(item.output);
+        return `<div class="log-entry"><span class="tag tool">[ToolResult]</span>${escapeHtml(out.slice(0, 1200))}</div>`;
+      }
+      return '';
+    }
+
     function renderInspectorHistory(context, events) {
       const log = document.getElementById('inspectorLog');
       const blocks = [];
 
       if (context && context.effective_items) {
         for (const item of context.effective_items) {
-          if (item.type === 'message') {
-            const role = item.role || 'user';
-            const text = (item.content || []).map(c => c.text || '').join('\n');
-            if (text.startsWith('[Compaction Summary]')) {
-              blocks.push(`<div class="log-entry"><span class="tag compact">[Compaction Summary]</span>${escapeHtml(text)}</div>`);
-            } else {
-              blocks.push(`<div class="log-entry"><span class="tag input">[Context:${escapeHtml(role)}]</span>${escapeHtml(text)}</div>`);
-            }
-          } else if (item.type === 'function_call') {
-            blocks.push(`<div class="log-entry"><span class="tag tool">[ToolCall:${escapeHtml(item.name)}]</span>${escapeHtml(item.arguments || '')}</div>`);
-          } else if (item.type === 'function_call_output') {
-            const out = typeof item.output === 'string' ? item.output : JSON.stringify(item.output);
-            blocks.push(`<div class="log-entry"><span class="tag tool">[ToolResult]</span>${escapeHtml(out.slice(0, 600))}</div>`);
-          }
+          const html = formatContextItemHtml(item);
+          if (html) blocks.push(html);
         }
       }
 
-      blocks.push(`<div id="liveStreamSlot" class="log-entry" style="display:none;"><span class="tag think">[Live Stream]</span><span id="liveStreamText"></span></div>`);
+      // Also render any failure or active in-progress state from the event log
+      if (events && events.length > 0) {
+        for (const env of events) {
+          const ev = env.event;
+          if (!ev) continue;
+          const evType = ev.type || ev.kind;
+          if (evType === 'activation_failed') {
+            blocks.push(
+              `<div class="log-entry" style="color:#f87171; background:rgba(239,68,68,0.12); padding:8px; border-radius:6px; border:1px solid rgba(239,68,68,0.4);">` +
+              `<span class="tag" style="color:#ef4444;">[❌ 执行报错 ActivationFailed]</span>${escapeHtml(ev.error || '未知错误')}</div>`
+            );
+            if (inspectedAgent) {
+              agentActivities[inspectedAgent.agent_id] = `❌ 执行异常: ${ev.error || ''}`;
+            }
+          }
+        }
+        const lastEnv = events[events.length - 1];
+        const lastEv = lastEnv && lastEnv.event ? lastEnv.event : null;
+        const lastType = lastEv ? (lastEv.type || lastEv.kind) : '';
+        if (lastType === 'turn_started' || lastType === 'activation_started' || lastType === 'realtime_messages_drained') {
+          blocks.push(`<div class="log-entry" style="color:#93c5fd;"><span class="tag think">[🧠 实时状态]</span>模型正在思考/推理中，等待流式输出...</div>`);
+        } else if (lastType === 'tool_call_started') {
+          blocks.push(`<div class="log-entry" style="color:#38bdf8;"><span class="tag tool">[🔧 工具执行中]</span>正在运行工具 <b>${escapeHtml(lastEv.name || '')}</b>...</div>`);
+        }
+      }
+
+      blocks.push(`<div id="liveEventContainer"></div>`);
+      blocks.push(`<div id="liveReasoningSlot" class="log-entry" style="display:none; color:#c4b5fd;"><span class="tag think">[💭 实时思考流 Reasoning]</span><span id="liveReasoningText"></span></div>`);
+      blocks.push(`<div id="liveStreamSlot" class="log-entry" style="display:none;"><span class="tag input">[✍️ 实时输出流 Output]</span><span id="liveStreamText"></span></div>`);
       log.innerHTML = blocks.join('') || '暂无内部记录';
       log.scrollTop = log.scrollHeight;
+      renderAgentRoster();
+    }
+
+    function appendLiveInspectorEntry(html) {
+      const container = document.getElementById('liveEventContainer');
+      const log = document.getElementById('inspectorLog');
+      if (container && log) {
+        container.insertAdjacentHTML('beforeend', html);
+        log.scrollTop = log.scrollHeight;
+      }
     }
 
     function subscribeInspectorStream(agentId, sessionId = null) {
@@ -1071,25 +1181,75 @@
         if (!ev) return;
 
         const evType = ev.type || ev.kind;
-        if (evType === 'model_reasoning_delta' || evType === 'model_text_delta') {
+        const log = document.getElementById('inspectorLog');
+
+        if (evType === 'model_reasoning_delta') {
+          const slot = document.getElementById('liveReasoningSlot');
+          const txt = document.getElementById('liveReasoningText');
+          if (slot && txt) {
+            slot.style.display = 'block';
+            liveReasoningBuffer += (ev.delta || '');
+            txt.textContent = liveReasoningBuffer;
+            if (log) log.scrollTop = log.scrollHeight;
+          }
+        } else if (evType === 'model_text_delta') {
           const slot = document.getElementById('liveStreamSlot');
           const txt = document.getElementById('liveStreamText');
           if (slot && txt) {
             slot.style.display = 'block';
             liveStreamBuffer += (ev.delta || '');
             txt.textContent = liveStreamBuffer;
-            const log = document.getElementById('inspectorLog');
-            log.scrollTop = log.scrollHeight;
+            if (log) log.scrollTop = log.scrollHeight;
           }
+        } else if (evType === 'activation_started') {
+          appendLiveInspectorEntry(
+            `<div class="log-entry" style="color:#93c5fd;"><span class="tag input">[🚀 ActivationStarted]</span>已在节点 <code>${escapeHtml(ev.node_id || '')}</code> 启动执行</div>`
+          );
+        } else if (evType === 'realtime_messages_drained') {
+          appendLiveInspectorEntry(
+            `<div class="log-entry" style="color:#34d399;"><span class="tag input">[📥 ContextDrained]</span>已拉取 ${ev.count || 1} 条实时消息进入会话</div>`
+          );
+        } else if (evType === 'turn_started') {
+          liveStreamBuffer = '';
+          liveReasoningBuffer = '';
+          appendLiveInspectorEntry(
+            `<div class="log-entry" style="color:#a78bfa;"><span class="tag think">[🧠 TurnStarted]</span>开启新一轮 ReAct 模型思考...</div>`
+          );
+        } else if (evType === 'turn_completed') {
+          liveStreamBuffer = '';
+          liveReasoningBuffer = '';
+          const rSlot = document.getElementById('liveReasoningSlot');
+          const sSlot = document.getElementById('liveStreamSlot');
+          if (rSlot) rSlot.style.display = 'none';
+          if (sSlot) sSlot.style.display = 'none';
+          for (const item of (ev.items || [])) {
+            const html = formatContextItemHtml(item);
+            if (html) appendLiveInspectorEntry(html);
+          }
+        } else if (evType === 'tool_call_started') {
+          appendLiveInspectorEntry(
+            `<div class="log-entry" style="color:#38bdf8;"><span class="tag tool">[🔧 ToolStarted:${escapeHtml(ev.name)}]</span>正在执行工具 <b>${escapeHtml(ev.name)}</b>...</div>`
+          );
+        } else if (evType === 'tool_call_finished') {
+          appendLiveInspectorEntry(
+            `<div class="log-entry" style="color:#34d399;"><span class="tag tool">[✅ ToolFinished:${escapeHtml(ev.name)}]</span>耗时 ${ev.duration_ms || 0}ms</div>`
+          );
+          for (const item of (ev.items || [])) {
+            const html = formatContextItemHtml(item);
+            if (html) appendLiveInspectorEntry(html);
+          }
+        } else if (evType === 'activation_failed') {
+          appendLiveInspectorEntry(
+            `<div class="log-entry" style="color:#f87171; background:rgba(239,68,68,0.12); padding:8px; border-radius:6px; border:1px solid rgba(239,68,68,0.4);">` +
+            `<span class="tag" style="color:#ef4444;">[❌ 执行报错 ActivationFailed]</span>${escapeHtml(ev.error || '未知错误')}</div>`
+          );
         } else if (
-          evType === 'turn_completed' ||
-          evType === 'tool_call_finished' ||
           evType === 'session_compacted' ||
           evType === 'permission_requested' ||
-          evType === 'activation_completed' ||
-          evType === 'realtime_message_queued'
+          evType === 'activation_completed'
         ) {
           liveStreamBuffer = '';
+          liveReasoningBuffer = '';
           refreshInspectorSnapshot(agentId, sessionId);
         }
       };

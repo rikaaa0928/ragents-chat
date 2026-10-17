@@ -400,7 +400,8 @@ async fn handle_room_stream(
                 | ChatroomEvent::AgentRemoved { room_id, .. }
                 | ChatroomEvent::RoomUpdated { room_id, .. }
                 | ChatroomEvent::PermissionAlert { room_id, .. }
-                | ChatroomEvent::PeekRoundStatus { room_id, .. } => room_id,
+                | ChatroomEvent::PeekRoundStatus { room_id, .. }
+                | ChatroomEvent::AgentActivity { room_id, .. } => room_id,
             };
             if ev_room_id != &room_id {
                 continue;

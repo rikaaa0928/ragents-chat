@@ -342,6 +342,11 @@ pub enum ChatroomEvent {
         room_id: String,
         status: String,
     },
+    AgentActivity {
+        room_id: String,
+        agent_id: String,
+        activity: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

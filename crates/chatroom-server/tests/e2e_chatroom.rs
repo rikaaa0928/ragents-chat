@@ -177,9 +177,12 @@ impl ModelBackend for ChatroomTestModelBackend {
 
         // 6. Otherwise (Direct @ Mention or Auto-Nudge reminder): call `chatroom_speak`!
         let reply_text = if latest_user.contains("[System Reminder") {
-            "抱歉刚才忘了调用发言工具，现在补上我的群聊回复！"
+            "抱歉刚才忘了调用发言工具，现在补上我的群聊回复！".to_string()
         } else {
-            "收到你的点名提问！这是我通过 chatroom_speak 发送到聊天室的正式回复。"
+            format!(
+                "收到你的点名提问！这是我通过 chatroom_speak 发送到聊天室的正式回复（长消息流式测试 >4KB: {}）。",
+                "A".repeat(8192)
+            )
         };
 
         Ok(make_openresponses_resource(

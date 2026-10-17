@@ -131,9 +131,61 @@ impl RoomCoordinator {
                     ) {
                         self.emit_room_event(ChatroomEvent::AgentUpdated {
                             room_id: updated.room_id.clone(),
-                            agent: updated.into(),
+                            agent: updated.clone().into(),
+                        });
+                        self.emit_room_event(ChatroomEvent::AgentActivity {
+                            room_id: updated.room_id,
+                            agent_id: updated.agent_id,
+                            activity: "🚀 已调度至节点，准备启动回合...".to_string(),
                         });
                     }
+                }
+            }
+            SessionEvent::TurnStarted => {
+                if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    self.emit_room_event(ChatroomEvent::AgentActivity {
+                        room_id: agent.room_id,
+                        agent_id: agent.agent_id,
+                        activity: "🧠 模型正在思考/推理中...".to_string(),
+                    });
+                }
+            }
+            SessionEvent::ModelReasoningDelta { .. } => {
+                if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    self.emit_room_event(ChatroomEvent::AgentActivity {
+                        room_id: agent.room_id,
+                        agent_id: agent.agent_id,
+                        activity: "💭 正在输出思维链 (Reasoning)...".to_string(),
+                    });
+                }
+            }
+            SessionEvent::ModelTextDelta { .. } => {
+                if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    self.emit_room_event(ChatroomEvent::AgentActivity {
+                        room_id: agent.room_id,
+                        agent_id: agent.agent_id,
+                        activity: "✍️ 正在生成内部响应...".to_string(),
+                    });
+                }
+            }
+            SessionEvent::ToolCallStarted { name, .. } => {
+                if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    self.emit_room_event(ChatroomEvent::AgentActivity {
+                        room_id: agent.room_id,
+                        agent_id: agent.agent_id,
+                        activity: format!("🔧 正在调用工具: {name} ..."),
+                    });
+                }
+            }
+            SessionEvent::ToolCallFinished {
+                name, duration_ms, ..
+            } => {
+                if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    self.emit_room_event(ChatroomEvent::AgentActivity {
+                        room_id: agent.room_id,
+                        agent_id: agent.agent_id,
+                        activity: format!("✅ 工具 {name} 执行完成 ({duration_ms}ms)"),
+                    });
                 }
             }
             SessionEvent::PermissionRequested { request } => {
@@ -205,6 +257,10 @@ impl RoomCoordinator {
             | SessionEvent::ActivationCancelled
             | SessionEvent::ActivationInterrupted { .. } => {
                 let is_completed_ok = matches!(env.event, SessionEvent::ActivationCompleted { .. });
+                let fail_err = match &env.event {
+                    SessionEvent::ActivationFailed { error } => Some(error.clone()),
+                    _ => None,
+                };
                 if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
                     if let Ok(updated) = self.store.update_agent_runtime_state(
                         &agent.agent_id,
@@ -215,6 +271,39 @@ impl RoomCoordinator {
                             room_id: updated.room_id.clone(),
                             agent: updated.clone().into(),
                         });
+                        if let Some(err_msg) = fail_err {
+                            self.emit_room_event(ChatroomEvent::AgentActivity {
+                                room_id: updated.room_id.clone(),
+                                agent_id: updated.agent_id.clone(),
+                                activity: format!("❌ 执行异常: {err_msg}"),
+                            });
+                            if let Ok((sys_msg, updated_room)) = self.store.append_message(
+                                &updated.room_id,
+                                SenderKind::System,
+                                "system",
+                                "System",
+                                format!("⚠️ @{} 内部执行报错：{}", updated.name, err_msg),
+                                vec![],
+                                None,
+                                Some(env.session_id.clone()),
+                                env.activation_id.clone(),
+                            ) {
+                                self.emit_room_event(ChatroomEvent::MessagePosted {
+                                    room_id: updated.room_id.clone(),
+                                    message: sys_msg,
+                                });
+                                self.emit_room_event(ChatroomEvent::RoomUpdated {
+                                    room_id: updated.room_id.clone(),
+                                    room: updated_room,
+                                });
+                            }
+                        } else {
+                            self.emit_room_event(ChatroomEvent::AgentActivity {
+                                room_id: updated.room_id.clone(),
+                                agent_id: updated.agent_id.clone(),
+                                activity: String::new(),
+                            });
+                        }
                         self.on_agent_activation_finished(&updated, is_completed_ok)
                             .await;
                     }

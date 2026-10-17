@@ -16,7 +16,33 @@ RUN cargo build --release --bin ragents-chat --target-dir /app/target && \
 
 FROM debian:latest
 
-COPY --from=builder /etc/ssl/certs /etc/ssl/certs
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    python3-dev \
+    python-is-python3 \
+    git \
+    curl \
+    wget \
+    jq \
+    ripgrep \
+    fd-find \
+    procps \
+    lsof \
+    sqlite3 \
+    ca-certificates \
+    openssh-client \
+    unzip \
+    zip \
+    tar \
+    gzip \
+    xz-utils \
+    build-essential \
+    pkg-config \
+    && pip3 install --no-cache-dir --break-system-packages uv \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /usr/local/bin/ragents /usr/local/bin/ragents
 COPY --from=builder /usr/local/bin/ragents-core-worker /usr/local/bin/ragents-core-worker
 COPY --from=builder /usr/local/bin/ragents-chat /usr/local/bin/ragents-chat
