@@ -29,8 +29,9 @@ docker run --rm \
     cp -r /etc/ssl/certs /src/ragents-chat/target/linux-bin/certs
   '
 
-# 3. Package runtime image `ragents-suite:local` with full Python3 + uv + git + curl + rg + jq + bwrap toolset
-docker build -t ragents-suite:local -f - "${ROOT_DIR}/target/linux-bin" <<'EOF'
+# 3. Ensure cached base runtime image `ragents-runtime-base:local` exists (Python3 + uv + git + curl + rg + jq + bwrap)
+if ! docker image inspect ragents-runtime-base:local >/dev/null 2>&1; then
+  docker build -t ragents-runtime-base:local - <<'EOF'
 FROM debian:latest
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
@@ -59,6 +60,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     && pip3 install --no-cache-dir --break-system-packages uv \
     && rm -rf /var/lib/apt/lists/*
+EOF
+fi
+
+# 4. Package `ragents-suite:local` on top of cached `ragents-runtime-base:local` (takes <2s)
+docker build -t ragents-suite:local -f - "${ROOT_DIR}/target/linux-bin" <<'EOF'
+FROM ragents-runtime-base:local
 COPY ragents /usr/local/bin/ragents
 COPY ragents-core-worker /usr/local/bin/ragents-core-worker
 COPY ragents-chat /usr/local/bin/ragents-chat
