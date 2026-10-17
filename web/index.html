@@ -851,25 +851,51 @@
             currentMessages.push(ev.message);
             renderMessages();
           }
+          const rItem = rooms.find(r => r.room.room_id === roomId);
+          if (rItem) {
+            rItem.last_message = ev.message;
+            renderRoomList();
+          }
         } else if (ev.type === 'agent_updated') {
+          const prevCount = currentAgents.length;
           const idx = currentAgents.findIndex(a => a.agent_id === ev.agent.agent_id);
           if (idx >= 0) currentAgents[idx] = ev.agent;
           else currentAgents.push(ev.agent);
+          if (prevCount === 1 && currentAgents.length > 1) {
+            selectedMentions.clear();
+          }
+          const rItem = rooms.find(r => r.room.room_id === roomId);
+          if (rItem) {
+            rItem.agents = currentAgents.slice();
+            renderRoomList();
+          }
+          renderCurrentRoomHeader();
           renderAgentRoster();
           renderMentionSelectorBar();
           if (inspectedAgent && inspectedAgent.agent_id === ev.agent.agent_id) {
             inspectedAgent = ev.agent;
             renderInspectorHeaderAndLineage();
-            if (ev.agent.runtime_state === 'waiting_permission') {
+            if (ev.agent.runtime_state === 'waiting_permission' || ev.agent.runtime_state === 'idle') {
               refreshInspectorSnapshot(inspectedAgent.agent_id, inspectedSessionId);
             }
           }
         } else if (ev.type === 'agent_removed') {
           currentAgents = currentAgents.filter(a => a.agent_id !== ev.agent_id);
+          const rItem = rooms.find(r => r.room.room_id === roomId);
+          if (rItem) {
+            rItem.agents = currentAgents.slice();
+            renderRoomList();
+          }
+          renderCurrentRoomHeader();
           renderAgentRoster();
           renderMentionSelectorBar();
         } else if (ev.type === 'room_updated') {
           currentRoom = ev.room;
+          const rItem = rooms.find(r => r.room.room_id === roomId);
+          if (rItem) {
+            rItem.room = ev.room;
+            renderRoomList();
+          }
           renderCurrentRoomHeader();
         } else if (ev.type === 'peek_round_status') {
           document.getElementById('peekStatusLabel').textContent = ev.status;
@@ -1044,7 +1070,8 @@
         const ev = env.event;
         if (!ev) return;
 
-        if (ev.kind === 'model_reasoning_delta' || ev.kind === 'model_text_delta') {
+        const evType = ev.type || ev.kind;
+        if (evType === 'model_reasoning_delta' || evType === 'model_text_delta') {
           const slot = document.getElementById('liveStreamSlot');
           const txt = document.getElementById('liveStreamText');
           if (slot && txt) {
@@ -1054,7 +1081,14 @@
             const log = document.getElementById('inspectorLog');
             log.scrollTop = log.scrollHeight;
           }
-        } else if (ev.kind === 'turn_completed' || ev.kind === 'tool_call_finished' || ev.kind === 'session_compacted' || ev.kind === 'permission_requested') {
+        } else if (
+          evType === 'turn_completed' ||
+          evType === 'tool_call_finished' ||
+          evType === 'session_compacted' ||
+          evType === 'permission_requested' ||
+          evType === 'activation_completed' ||
+          evType === 'realtime_message_queued'
+        ) {
           liveStreamBuffer = '';
           refreshInspectorSnapshot(agentId, sessionId);
         }

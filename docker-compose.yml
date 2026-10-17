@@ -4,11 +4,12 @@ services:
       context: .
       dockerfile: Dockerfile
     image: ragents-suite:local
+    pull_policy: never
     container_name: ragents-apiserver
     command:
       - ragents
       - apiserver
-      - --listen
+      - --bind
       - 0.0.0.0:8080
       - --db
       - /var/lib/ragents/apiserver.sqlite3
@@ -24,6 +25,7 @@ services:
 
   ragents-daemon:
     image: ragents-suite:local
+    pull_policy: never
     container_name: ragents-daemon
     depends_on:
       - ragents-apiserver
@@ -37,7 +39,7 @@ services:
       - RAGENTS_BASE_URL=${RAGENTS_BASE_URL:-http://host.docker.internal:8000/v1}
       - RAGENTS_API_KEY=${RAGENTS_API_KEY:-sk-placeholder}
       - RAGENTS_MODEL=${RAGENTS_MODEL:-gemini-3.8-flash}
-      - RAGENTS_WORKER_BIN=/usr/local/bin/ragents_core_worker
+      - RAGENTS_WORKER_BIN=/usr/local/bin/ragents-core-worker
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -46,6 +48,7 @@ services:
 
   ragents-chat:
     image: ragents-suite:local
+    pull_policy: never
     container_name: ragents-chat
     depends_on:
       - ragents-apiserver

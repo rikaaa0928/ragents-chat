@@ -11,7 +11,7 @@ env = "docker-compose"
 role = "worker"
 
 #的模型配置支持通过环境变量 RAGENTS_BASE_URL、RAGENTS_API_KEY、RAGENTS_MODEL 动态注入或覆盖
-[models.gemini-3.8-flash]
+[models."gemini-3.8-flash"]
 base_url = "${RAGENTS_BASE_URL}"
 api_key_env = "RAGENTS_API_KEY"
 default_temperature = 0.2
