@@ -1,0 +1,64 @@
+node_id = "node-docker-01"
+server_url = "http://ragents-apiserver:8080"
+executor_mode = "subprocess"
+max_concurrent_runners = 8
+default_system_prompt = "You are a helpful AI assistant running inside the ragents container cluster."
+default_model = "gemini-3.8-flash"
+temp_root_dir = "/var/lib/ragents/tmp"
+
+[labels]
+env = "docker-compose"
+role = "worker"
+
+#的模型配置支持通过环境变量 RAGENTS_BASE_URL、RAGENTS_API_KEY、RAGENTS_MODEL 动态注入或覆盖
+[models.gemini-3.8-flash]
+base_url = "${RAGENTS_BASE_URL}"
+api_key_env = "RAGENTS_API_KEY"
+default_temperature = 0.2
+default_max_output_tokens = 8192
+
+[[extensions]]
+name = "shell"
+path = "/etc/ragents/wasm/ragent_shell_extension.wasm"
+enabled = true
+config = { default_timeout_seconds = 0, max_output_lines = 2000, max_output_bytes = 51200 }
+
+[[extensions]]
+name = "file_editor"
+path = "/etc/ragents/wasm/ragent_file_editor_extension.wasm"
+enabled = true
+config = {}
+
+[[extensions]]
+name = "image_viewer"
+path = "/etc/ragents/wasm/ragent_image_viewer_extension.wasm"
+enabled = true
+config = {}
+
+[[extensions]]
+name = "skills"
+path = "/etc/ragents/wasm/ragent_skills_extension.wasm"
+enabled = true
+config = { include_workspace = true, include_global = false, include_agents_md = true }
+
+[[extensions]]
+name = "compaction"
+path = "/etc/ragents/wasm/ragent_compaction_extension.wasm"
+enabled = true
+config = { enabled = true, trigger_tokens = 64000, keep_recent_tokens = 20000 }
+
+[default_permissions.file_read]
+allow = ["*"]
+default = "allow"
+
+[default_permissions.file_write]
+allow = [".", "/var/lib/ragents/tmp", "/tmp"]
+default = "ask"
+
+[default_permissions.command_work_dir]
+allow = [".", "/var/lib/ragents/tmp", "/tmp"]
+default = "ask"
+
+[default_permissions.http_hosts]
+allow = ["*"]
+default = "allow"

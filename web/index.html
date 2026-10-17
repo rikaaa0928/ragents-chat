@@ -1,0 +1,1157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ragents-chat · AI 多智能体协同聊天室</title>
+  <style>
+    :root {
+      --bg-dark: #0f172a;
+      --bg-panel: #1e293b;
+      --bg-card: #334155;
+      --bg-input: #0f172a;
+      --border: #334155;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --green: #10b981;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --purple: #8b5cf6;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg-dark);
+      color: var(--text-main);
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+    }
+    button {
+      cursor: pointer;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 13px;
+      font-weight: 500;
+      background: var(--accent);
+      color: #fff;
+      transition: opacity 0.15s;
+    }
+    button:hover { opacity: 0.9; }
+    button.secondary { background: var(--bg-card); color: var(--text-main); }
+    button.danger { background: var(--red); }
+    button.success { background: var(--green); }
+    button.warning { background: var(--amber); color: #000; }
+    input, textarea, select {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      color: var(--text-main);
+      border-radius: 6px;
+      padding: 7px 10px;
+      font-size: 13px;
+      outline: none;
+    }
+    input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+
+    /* Three-column layout */
+    .sidebar {
+      width: 260px;
+      background: var(--bg-panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+    .sidebar-header {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .sidebar-header h1 { font-size: 16px; font-weight: 700; letter-spacing: 0.3px; }
+    .room-list { flex: 1; overflow-y: auto; padding: 8px; }
+    .room-item {
+      padding: 10px 12px;
+      border-radius: 8px;
+      margin-bottom: 6px;
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    .room-item:hover { background: rgba(255,255,255,0.04); }
+    .room-item.active {
+      background: rgba(59, 130, 246, 0.16);
+      border-color: var(--accent);
+    }
+    .room-item-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .badge {
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: var(--bg-card);
+      color: var(--text-muted);
+    }
+    .badge.single { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .badge.group { background: rgba(139, 92, 246, 0.2); color: #c4b5fd; }
+    .sidebar-footer {
+      padding: 12px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 8px;
+    }
+    .sidebar-footer button { flex: 1; }
+
+    /* Center Chat Pane */
+    .main-pane {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    .room-header {
+      padding: 12px 18px;
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .room-title-area h2 { font-size: 16px; font-weight: 700; }
+    .room-title-area p { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+    .peek-controls {
+      padding: 8px 18px;
+      background: rgba(30, 41, 59, 0.75);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 14px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .peek-controls label {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      cursor: pointer;
+    }
+    .peek-controls input[type="number"] { width: 58px; padding: 3px 6px; font-size: 12px; }
+    .messages-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .msg-card {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      max-width: 85%;
+      align-self: flex-start;
+    }
+    .msg-card.human {
+      align-self: flex-end;
+      background: rgba(59, 130, 246, 0.18);
+      border-color: rgba(59, 130, 246, 0.45);
+    }
+    .msg-card.manager {
+      border-color: rgba(139, 92, 246, 0.5);
+      background: rgba(139, 92, 246, 0.12);
+    }
+    .msg-card.system {
+      align-self: center;
+      background: rgba(245, 158, 11, 0.12);
+      border-color: rgba(245, 158, 11, 0.4);
+      font-size: 12px;
+      max-width: 92%;
+    }
+    .msg-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+    .msg-sender { font-weight: 700; color: var(--text-main); }
+    .mention-pill {
+      display: inline-block;
+      background: rgba(59, 130, 246, 0.25);
+      color: #93c5fd;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-right: 4px;
+    }
+    .msg-body {
+      font-size: 14px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    /* Composer */
+    .composer-area {
+      padding: 12px 18px;
+      background: var(--bg-panel);
+      border-top: 1px solid var(--border);
+    }
+    .mention-selector-bar {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+    .mention-chip {
+      padding: 3px 9px;
+      border-radius: 999px;
+      background: var(--bg-card);
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 12px;
+      user-select: none;
+      border: 1px solid transparent;
+    }
+    .mention-chip.selected {
+      background: rgba(59, 130, 246, 0.25);
+      color: #93c5fd;
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+    .composer-row {
+      display: flex;
+      gap: 10px;
+    }
+    .composer-row textarea {
+      flex: 1;
+      height: 56px;
+      resize: none;
+    }
+
+    /* RightPane: Agents + Session Inspector */
+    .right-pane {
+      width: 430px;
+      background: var(--bg-panel);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+    .roster-section {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--border);
+      max-height: 40%;
+      overflow-y: auto;
+    }
+    .section-title-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .section-title-row h3 { font-size: 14px; font-weight: 700; }
+    .agent-card {
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.55);
+      border: 1px solid var(--border);
+      margin-bottom: 6px;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .agent-card.selected { border-color: var(--accent); background: rgba(59, 130, 246, 0.14); }
+    .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 5px;
+    }
+    .status-dot.idle { background: var(--green); }
+    .status-dot.thinking { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+    .status-dot.waiting_permission { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+
+    /* Inspector Section */
+    .inspector-section {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      padding: 12px 14px;
+    }
+    .readonly-banner {
+      font-size: 11px;
+      background: rgba(148, 163, 184, 0.12);
+      color: var(--text-muted);
+      padding: 5px 8px;
+      border-radius: 6px;
+      margin-bottom: 8px;
+    }
+    .lineage-bar {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding-bottom: 6px;
+      margin-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .lineage-pill {
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: var(--bg-card);
+      color: var(--text-muted);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .lineage-pill.active { background: var(--accent); color: #fff; }
+    .permission-box {
+      background: rgba(245, 158, 11, 0.15);
+      border: 1px solid var(--amber);
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 10px;
+      font-size: 12px;
+    }
+    .permission-box h4 { color: #fbbf24; margin-bottom: 6px; }
+    .permission-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .permission-actions button { font-size: 11px; padding: 4px 8px; }
+    .inspector-log {
+      flex: 1;
+      overflow-y: auto;
+      background: var(--bg-dark);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .log-entry {
+      margin-bottom: 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px dashed rgba(148, 163, 184, 0.15);
+    }
+    .log-entry .tag { font-weight: 700; margin-right: 6px; }
+    .tag.think { color: #a78bfa; }
+    .tag.tool { color: #38bdf8; }
+    .tag.compact { color: #fbbf24; }
+    .tag.input { color: #34d399; }
+
+    /* Modal */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.65);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      width: 480px;
+      max-width: 94vw;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .modal h3 { font-size: 16px; }
+    .form-row { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <!-- Left Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <h1>💬 ragents-chat</h1>
+      <button onclick="openCreateRoomModal()">+ 新建房间</button>
+    </div>
+    <div id="roomList" class="room-list"></div>
+    <div class="sidebar-footer">
+      <button class="secondary" onclick="openManagerSettingsModal()">⚙️ Manager 设置</button>
+    </div>
+  </aside>
+
+  <!-- Main Chatroom Timeline -->
+  <main class="main-pane">
+    <div class="room-header">
+      <div class="room-title-area">
+        <h2 id="currentRoomTitle">请选择或新建聊天室</h2>
+        <p id="currentRoomDesc"></p>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <span id="peekStatusLabel" style="font-size:12px; color:var(--purple);"></span>
+        <button id="resumeRelayBtn" class="warning" style="display:none;" onclick="resumeRoomRelay()">▶ 继续讨论</button>
+        <button class="danger" onclick="deleteCurrentRoom()">删除房间</button>
+      </div>
+    </div>
+
+    <!-- Real-time Peeking & Turn-Taking Interjection Controls -->
+    <div id="peekControlsBar" class="peek-controls" style="display:none;">
+      <label>
+        <input type="checkbox" id="ctrlPeekEnabled" onchange="saveRoomControls()" />
+        开启空闲窥屏
+      </label>
+      <label>
+        静默秒数
+        <input type="number" id="ctrlPeekIdleSecs" min="1" max="300" onchange="saveRoomControls()" />s
+      </label>
+      <label>
+        消息轮次间隔
+        <input type="number" id="ctrlPeekMsgInterval" min="1" max="50" onchange="saveRoomControls()" />条
+      </label>
+      <label>
+        <input type="checkbox" id="ctrlInterjectEnabled" onchange="saveRoomControls()" />
+        允许主动插嘴
+      </label>
+      <label title="每次窥屏为各Agent生成0~100随机数，低于禁言概率的本轮直接禁言，高于的从高到低轮流窥屏">
+        禁言概率(0-100%)
+        <input type="number" id="ctrlMuteProb" min="0" max="100" onchange="saveRoomControls()" />%
+      </label>
+    </div>
+
+    <div id="messagesContainer" class="messages-container"></div>
+
+    <div class="composer-area">
+      <div id="mentionSelectorBar" class="mention-selector-bar"></div>
+      <div class="composer-row">
+        <textarea id="messageInput" placeholder="输入群聊消息（Enter 发送，Shift+Enter 换行）..." onkeydown="handleComposerKey(event)"></textarea>
+        <button onclick="sendHumanMessage()">发送</button>
+      </div>
+    </div>
+  </main>
+
+  <!-- Right Sidebar: Group Agents + Read-Only Session Inspector -->
+  <aside class="right-pane">
+    <div class="roster-section">
+      <div class="section-title-row">
+        <h3>👥 群内智能体成员</h3>
+        <div style="display:flex; gap:6px;">
+          <button class="secondary" onclick="openRecruitModal()">✨ @Manager 招募</button>
+          <button class="secondary" onclick="openAddAgentModal()">+ 手动添加</button>
+        </div>
+      </div>
+      <div id="agentRosterList"></div>
+    </div>
+
+    <div class="inspector-section">
+      <div class="section-title-row">
+        <h3 id="inspectorTitle">🔍 内部 Session 实时透视</h3>
+        <button id="cancelActivationBtn" class="danger" style="display:none; font-size:11px; padding:4px 8px;" onclick="cancelInspectedAgent()">⛔ 紧急中止执行</button>
+      </div>
+      <div class="readonly-banner">
+        🔒 严格只读模式：此处实时展示 Agent 内部私密思考、工具调用与压缩血缘，禁止在此处私聊；一切对话请回到左侧聊天室。
+      </div>
+      <div id="lineageBar" class="lineage-bar"></div>
+      <div id="permissionBoxContainer"></div>
+      <div id="inspectorLog" class="inspector-log">点击上方任意群内 Agent 即可实时透视其底层 ragents Session。</div>
+    </div>
+  </aside>
+
+  <!-- Auth Login Modal -->
+  <div id="authModal" class="modal-backdrop">
+    <div class="modal">
+      <h3>🔐 输入聊天室访问密钥</h3>
+      <div class="form-row">
+        <label>Access Token / 密码</label>
+        <input type="password" id="authTokenInput" placeholder="请输入服务端配置的访问密钥" />
+      </div>
+      <div class="modal-actions">
+        <button onclick="submitLogin()">解锁进入</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create Room Modal -->
+  <div id="createRoomModal" class="modal-backdrop">
+    <div class="modal">
+      <h3>新建聊天室</h3>
+      <div class="form-row">
+        <label>房间名称</label>
+        <input type="text" id="newRoomName" placeholder="例如：架构设计与代码实现群" />
+      </div>
+      <div class="form-row">
+        <label>房间描述（可选）</label>
+        <input type="text" id="newRoomDesc" placeholder="单聊或群聊协作说明" />
+      </div>
+      <div class="form-row">
+        <label>初始默认 Agent 昵称</label>
+        <input type="text" id="newRoomAgentName" value="Assistant" />
+      </div>
+      <div class="form-row">
+        <label>绑定工作目录（可选，留空则为 Floating 模式）</label>
+        <input type="text" id="newRoomWorkdir" placeholder="/path/to/workspace" />
+      </div>
+      <div class="modal-actions">
+        <button class="secondary" onclick="closeModal('createRoomModal')">取消</button>
+        <button onclick="submitCreateRoom()">创建</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Recruit via @Manager Modal -->
+  <div id="recruitModal" class="modal-backdrop">
+    <div class="modal">
+      <h3>✨ 让聊天室管家 (@Manager) 招募新专家</h3>
+      <div class="form-row">
+        <label>描述你需要的 Agent 角色、专长或任务</label>
+        <textarea id="recruitRequirement" rows="4" placeholder="例如：请帮我招一个专门负责代码安全审查与边界测试的 Reviewer，以及一个负责性能优化的 PerfExpert"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="secondary" onclick="closeModal('recruitModal')">取消</button>
+        <button onclick="submitRecruitAgent()">立即招募</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Manual Add Agent Modal -->
+  <div id="addAgentModal" class="modal-backdrop">
+    <div class="modal">
+      <h3>手动添加群内 Agent</h3>
+      <div class="form-row">
+        <label>昵称（用于 @name 点名，不含空格）</label>
+        <input type="text" id="manualAgentName" placeholder="例如：Reviewer" />
+      </div>
+      <div class="form-row">
+        <label>角色头衔</label>
+        <input type="text" id="manualAgentRole" placeholder="例如：代码审查与测试专家" />
+      </div>
+      <div class="form-row">
+        <label>人设提示词 (System Prompt)</label>
+        <textarea id="manualAgentPrompt" rows="4" placeholder="定义该 Agent 的专业领域与工作职责..."></textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="secondary" onclick="closeModal('addAgentModal')">取消</button>
+        <button onclick="submitManualAgent()">添加入群</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Manager Settings Modal -->
+  <div id="managerSettingsModal" class="modal-backdrop">
+    <div class="modal">
+      <h3>⚙️ 聊天室管家 (@Manager) 与默认模板设置</h3>
+      <div class="form-row">
+        <label>Manager 使用的模型</label>
+        <input type="text" id="mgrModelInput" />
+      </div>
+      <div class="form-row">
+        <label>新建 Agent 默认模型</label>
+        <input type="text" id="mgrDefaultAgentModel" />
+      </div>
+      <div class="form-row">
+        <label>默认绑定节点 ID（可选，Pinned 模式需填）</label>
+        <input type="text" id="mgrDefaultNodeId" />
+      </div>
+      <div class="form-row">
+        <label>默认工作区目录（可选，Pinned 模式需填）</label>
+        <input type="text" id="mgrDefaultWorkdir" />
+      </div>
+      <div class="form-row">
+        <label>Manager 系统提示词</label>
+        <textarea id="mgrSystemPrompt" rows="5"></textarea>
+      </div>
+      <div class="modal-actions">
+        <button class="secondary" onclick="closeModal('managerSettingsModal')">关闭</button>
+        <button onclick="saveManagerSettings()">保存设置</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let authToken = localStorage.getItem('ragents_chat_token') || '';
+    let rooms = [];
+    let currentRoom = null;
+    let currentAgents = [];
+    let currentMessages = [];
+    let selectedMentions = new Set();
+    let roomEventSource = null;
+
+    let inspectedAgent = null;
+    let inspectedSessionId = null;
+    let inspectorEventSource = null;
+    let liveStreamBuffer = '';
+
+    async function apiFetch(path, options = {}) {
+      const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
+      if (authToken) {
+        headers['Authorization'] = `Bearer ${authToken}`;
+      }
+      const res = await fetch(path, Object.assign({}, options, { headers }));
+      if (res.status === 401) {
+        document.getElementById('authModal').classList.add('open');
+        throw new Error('Unauthorized');
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || res.statusText);
+      }
+      return res.json();
+    }
+
+    async function initApp() {
+      try {
+        const st = await fetch('/api/v1/auth/status').then(r => r.json());
+        if (st.auth_required && !st.authenticated) {
+          document.getElementById('authModal').classList.add('open');
+          return;
+        }
+        await refreshRooms();
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function submitLogin() {
+      const tok = document.getElementById('authTokenInput').value.trim();
+      try {
+        const res = await fetch('/api/v1/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: tok })
+        });
+        if (!res.ok) {
+          alert('访问密钥错误');
+          return;
+        }
+        authToken = tok;
+        localStorage.setItem('ragents_chat_token', tok);
+        document.getElementById('authModal').classList.remove('open');
+        await refreshRooms();
+      } catch (e) {
+        alert(e.message);
+      }
+    }
+
+    async function refreshRooms() {
+      rooms = await apiFetch('/api/v1/rooms');
+      renderRoomList();
+      if (!currentRoom && rooms.length > 0) {
+        await selectRoom(rooms[0].room.room_id);
+      } else if (currentRoom) {
+        const stillExists = rooms.find(r => r.room.room_id === currentRoom.room_id);
+        if (stillExists) {
+          await selectRoom(currentRoom.room_id);
+        }
+      }
+    }
+
+    function renderRoomList() {
+      const el = document.getElementById('roomList');
+      if (rooms.length === 0) {
+        el.innerHTML = '<div style="padding:16px; color:var(--text-muted); font-size:13px;">暂无聊天室，点击右上角新建</div>';
+        return;
+      }
+      el.innerHTML = rooms.map(item => {
+        const r = item.room;
+        const count = item.agents.length;
+        const active = currentRoom && currentRoom.room_id === r.room_id ? 'active' : '';
+        const modeBadge = count <= 1
+          ? `<span class="badge single">单聊 (${count})</span>`
+          : `<span class="badge group">群聊 (${count})</span>`;
+        const preview = item.last_message
+          ? `${item.last_message.sender_name}: ${item.last_message.content.slice(0, 28)}`
+          : '暂无消息';
+        return `
+          <div class="room-item ${active}" onclick="selectRoom('${r.room_id}')">
+            <div class="room-item-title">
+              <span># ${escapeHtml(r.name)}</span>
+              ${modeBadge}
+            </div>
+            <div style="font-size:12px; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+              ${escapeHtml(preview)}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function selectRoom(roomId) {
+      const detail = await apiFetch(`/api/v1/rooms/${roomId}`);
+      currentRoom = detail.room;
+      currentAgents = detail.agents;
+      currentMessages = detail.messages;
+
+      // Single-chat default: when there is exactly 1 agent in the room, explicitly pre-select @<SoleAgent>
+      selectedMentions.clear();
+      if (currentAgents.length === 1) {
+        selectedMentions.add(currentAgents[0].name);
+      }
+
+      renderCurrentRoomHeader();
+      renderMessages();
+      renderMentionSelectorBar();
+      renderAgentRoster();
+      subscribeRoomStream(roomId);
+
+      if (currentAgents.length > 0 && (!inspectedAgent || inspectedAgent.room_id !== roomId)) {
+        await inspectAgent(currentAgents[0].agent_id);
+      }
+    }
+
+    function renderCurrentRoomHeader() {
+      if (!currentRoom) return;
+      document.getElementById('currentRoomTitle').textContent = `# ${currentRoom.name}`;
+      document.getElementById('currentRoomDesc').textContent = currentRoom.description || (currentAgents.length === 1 ? '单聊模式（自动显式 @ 唯一智能体，可随时招募更多智能体升级为群聊）' : `多智能体群聊模式（共 ${currentAgents.length} 名智能体 + @Manager）`);
+      document.getElementById('peekControlsBar').style.display = 'flex';
+      document.getElementById('ctrlPeekEnabled').checked = currentRoom.peek_enabled;
+      document.getElementById('ctrlPeekIdleSecs').value = currentRoom.peek_idle_secs;
+      document.getElementById('ctrlPeekMsgInterval').value = currentRoom.peek_msg_interval;
+      document.getElementById('ctrlInterjectEnabled').checked = currentRoom.interject_enabled;
+      document.getElementById('ctrlMuteProb').value = currentRoom.mute_probability;
+      document.getElementById('resumeRelayBtn').style.display =
+        currentRoom.consecutive_agent_msgs >= currentRoom.max_agent_relay_depth ? 'inline-block' : 'none';
+    }
+
+    async function saveRoomControls() {
+      if (!currentRoom) return;
+      const patch = {
+        peek_enabled: document.getElementById('ctrlPeekEnabled').checked,
+        peek_idle_secs: parseInt(document.getElementById('ctrlPeekIdleSecs').value || '2', 10),
+        peek_msg_interval: parseInt(document.getElementById('ctrlPeekMsgInterval').value || '1', 10),
+        interject_enabled: document.getElementById('ctrlInterjectEnabled').checked,
+        mute_probability: parseInt(document.getElementById('ctrlMuteProb').value || '40', 10),
+      };
+      currentRoom = await apiFetch(`/api/v1/rooms/${currentRoom.room_id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(patch)
+      });
+      renderCurrentRoomHeader();
+    }
+
+    async function resumeRoomRelay() {
+      if (!currentRoom) return;
+      currentRoom = await apiFetch(`/api/v1/rooms/${currentRoom.room_id}/resume-relay`, { method: 'POST' });
+      renderCurrentRoomHeader();
+    }
+
+    function renderMentionSelectorBar() {
+      const bar = document.getElementById('mentionSelectorBar');
+      if (!currentRoom) {
+        bar.innerHTML = '';
+        return;
+      }
+      // If 1 agent in room and nothing selected, keep the sole agent selected by default
+      if (currentAgents.length === 1 && selectedMentions.size === 0) {
+        selectedMentions.add(currentAgents[0].name);
+      }
+      const items = [
+        ...currentAgents.map(a => ({ name: a.name, label: `${a.avatar} @${a.name}` })),
+        { name: 'Manager', label: '🎩 @Manager (群管家)' }
+      ];
+      bar.innerHTML = `<span style="color:var(--text-muted);">点名唤醒:</span>` + items.map(it => {
+        const sel = selectedMentions.has(it.name) ? 'selected' : '';
+        return `<span class="mention-chip ${sel}" onclick="toggleMention('${it.name}')">${escapeHtml(it.label)}</span>`;
+      }).join('');
+    }
+
+    function toggleMention(name) {
+      if (selectedMentions.has(name)) {
+        selectedMentions.delete(name);
+      } else {
+        selectedMentions.add(name);
+      }
+      renderMentionSelectorBar();
+    }
+
+    function renderMessages() {
+      const box = document.getElementById('messagesContainer');
+      if (currentMessages.length === 0) {
+        box.innerHTML = '<div style="margin:auto; color:var(--text-muted); font-size:13px;">发送第一条消息开始协作，或 @Manager 招募新专家 Agent</div>';
+        return;
+      }
+      box.innerHTML = currentMessages.map(m => {
+        const cls = m.sender_kind || 'human';
+        const mentionsHtml = (m.mentions || []).map(n => `<span class="mention-pill">@${escapeHtml(n)}</span>`).join('');
+        const timeStr = new Date(m.created_at).toLocaleTimeString();
+        return `
+          <div class="msg-card ${cls}">
+            <div class="msg-meta">
+              <span>#${m.msg_seq}</span>
+              <span class="msg-sender">${escapeHtml(m.sender_name)}</span>
+              <span>${timeStr}</span>
+            </div>
+            <div class="msg-body">${mentionsHtml}${escapeHtml(m.content)}</div>
+          </div>
+        `;
+      }).join('');
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function renderAgentRoster() {
+      const box = document.getElementById('agentRosterList');
+      if (currentAgents.length === 0) {
+        box.innerHTML = '<div style="color:var(--text-muted); font-size:12px;">暂无成员</div>';
+        return;
+      }
+      box.innerHTML = currentAgents.map(a => {
+        const sel = inspectedAgent && inspectedAgent.agent_id === a.agent_id ? 'selected' : '';
+        const stateText = a.runtime_state === 'thinking'
+          ? '🔵 思考/执行中'
+          : (a.runtime_state === 'waiting_permission' ? '🟠 等待权限审批' : '🟢 空闲');
+        return `
+          <div class="agent-card ${sel}" onclick="inspectAgent('${a.agent_id}')">
+            <div>
+              <div style="font-size:13px; font-weight:600;">
+                <span class="status-dot ${a.runtime_state}"></span>
+                ${escapeHtml(a.avatar)} @${escapeHtml(a.name)}
+                <span style="font-size:11px; color:var(--text-muted); font-weight:400;">(${escapeHtml(a.role_title)})</span>
+              </div>
+              <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">
+                ${stateText} · model: ${escapeHtml(a.model)} · 已读 #${a.last_delivered_seq}
+              </div>
+            </div>
+            <button class="secondary" style="font-size:11px; padding:3px 7px;" onclick="event.stopPropagation(); removeAgent('${a.agent_id}')">移除</button>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function subscribeRoomStream(roomId) {
+      if (roomEventSource) {
+        roomEventSource.close();
+      }
+      roomEventSource = new EventSource(`/api/v1/rooms/${roomId}/stream`);
+      roomEventSource.onmessage = (e) => {
+        const ev = JSON.parse(e.data);
+        if (ev.type === 'message_posted') {
+          if (!currentMessages.find(m => m.msg_seq === ev.message.msg_seq)) {
+            currentMessages.push(ev.message);
+            renderMessages();
+          }
+        } else if (ev.type === 'agent_updated') {
+          const idx = currentAgents.findIndex(a => a.agent_id === ev.agent.agent_id);
+          if (idx >= 0) currentAgents[idx] = ev.agent;
+          else currentAgents.push(ev.agent);
+          renderAgentRoster();
+          renderMentionSelectorBar();
+          if (inspectedAgent && inspectedAgent.agent_id === ev.agent.agent_id) {
+            inspectedAgent = ev.agent;
+            renderInspectorHeaderAndLineage();
+            if (ev.agent.runtime_state === 'waiting_permission') {
+              refreshInspectorSnapshot(inspectedAgent.agent_id, inspectedSessionId);
+            }
+          }
+        } else if (ev.type === 'agent_removed') {
+          currentAgents = currentAgents.filter(a => a.agent_id !== ev.agent_id);
+          renderAgentRoster();
+          renderMentionSelectorBar();
+        } else if (ev.type === 'room_updated') {
+          currentRoom = ev.room;
+          renderCurrentRoomHeader();
+        } else if (ev.type === 'peek_round_status') {
+          document.getElementById('peekStatusLabel').textContent = ev.status;
+          setTimeout(() => {
+            if (document.getElementById('peekStatusLabel').textContent === ev.status) {
+              document.getElementById('peekStatusLabel').textContent = '';
+            }
+          }, 3500);
+        } else if (ev.type === 'permission_alert') {
+          if (inspectedAgent && inspectedAgent.agent_id === ev.agent_id) {
+            refreshInspectorSnapshot(ev.agent_id, null);
+          }
+        }
+      };
+    }
+
+    async function sendHumanMessage() {
+      if (!currentRoom) return;
+      const input = document.getElementById('messageInput');
+      const content = input.value.trim();
+      if (!content) return;
+      const mentions = Array.from(selectedMentions);
+      input.value = '';
+      await apiFetch(`/api/v1/rooms/${currentRoom.room_id}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({
+          sender_name: 'Human',
+          content,
+          mentions
+        })
+      });
+      if (currentAgents.length === 1) {
+        selectedMentions.clear();
+        selectedMentions.add(currentAgents[0].name);
+        renderMentionSelectorBar();
+      }
+    }
+
+    function handleComposerKey(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendHumanMessage();
+      }
+    }
+
+    /* Inspector Logic */
+    async function inspectAgent(agentId, sessionId = null) {
+      await refreshInspectorSnapshot(agentId, sessionId);
+      subscribeInspectorStream(agentId, sessionId);
+    }
+
+    async function refreshInspectorSnapshot(agentId, sessionId = null) {
+      const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+      const snap = await apiFetch(`/api/v1/agents/${agentId}/inspector${q}`);
+      inspectedAgent = snap.agent;
+      inspectedSessionId = snap.selected_session_id;
+      liveStreamBuffer = '';
+      renderAgentRoster();
+      renderInspectorHeaderAndLineage();
+      renderPendingPermissions(snap.pending_permissions || [], snap.agent.active_activation_id);
+      renderInspectorHistory(snap.context, snap.events || []);
+    }
+
+    function renderInspectorHeaderAndLineage() {
+      if (!inspectedAgent) return;
+      document.getElementById('inspectorTitle').textContent = `🔍 内部透视: @${inspectedAgent.name}`;
+      document.getElementById('cancelActivationBtn').style.display =
+        inspectedAgent.active_activation_id ? 'inline-block' : 'none';
+
+      const bar = document.getElementById('lineageBar');
+      const pills = [];
+      for (const entry of (inspectedAgent.session_chain || [])) {
+        if (entry.compaction_session_id) {
+          const isCompactSel = inspectedSessionId === entry.compaction_session_id;
+          pills.push(`<span class="lineage-pill ${isCompactSel ? 'active' : ''}" onclick="inspectAgent('${inspectedAgent.agent_id}', '${entry.compaction_session_id}')">📦 Compact #${entry.generation}</span>`);
+        }
+        const isWorkSel = inspectedSessionId === entry.working_session_id;
+        const isLatest = entry.working_session_id === inspectedAgent.active_session_id;
+        pills.push(`<span class="lineage-pill ${isWorkSel ? 'active' : ''}" onclick="inspectAgent('${inspectedAgent.agent_id}', '${entry.working_session_id}')">Gen ${entry.generation}${isLatest ? ' (当前)' : ''}</span>`);
+      }
+      bar.innerHTML = pills.join(' ➔ ');
+    }
+
+    function renderPendingPermissions(perms, activeActId) {
+      const box = document.getElementById('permissionBoxContainer');
+      if (!perms || perms.length === 0) {
+        box.innerHTML = '';
+        return;
+      }
+      box.innerHTML = perms.map(p => {
+        const capStr = JSON.stringify(p.capability);
+        const orig = p.original_path || '';
+        return `
+          <div class="permission-box">
+            <h4>⚠️ 沙箱/WASI 权限审批请求 (${escapeHtml(p.id)})</h4>
+            <div>能力请求: <code>${escapeHtml(capStr)}</code></div>
+            ${orig ? `<div>原始触发路径: <code>${escapeHtml(orig)}</code></div>` : ''}
+            ${p.reason ? `<div>原因: ${escapeHtml(p.reason)}</div>` : ''}
+            <div style="margin-top:6px;">
+              <input type="text" id="permPath_${p.id}" placeholder="可选：自定义授权路径或域名通配符覆盖 (--path)" style="width:100%; font-size:11px;" />
+            </div>
+            <div class="permission-actions">
+              <button class="success" onclick="resolvePermission('${p.activation_id || activeActId}', '${p.id}', 'allow_once')">仅本次</button>
+              <button class="success" onclick="resolvePermission('${p.activation_id || activeActId}', '${p.id}', 'allow_activation')">本轮激活</button>
+              <button class="success" onclick="resolvePermission('${p.activation_id || activeActId}', '${p.id}', 'allow_session')">本会话</button>
+              <button class="success" onclick="resolvePermission('${p.activation_id || activeActId}', '${p.id}', 'allow_workspace')">工作区</button>
+              <button class="success" onclick="resolvePermission('${p.activation_id || activeActId}', '${p.id}', 'allow_node')">全节点</button>
+              <button class="danger" onclick="resolvePermission('${p.activation_id || activeActId}', '${p.id}', 'deny')">拒绝</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function resolvePermission(activationId, requestId, decision) {
+      if (!inspectedAgent) return;
+      const pathInput = document.getElementById(`permPath_${requestId}`);
+      const overridePath = pathInput && pathInput.value.trim() ? pathInput.value.trim() : null;
+      await apiFetch(`/api/v1/agents/${inspectedAgent.agent_id}/approve`, {
+        method: 'POST',
+        body: JSON.stringify({
+          activation_id: activationId,
+          request_id: requestId,
+          decision,
+          override_path: overridePath
+        })
+      });
+      await refreshInspectorSnapshot(inspectedAgent.agent_id, inspectedSessionId);
+    }
+
+    async function cancelInspectedAgent() {
+      if (!inspectedAgent) return;
+      await apiFetch(`/api/v1/agents/${inspectedAgent.agent_id}/cancel`, { method: 'POST' });
+    }
+
+    function renderInspectorHistory(context, events) {
+      const log = document.getElementById('inspectorLog');
+      const blocks = [];
+
+      if (context && context.effective_items) {
+        for (const item of context.effective_items) {
+          if (item.type === 'message') {
+            const role = item.role || 'user';
+            const text = (item.content || []).map(c => c.text || '').join('\n');
+            if (text.startsWith('[Compaction Summary]')) {
+              blocks.push(`<div class="log-entry"><span class="tag compact">[Compaction Summary]</span>${escapeHtml(text)}</div>`);
+            } else {
+              blocks.push(`<div class="log-entry"><span class="tag input">[Context:${escapeHtml(role)}]</span>${escapeHtml(text)}</div>`);
+            }
+          } else if (item.type === 'function_call') {
+            blocks.push(`<div class="log-entry"><span class="tag tool">[ToolCall:${escapeHtml(item.name)}]</span>${escapeHtml(item.arguments || '')}</div>`);
+          } else if (item.type === 'function_call_output') {
+            const out = typeof item.output === 'string' ? item.output : JSON.stringify(item.output);
+            blocks.push(`<div class="log-entry"><span class="tag tool">[ToolResult]</span>${escapeHtml(out.slice(0, 600))}</div>`);
+          }
+        }
+      }
+
+      blocks.push(`<div id="liveStreamSlot" class="log-entry" style="display:none;"><span class="tag think">[Live Stream]</span><span id="liveStreamText"></span></div>`);
+      log.innerHTML = blocks.join('') || '暂无内部记录';
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function subscribeInspectorStream(agentId, sessionId = null) {
+      if (inspectorEventSource) {
+        inspectorEventSource.close();
+      }
+      const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+      inspectorEventSource = new EventSource(`/api/v1/agents/${agentId}/inspector/stream${q}`);
+      inspectorEventSource.onmessage = (e) => {
+        const env = JSON.parse(e.data);
+        const ev = env.event;
+        if (!ev) return;
+
+        if (ev.kind === 'model_reasoning_delta' || ev.kind === 'model_text_delta') {
+          const slot = document.getElementById('liveStreamSlot');
+          const txt = document.getElementById('liveStreamText');
+          if (slot && txt) {
+            slot.style.display = 'block';
+            liveStreamBuffer += (ev.delta || '');
+            txt.textContent = liveStreamBuffer;
+            const log = document.getElementById('inspectorLog');
+            log.scrollTop = log.scrollHeight;
+          }
+        } else if (ev.kind === 'turn_completed' || ev.kind === 'tool_call_finished' || ev.kind === 'session_compacted' || ev.kind === 'permission_requested') {
+          liveStreamBuffer = '';
+          refreshInspectorSnapshot(agentId, sessionId);
+        }
+      };
+    }
+
+    /* Modals */
+    function openCreateRoomModal() { document.getElementById('createRoomModal').classList.add('open'); }
+    function openRecruitModal() { document.getElementById('recruitModal').classList.add('open'); }
+    function openAddAgentModal() { document.getElementById('addAgentModal').classList.add('open'); }
+    function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+    async function submitCreateRoom() {
+      const name = document.getElementById('newRoomName').value.trim() || '新聊天室';
+      const description = document.getElementById('newRoomDesc').value.trim();
+      const default_agent_name = document.getElementById('newRoomAgentName').value.trim() || 'Assistant';
+      const workspace_path = document.getElementById('newRoomWorkdir').value.trim() || null;
+      closeModal('createRoomModal');
+      const created = await apiFetch('/api/v1/rooms', {
+        method: 'POST',
+        body: JSON.stringify({ name, description, default_agent_name, workspace_path })
+      });
+      await refreshRooms();
+      await selectRoom(created.room.room_id);
+    }
+
+    async function deleteCurrentRoom() {
+      if (!currentRoom || !confirm(`确定删除聊天室 "${currentRoom.name}" 及其关联 Session 吗？`)) return;
+      await apiFetch(`/api/v1/rooms/${currentRoom.room_id}`, { method: 'DELETE' });
+      currentRoom = null;
+      await refreshRooms();
+    }
+
+    async function submitRecruitAgent() {
+      if (!currentRoom) return;
+      const requirement = document.getElementById('recruitRequirement').value.trim();
+      if (!requirement) return;
+      closeModal('recruitModal');
+      document.getElementById('recruitRequirement').value = '';
+      await apiFetch(`/api/v1/rooms/${currentRoom.room_id}/recruit`, {
+        method: 'POST',
+        body: JSON.stringify({ requirement })
+      });
+    }
+
+    async function submitManualAgent() {
+      if (!currentRoom) return;
+      const name = document.getElementById('manualAgentName').value.trim();
+      const role_title = document.getElementById('manualAgentRole').value.trim() || 'AI 专家';
+      const persona_prompt = document.getElementById('manualAgentPrompt').value.trim() || `You are @${name}, a specialist AI agent.`;
+      if (!name) return;
+      closeModal('addAgentModal');
+      await apiFetch(`/api/v1/rooms/${currentRoom.room_id}/agents`, {
+        method: 'POST',
+        body: JSON.stringify({ name, role_title, avatar: '🛠️', persona_prompt })
+      });
+    }
+
+    async function removeAgent(agentId) {
+      if (!currentRoom) return;
+      await apiFetch(`/api/v1/rooms/${currentRoom.room_id}/agents/${agentId}`, { method: 'DELETE' });
+    }
+
+    async function openManagerSettingsModal() {
+      const data = await apiFetch('/api/v1/settings/manager');
+      const s = data.settings;
+      document.getElementById('mgrModelInput').value = s.manager_model || '';
+      document.getElementById('mgrDefaultAgentModel').value = s.default_agent_model || '';
+      document.getElementById('mgrDefaultNodeId').value = s.default_node_id || '';
+      document.getElementById('mgrDefaultWorkdir').value = s.default_workspace_root || '';
+      document.getElementById('mgrSystemPrompt').value = s.manager_system_prompt || '';
+      document.getElementById('managerSettingsModal').classList.add('open');
+    }
+
+    async function saveManagerSettings() {
+      await apiFetch('/api/v1/settings/manager', {
+        method: 'PUT',
+        body: JSON.stringify({
+          manager_model: document.getElementById('mgrModelInput').value.trim(),
+          default_agent_model: document.getElementById('mgrDefaultAgentModel').value.trim(),
+          default_node_id: document.getElementById('mgrDefaultNodeId').value.trim() || null,
+          default_workspace_root: document.getElementById('mgrDefaultWorkdir').value.trim() || null,
+          manager_system_prompt: document.getElementById('mgrSystemPrompt').value.trim()
+        })
+      });
+      closeModal('managerSettingsModal');
+    }
+
+    function escapeHtml(str) {
+      return String(str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    initApp();
+  </script>
+</body>
+</html>

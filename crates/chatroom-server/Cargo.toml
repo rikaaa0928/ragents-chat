@@ -1,0 +1,35 @@
+[package]
+name = "chatroom-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ragents-chat"
+path = "src/main.rs"
+
+[dependencies]
+ragents-protocol = { git = "https://github.com/rikaaa0928/ragents.git", branch = "main" }
+ragents-client = { git = "https://github.com/rikaaa0928/ragents.git", branch = "main" }
+openresponses-rust = "2026.7.26"
+tokio = { version = "1.0", features = ["full"] }
+tokio-util = "0.7"
+futures = "0.3"
+axum = { version = "0.8", features = ["ws", "macros"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.11", features = ["v4", "v7", "serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+rand = "0.8"
+
+[dev-dependencies]
+ragents-apiserver = { git = "https://github.com/rikaaa0928/ragents.git", branch = "main" }
+ragents-daemon = { git = "https://github.com/rikaaa0928/ragents.git", branch = "main" }
+ragents-core = { git = "https://github.com/rikaaa0928/ragents.git", branch = "main" }
+async-trait = "0.1"
+tempfile = "3.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

@@ -1,0 +1,77 @@
+services:
+  ragents-apiserver:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ragents-suite:local
+    container_name: ragents-apiserver
+    command:
+      - ragents
+      - apiserver
+      - --listen
+      - 0.0.0.0:8080
+      - --db
+      - /var/lib/ragents/apiserver.sqlite3
+      - --authn-wasm
+      - /etc/ragents/wasm/ragent_authn_extension.wasm
+    environment:
+      - RAGENTS_AUTH_TOKEN=${RAGENTS_AUTH_TOKEN:-ragents-dev-cluster-token}
+    volumes:
+      - ./bundle:/etc/ragents:ro
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  ragents-daemon:
+    image: ragents-suite:local
+    container_name: ragents-daemon
+    depends_on:
+      - ragents-apiserver
+    command:
+      - ragents
+      - daemon
+      - --config
+      - /etc/ragents/daemon.toml
+    environment:
+      - RAGENTS_AUTH_TOKEN=${RAGENTS_AUTH_TOKEN:-ragents-dev-cluster-token}
+      - RAGENTS_BASE_URL=${RAGENTS_BASE_URL:-http://host.docker.internal:8000/v1}
+      - RAGENTS_API_KEY=${RAGENTS_API_KEY:-sk-placeholder}
+      - RAGENTS_MODEL=${RAGENTS_MODEL:-gemini-3.8-flash}
+      - RAGENTS_WORKER_BIN=/usr/local/bin/ragents_core_worker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./bundle:/etc/ragents:ro
+    restart: unless-stopped
+
+  ragents-chat:
+    image: ragents-suite:local
+    container_name: ragents-chat
+    depends_on:
+      - ragents-apiserver
+      - ragents-daemon
+    command:
+      - ragents-chat
+      - --listen
+      - 0.0.0.0:8090
+      - --callback-url
+      - http://ragents-chat:8090
+      - --db
+      - /var/lib/ragents-chat/chatroom.sqlite
+      - --ragents-url
+      - http://ragents-apiserver:8080
+      - --chatroom-wasm
+      - /etc/ragents/wasm/ragent_chatroom_extension.wasm
+      - --compaction-wasm
+      - /etc/ragents/wasm/ragent_compaction_extension.wasm
+      - --extensions-dir
+      - /etc/ragents/wasm
+    environment:
+      - RAGENTS_AUTH_TOKEN=${RAGENTS_AUTH_TOKEN:-ragents-dev-cluster-token}
+      - RAGENTS_CHAT_AUTH_TOKEN=${RAGENTS_CHAT_AUTH_TOKEN:-}
+      - RAGENTS_MODEL=${RAGENTS_MODEL:-gemini-3.8-flash}
+    volumes:
+      - ./bundle:/etc/ragents:ro
+    ports:
+      - "8090:8090"
+    restart: unless-stopped

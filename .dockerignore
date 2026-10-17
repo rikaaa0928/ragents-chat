@@ -1,0 +1,8 @@
+target
+extensions/*/target
+.git
+.ragents-chat
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
