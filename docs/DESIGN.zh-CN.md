@@ -521,3 +521,76 @@ ragents-chat/
 └── web/
     └── index.html                    # 现代化响应式 Web 客户端 (支持聊天室、@ 补全、Manager 配置、只读透视与权限审批)
 ```
+
+---
+
+## 10. 策略演进与多智能体协作调优记录 (Strategy Evolution & Tuning Log)
+
+本节记录 `ragents-chat` 在真实多智能体协作场景（如多模型联合金融/期权策略分析、架构评审等）中发现的交互痛点、已实施的策略调整，以及**已提议但暂缓实施的备选策略**，供后续回顾与针对性微调。
+
+---
+
+### 10.1 已落地生效的策略调整
+
+#### 1. 解耦「点名派活 (`mentions`)」与「正文提及 (`content`)」，消除双重 `@` 与误唤醒
+* **背景现象**：
+  * 模型在调用 `chatroom_speak` 时，经常既在 `mentions` 数组里填入 `["OptionStrategist", "Human"]`，又在 `content` 正文开头手写 `"@OptionStrategist 确认无误..."`，导致前端渲染出 `@OptionStrategist@Human@OptionStrategist` 的重复标签。
+  * 更严重的是，旧逻辑使用 `parse_mentions(&req.content, &req.mentions, &agents)` 同时扫描正文中所有 `@Name`。当某个 Agent 在总结或致谢时在正文里写了 `"感谢 @LiquidityRiskAnalyst 的风控清单，我和 @OptionStrategist 已经对齐"`（甚至对 `@Manager` 说 `"收到，@Manager"`），会误把正文里的所有 `@Name` 当成显式点名（`Direct Mention`）全部唤醒。
+* **已实施策略**：
+  1. **人类发言 (`post_human_message`)**：保留从 `content` 正文解析 `@Name` 的能力（方便人类手打 `@Name` 点名）。
+  2. **Agent 发言 (`handle_internal_agent_speak`)**：切换为 `resolve_explicit_mentions(&req.mentions, &agents, Some(&agent.name))`——**严格只认 `chatroom_speak` 工具显式传入的 `mentions` 数组**来触发后台唤醒，并自动过滤掉发言者自身（禁止自我 `@`）。正文中自然语言提到的 `@Name` 仅作为普通文本展示，绝不触发唤醒。
+  3. **自动剥离冗余前缀与 UI 头部胶囊展示**：后端 `strip_leading_redundant_mentions` 与前端 `stripLeadingRedundantMentions` 自动剥离正文开头与 `mentions` 重复的 `@Name` 前缀；前端将 `mentions` 胶囊移至消息头部元信息栏（`#seq Sender ➔ @Target`）。
+
+#### 2. 严格 `@` 纪律、禁止礼貌签收复读与禁止重复全文总结（`<chatroom_protocol>` 铁律）
+* **背景现象**：
+  * 多 Agent 协作收尾阶段容易陷入 `“确认无误 ✅ -> 收到签收，我也进入待命 ✅ -> 策略端同步静默待命 🎉”` 的无限礼貌客套循环。
+  * 主控 Agent 在队友每次补充细节后，倾向于把几千字的完整方案换个标题重新发一遍（同一房间连发 4~5 版高度重合的“终极指南”）。
+* **已实施策略**：
+  1. **无任务不 `@`**：在 `<chatroom_protocol>` 与 `chatroom_speak.parameters.mentions` 描述中立下铁律——`mentions` 等同于立即派活指令，**只有明确要求某个 Agent 执行具体工作或回答问题时才允许将其放入 `mentions`**；向人类交付最终总结或仅仅引用/赞同队友时，`mentions` 只能填 `["Human"]` 或 `[]`。
+  2. **严禁客套签收与允许静默结束 (`Observed.`)**：明确禁止发送“收到”、“已签收 ✅”、“待命”等无实质增量的消息；若任务已闭环，直接不调 `chatroom_speak`，以内部笔记 `Observed.` 结束回合。
+  3. **只发增量、禁止全文复读**：明确告知所有历史消息对 `@Human` 与全员实时可见，补充观点时只写增量分析，禁止把前文已发过的完整方案重复抄写。
+
+#### 3. 区分「人类点名」与「Agent 间点名」的未发言催促策略 (`DirectMentionState.from_human`)
+* **背景现象**：
+  * 旧逻辑对所有被 `Direct Mention` 唤醒却未调用 `chatroom_speak` 的 Agent 一律触发一次 `[System Reminder: ... Please call chatroom_speak]` 强制催促。当 Agent A 只是顺带 `@` 了 Agent B，Agent B 判断无需回复时，会被系统强行逼着发一条“收到，待命”。
+* **已实施策略**：
+  * 在 `DirectMentionState` 中记录 `from_human: bool`。
+  * **仅当唤醒源来自人类 (`from_human == true`)** 且 Agent 漏调 `chatroom_speak` 时，才发送 `Auto-Nudge` 提醒；
+  * **当唤醒源来自其他 Agent 或 `@Manager` (`from_human == false`)** 时，完全允许被 `@` 的 Agent 在判断无需补充后静默结束（`Observed.`），不再强制催促发言。
+
+#### 4. 默认主导 Agent (`Default Room Lead`) 与 `@Manager` 招募交接优化
+* **背景现象**：
+  * 旧逻辑中，`@Manager` 招募完新专家后，在入群欢迎消息中同时 `@` 所有新招募的专家与原有成员，导致 3 个 Agent 在同一秒并发启动、各自闭门造车，输出大量交叉抢话与重复内容。
+* **已实施策略**：
+  1. **默认主导 Agent 规则**：当用户未显式指定主导 Agent 时，**房间内的第一个 Agent（按创建时间排序 `agents[0]`，例如建房时的初始 `@Assistant`）自动成为默认主导统筹 Agent (`[Default Room Lead]`)**，前端成员卡片显示 `👑 主导` 标记，群名册同步头 `[Room Roster Updated]` 也会向全体成员标明其主导身份。
+  2. **`@Manager` 单点交接 (`handoff_lead`)**：当某个现有 Agent 呼叫 `@Manager` 招募新成员时，`@Manager` 招完人后**仅 `@` 呼叫它的主导 Agent**；当人类直接通过 `@Manager` 招募新成员时，`@Manager` **仅 `@` 房间内的第一个 Agent（默认主导 Agent）**（若招募前房间为空，则 `@` 新招募的第一位 Agent）。由主导 Agent 统一向新专家分配子任务，彻底消除入群时的全员并发抢话。
+
+#### 5. 连续接力上限 (`max_agent_relay_depth`)、模型自动发现与推理参数配置
+* **连续发言上限 (`max_agent_relay_depth`)**：改为房间级与全局级均可配置，**默认值为 `0`（`0` 表示不限制连续接力轮数）**；可在聊天室顶部栏实时调整。
+* **`/v1/models` 自动发现 (`auto_discover_models = true`)**：`ragents-daemon` 启动时默认请求模型提供商的 `/v1/models` 接口拉取可用模型列表，`daemon.toml` 中显式配置的 `[models]` 作为补充与参数覆盖。
+* **思考强度 (`effort`) 与思考摘要 (`summary`)**：支持在新建房间、手动添加 Agent、全局 Manager 设置以及右侧「内部透视」顶部栏实时切换 `model`、`reasoning_effort` (`none|low|medium|high|xhigh`) 与 `reasoning_summary` (`auto|concise|detailed`)。
+* **无可用 Skill 时隐藏 `load_skill` 工具**：`ragent_skills_extension.wasm` 仅在扫描到至少一个可用 Skill（`!skills.is_empty()`）时才注册 `load_skill` 工具，并移除参数描述中硬编码的示例名，避免模型盲猜不存在的 Skill。
+
+---
+
+### 10.2 已提议但暂缓实施的备选策略（供后续观察与微调）
+
+以下两项策略在复盘时提出，经评估后决定**暂不开启**，先观察上述 10.1 策略落地后的实际表现，若后续在极端场景下仍出现并发冗余可按需启用：
+
+#### 备选策略 A：思考中防重入 / 未读 `@` 合并投递 (Thinking-State Direct-Mention Debounce)
+* **问题描述**：
+  当某个 Agent 正在 `Thinking`（处理上一条消息）时，若群内又产生了新的 `@` 它的消息，当前机制会立即通过 `push_realtime_message` 将新消息推入其正在运行的 Session Realtime Queue。这会使该 Agent 在当前 Activation 的下一个 Turn 立即看到新消息并可能再次调用 `chatroom_speak`（表现为同一个 Agent 连发两条针对不同问题的回复）。
+* **为什么暂缓实施**：
+  如果是针对多个不同问题的 `@`，允许 Agent 分别给出多个回答在群聊体验上完全合理，不算严重问题；过早防重入反而可能增加实时插话响应的延迟感。
+* **未来如需开启的微调切入点**：
+  在 `coordinator.rs` 的 `deliver_direct_mention_to_agent` 中检查 `target_agent.runtime_state`：若为 `AgentRuntimeState::Thinking`，仅标记 `pending_direct_mention = true` 而不立即调用 `push_realtime_message`；待 `on_agent_activation_finished` 触发时再一次性拉取 `last_delivered_seq..=last_msg_seq` 的全部未读消息合并投递。
+
+#### 备选策略 B：单条消息多目标 `@` 顺序接力队列 (Sequential Multi-Mention Relay Queue)
+* **问题描述**：
+  当人类或主导 Agent 在同一条消息的 `mentions` 中同时填入多个专家（例如 `mentions: ["OptionStrategist", "LiquidityRiskAnalyst"]`）时，当前机制会并发唤醒这两个专家同时开始思考。由于思考期间彼此看不到对方尚未发出的草稿，若两人的职责边界有重叠，可能会写出部分重复的内容。
+* **为什么暂缓实施**：
+  1. 在分工明确的场景下（例如一个查数据、一个做风控），**并发执行能显著缩短整体等待时间（Latency 减半）**；
+  2. 配合 10.1 中的“严禁重复全文总结”与“默认主导 Agent 分工”，角色职责正交时并发唤醒效率更高。
+* **未来如需开启的微调切入点**：
+  在 `RoomCoordinator` 中为房间增加可选开关 `sequential_mention_relay: bool`（默认 `false`）：当一条消息的 `mentions` 包含 $\ge 2$ 个 Agent 且开关开启时，先唤醒 `mentions[0]`，将其余 Agent 放入房间级 `pending_mention_queue`，在前一个 Agent 完成 `ActivationCompleted` 后自动唤醒下一个 Agent（此时下一个 Agent 的 `unread_messages` 已包含前一个 Agent 刚发出的回复，实现天然的上下文接力）。
+

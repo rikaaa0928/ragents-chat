@@ -963,6 +963,23 @@
       renderMentionSelectorBar();
     }
 
+    function stripLeadingRedundantMentions(content, mentions) {
+      let rest = String(content || '').trimStart();
+      if (!mentions || mentions.length === 0) return rest;
+      const lowerSet = new Set(mentions.map(n => String(n).toLowerCase()));
+      while (rest.startsWith('@')) {
+        const match = rest.match(/^@([A-Za-z0-9_-]+)([\s,，:：]*)/);
+        if (!match) break;
+        const tag = match[1].toLowerCase();
+        if (lowerSet.has(tag)) {
+          rest = rest.slice(match[0].length);
+        } else {
+          break;
+        }
+      }
+      return rest || String(content || '');
+    }
+
     function renderMessages() {
       const box = document.getElementById('messagesContainer');
       if (currentMessages.length === 0) {
@@ -971,16 +988,21 @@
       }
       box.innerHTML = currentMessages.map(m => {
         const cls = m.sender_kind || 'human';
-        const mentionsHtml = (m.mentions || []).map(n => `<span class="mention-pill">@${escapeHtml(n)}</span>`).join('');
+        const mentions = m.mentions || [];
+        const mentionsHtml = mentions.length > 0
+          ? `<span style="color:var(--text-muted); margin:0 2px;">➔</span>` + mentions.map(n => `<span class="mention-pill">@${escapeHtml(n)}</span>`).join('')
+          : '';
+        const cleanedBody = stripLeadingRedundantMentions(m.content, mentions);
         const timeStr = new Date(m.created_at).toLocaleTimeString();
         return `
           <div class="msg-card ${cls}">
-            <div class="msg-meta">
+            <div class="msg-meta" style="flex-wrap:wrap;">
               <span>#${m.msg_seq}</span>
               <span class="msg-sender">${escapeHtml(m.sender_name)}</span>
-              <span>${timeStr}</span>
+              ${mentionsHtml}
+              <span style="margin-left:auto;">${timeStr}</span>
             </div>
-            <div class="msg-body">${mentionsHtml}${escapeHtml(m.content)}</div>
+            <div class="msg-body">${escapeHtml(cleanedBody)}</div>
           </div>
         `;
       }).join('');
@@ -993,7 +1015,7 @@
         box.innerHTML = '<div style="color:var(--text-muted); font-size:12px;">暂无成员</div>';
         return;
       }
-      box.innerHTML = currentAgents.map(a => {
+      box.innerHTML = currentAgents.map((a, idx) => {
         const sel = inspectedAgent && inspectedAgent.agent_id === a.agent_id ? 'selected' : '';
         const stateText = a.runtime_state === 'thinking'
           ? '🔵 思考/执行中'
@@ -1006,12 +1028,15 @@
         const reasoningTag = (a.reasoning_effort || a.reasoning_summary)
           ? ` · 🧠 ${escapeHtml(a.reasoning_effort || 'default')}/${escapeHtml(a.reasoning_summary || 'default')}`
           : '';
+        const leadBadge = (idx === 0 && currentAgents.length > 1)
+          ? `<span style="font-size:10px; background:rgba(59,130,246,0.15); color:var(--accent); padding:1px 5px; border-radius:4px; margin-left:4px;" title="默认主导统筹 Agent">👑 主导</span>`
+          : '';
         return `
           <div class="agent-card ${sel}" onclick="inspectAgent('${a.agent_id}')">
             <div style="min-width:0; flex:1;">
               <div style="font-size:13px; font-weight:600;">
                 <span class="status-dot ${a.runtime_state}"></span>
-                ${escapeHtml(a.avatar)} @${escapeHtml(a.name)}
+                ${escapeHtml(a.avatar)} @${escapeHtml(a.name)}${leadBadge}
                 <span style="font-size:11px; color:var(--text-muted); font-weight:400;">(${escapeHtml(a.role_title)})</span>
               </div>
               <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">

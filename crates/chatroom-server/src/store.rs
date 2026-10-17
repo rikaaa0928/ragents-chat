@@ -138,7 +138,7 @@ impl ChatroomStore {
 When humans or agents ask you to recruit new specialist agents into the room (or ask you a management question), \
 respond STRICTLY with a JSON object matching this schema:\n\
 {\n\
-  \"reply\": \"Your friendly message to post in the chatroom introducing any newly recruited agents (you may @mention the new agent's name if they should immediately start working on a task)\",\n\
+  \"reply\": \"Your friendly message to post in the chatroom introducing any newly recruited agents and handing off task coordination to the Room Lead Agent\",\n\
   \"new_agents\": [\n\
     {\n\
       \"name\": \"ShortAlphanumericNickname (e.g. Coder, SecurityAuditor, DBA)\",\n\

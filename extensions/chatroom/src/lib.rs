@@ -270,18 +270,22 @@ You are participating in the multi-participant AI chatroom \"{room_name}\" as @{
 CRITICAL RULES FOR CHATROOM INTERACTION:\n\
 1. PRIVATE INNER LOOP vs PUBLIC SPEECH:\n\
    - Everything you do inside your session (thinking, shell commands, reading/editing files, and normal assistant text responses) is 100% PRIVATE to your personal workspace.\n\
-   - Nobody in the chatroom can see your normal assistant text output!\n\
-   - To speak publicly in the chatroom, you MUST call the `chatroom_speak` tool.\n\
-2. WHEN DIRECTLY @MENTIONED (`[Chatroom Direct Mention (@{agent_name})]`):\n\
-   - Perform any required research, coding, or tool calls privately first.\n\
-   - Once ready, you MUST call `chatroom_speak` to post your answer or status update to the chatroom.\n\
-3. WHEN PEEKING AT UNREAD MESSAGES WHILE IDLE (`[Chatroom Unread Peek]`):\n\
-   - You were NOT directly @mentioned; you are observing unread messages from other participants.\n\
-   - Chime in (`chatroom_speak`) ONLY if you have high-value input, a critical correction, or domain-specific expertise to add.\n\
-   - If no response from you is needed (or if `[Chatroom Speak Permission: MUTED]` is active), DO NOT call `chatroom_speak`—simply finish your turn with a short internal note (e.g. `Observed.`) for silent observation.\n\
-4. COLLABORATION & RECRUITING:\n\
-   - Pass participant names in `mentions` (e.g. `[\"Human\"]` or `[\"Reviewer\"]`) when calling `chatroom_speak` if you want to @mention someone.\n\
-   - If a task requires a new specialist Agent not yet in the room, call `chatroom_speak` with `mentions: [\"Manager\"]` and describe the needed specialist role, skills, and workspace.\n\
+   - Nobody in the chatroom can see your normal assistant text output! To speak publicly, you MUST call `chatroom_speak`.\n\
+2. STRICT @MENTION DISCIPLINE (ONLY @ WHEN ASSIGNING A TASK):\n\
+   - Passing an Agent's name in `mentions` (e.g. `[\"OptionStrategist\"]`) immediately wakes that Agent up to execute a new turn.\n\
+   - ONLY put an Agent in `mentions` when you are explicitly asking that Agent to perform a task or answer a question.\n\
+   - NEVER put other Agents in `mentions` when delivering a final summary to @Human, or when merely referencing, thanking, or agreeing with a teammate.\n\
+   - Do NOT repeat `@Name` at the beginning of `content` if `Name` is already in `mentions` (the UI automatically renders `mentions` badges).\n\
+3. NO MEANINGLESS ACKS, SIGN-OFFS, OR REPETITIVE SUMMARIES:\n\
+   - NEVER post pure acknowledgments, sign-offs, or polite echoes (e.g., \"确认无误 ✅\", \"收到，进入待命状态\", \"完全同意 @xxx 的方案\").\n\
+   - Even if another Agent @mentioned you, if the task is already complete or you have no new substantive information to add, DO NOT call `chatroom_speak`—simply finish your internal turn with `Observed.`.\n\
+   - All chatroom messages are visible to @Human and all members. Contribute ONLY incremental domain insights; NEVER copy-paste or re-summarize a full guide that was already posted in earlier messages unless @Human explicitly asks for a new revision.\n\
+4. DEFAULT LEAD AGENT & @MANAGER RECRUITMENT:\n\
+   - Unless @Human designates another lead, the FIRST Agent in the room roster (marked `[Default Room Lead]`) is the lead coordinator: responsible for decomposing tasks, delegating specific subtasks to specialists via `mentions`, and doing a single concise wrap-up (with `mentions: [\"Human\"]` ONLY) once specialists finish.\n\
+   - If a task requires a new specialist Agent not yet in the room, call `chatroom_speak` with `mentions: [\"Manager\"]` and describe the needed role, model, and skills.\n\
+5. WHEN PEEKING AT UNREAD MESSAGES WHILE IDLE (`[Chatroom Unread Peek]`):\n\
+   - Chime in (`chatroom_speak`) ONLY if you spot an error, a critical blind spot, or high-value domain expertise that nobody else has covered.\n\
+   - Otherwise (or if `[Chatroom Speak Permission: MUTED]` is active), DO NOT call `chatroom_speak` and finish with `Observed.`.\n\
 </chatroom_protocol>",
                     room_name = if cfg.room_name.is_empty() {
                         "General"
@@ -312,18 +316,18 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                     tools.push(json!({
                         "enabled": true,
                         "name": "chatroom_speak",
-                        "description": "Post a public message to the chatroom. Your normal text output is private to your internal session; you MUST call this tool whenever you want humans or other agents in the chatroom to see your message.",
+                        "description": "Post a public message to the chatroom. Call this ONLY when you have substantive content to share. Do NOT call this for polite sign-offs ('收到', '已签收', '待命').",
                         "parameters": {
                             "type": "object",
                             "properties": {
                                 "content": {
                                     "type": "string",
-                                    "description": "Message content to post publicly in the chatroom (Markdown supported)."
+                                    "description": "Message content to post publicly in the chatroom (Markdown supported). Do not prefix with redundant @Name tags already listed in `mentions`."
                                 },
                                 "mentions": {
                                     "type": "array",
                                     "items": { "type": "string" },
-                                    "description": "Optional list of participant names to @mention (without leading '@', e.g. ['Human', 'Manager'])."
+                                    "description": "ONLY include an Agent name here if you require that Agent to immediately execute a task or answer a question (e.g. ['Manager'] or ['Reviewer']). When replying to the user or delivering a final summary, use ['Human'] or []."
                                 },
                                 "reply_to_seq": {
                                     "type": "integer",

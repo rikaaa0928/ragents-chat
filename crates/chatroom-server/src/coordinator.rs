@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 struct DirectMentionState {
+    from_human: bool,
     spoke: bool,
     nudged: bool,
 }
@@ -314,15 +315,16 @@ impl RoomCoordinator {
     }
 
     async fn on_agent_activation_finished(&self, agent: &RoomAgent, completed_ok: bool) {
-        // 1. Check Direct-@ Auto-Nudge: if agent was explicitly @mentioned, completed without error,
+        // 1. Check Direct-@ Auto-Nudge: if agent was explicitly @mentioned by a Human, completed without error,
         //    and forgot to call `chatroom_speak`, send 1 lightweight reminder!
+        //    (When @mentioned by another Agent, silent observation `Observed.` is allowed to avoid polite ack loops.)
         let should_nudge = {
             let mut dm_guard = self
                 .direct_mentions
                 .lock()
                 .expect("direct_mentions mutex poisoned");
             if let Some(state) = dm_guard.get_mut(&agent.agent_id) {
-                if completed_ok && !state.spoke && !state.nudged {
+                if completed_ok && state.from_human && !state.spoke && !state.nudged {
                     state.nudged = true;
                     true
                 } else {
@@ -792,7 +794,8 @@ impl RoomCoordinator {
             .store
             .list_room_agents(&req.room_id)
             .map_err(|e| (500, e.to_string()))?;
-        let mentions = parse_mentions(&req.content, &req.mentions, &agents);
+        let mentions = resolve_explicit_mentions(&req.mentions, &agents, Some(&agent.name));
+        let cleaned_content = strip_leading_redundant_mentions(&req.content, &mentions);
 
         // Mark that this agent has spoken in its current turn
         {
@@ -826,7 +829,7 @@ impl RoomCoordinator {
                 SenderKind::Agent,
                 &agent.agent_id,
                 &agent.name,
-                req.content,
+                cleaned_content,
                 mentions,
                 req.reply_to_seq,
                 Some(agent.active_session_id),
@@ -904,13 +907,25 @@ impl RoomCoordinator {
                 let coord = self.clone();
                 let room_id = room.room_id.clone();
                 let req_text = msg.content.clone();
+                let caller_agent = if msg.sender_kind == SenderKind::Agent {
+                    Some(msg.sender_name.clone())
+                } else {
+                    None
+                };
                 tokio::spawn(async move {
-                    let _ = recruit_agents_via_manager(&coord, &room_id, &req_text).await;
+                    let _ = recruit_agents_via_manager(
+                        &coord,
+                        &room_id,
+                        &req_text,
+                        caller_agent.as_deref(),
+                    )
+                    .await;
                 });
             }
 
             // 2. Wake up any explicitly @mentioned RoomAgents immediately via `push_realtime_message`
             let mut mentioned_agent_ids = HashSet::new();
+            let from_human = msg.sender_kind == SenderKind::Human;
             for mention_name in &msg.mentions {
                 if let Some(target_agent) = agents
                     .iter()
@@ -921,7 +936,7 @@ impl RoomCoordinator {
                     }
                     mentioned_agent_ids.insert(target_agent.agent_id.clone());
                     let _ = self
-                        .deliver_direct_mention_to_agent(&room, &agents, target_agent)
+                        .deliver_direct_mention_to_agent(&room, &agents, target_agent, from_human)
                         .await;
                 }
             }
@@ -938,6 +953,7 @@ impl RoomCoordinator {
         room: &Room,
         all_agents: &[RoomAgent],
         target_agent: &RoomAgent,
+        from_human: bool,
     ) -> anyhow::Result<()> {
         let unread = self
             .store
@@ -970,6 +986,7 @@ impl RoomCoordinator {
             dm_guard.insert(
                 target_agent.agent_id.clone(),
                 DirectMentionState {
+                    from_human,
                     spoke: false,
                     nudged: false,
                 },
@@ -1005,7 +1022,10 @@ impl RoomCoordinator {
         let Ok(Some(room)) = self.store.get_room(room_id) else {
             return;
         };
-        if !room.peek_enabled || room.consecutive_agent_msgs >= room.max_agent_relay_depth {
+        if !room.peek_enabled
+            || (room.max_agent_relay_depth > 0
+                && room.consecutive_agent_msgs >= room.max_agent_relay_depth)
+        {
             return;
         }
 
@@ -1047,7 +1067,10 @@ impl RoomCoordinator {
         let Ok(Some(room)) = self.store.get_room(room_id) else {
             return;
         };
-        if !room.peek_enabled || room.consecutive_agent_msgs >= room.max_agent_relay_depth {
+        if !room.peek_enabled
+            || (room.max_agent_relay_depth > 0
+                && room.consecutive_agent_msgs >= room.max_agent_relay_depth)
+        {
             return;
         }
 
@@ -1114,7 +1137,10 @@ impl RoomCoordinator {
             let Ok(Some(room)) = self.store.get_room(room_id) else {
                 return;
             };
-            if !room.peek_enabled || room.consecutive_agent_msgs >= room.max_agent_relay_depth {
+            if !room.peek_enabled
+                || (room.max_agent_relay_depth > 0
+                    && room.consecutive_agent_msgs >= room.max_agent_relay_depth)
+            {
                 return;
             }
             let Ok(all_agents) = self.store.list_room_agents(room_id) else {
@@ -1269,8 +1295,15 @@ fn format_delivery_payload(
             "Human (人类用户)".to_string(),
             "@Manager (聊天室管家)".to_string(),
         ];
-        for ag in all_agents {
-            members.push(format!("@{} ({})", ag.name, ag.role_title));
+        for (idx, ag) in all_agents.iter().enumerate() {
+            if idx == 0 && all_agents.len() > 1 {
+                members.push(format!(
+                    "@{} ({} [Default Room Lead / 默认主导统筹])",
+                    ag.name, ag.role_title
+                ));
+            } else {
+                members.push(format!("@{} ({})", ag.name, ag.role_title));
+            }
         }
         out.push_str(&format!(
             "[Room Roster Updated (v{}): {}]\n\n",
@@ -1299,9 +1332,15 @@ fn format_delivery_payload(
             ));
             out.push_str("[Chatroom Speak Permission: ALLOWED]\n");
             out.push_str(&format_single_room_message(last_msg));
-            out.push_str(
-                "\n\n(Hint: Complete any private tool actions in your session, then you MUST call `chatroom_speak` to reply in the chatroom.)",
-            );
+            if last_msg.sender_kind == SenderKind::Human {
+                out.push_str(
+                    "\n\n(Hint: Complete any private tool actions in your session, then you MUST call `chatroom_speak` to reply in the chatroom. Do NOT put other agents in `mentions` unless you explicitly need them to execute a task.)",
+                );
+            } else {
+                out.push_str(
+                    "\n\n(Hint: You were @mentioned by another participant. If you were assigned a specific task or question, complete your work and call `chatroom_speak` (contribute only incremental content—never repeat full summaries already posted). If the task is already complete or they were only thanking/signing off, DO NOT call `chatroom_speak`—finish silently with `Observed.`. Only put another agent in `mentions` if you require them to perform a follow-up task.)",
+                );
+            }
         }
         DeliveryMode::PeekAllowed { roll } => {
             out.push_str(&format!(
@@ -1355,6 +1394,81 @@ fn format_single_room_message(m: &RoomMessage) -> String {
         "[#{} | {} | {}{}{}]: {}",
         m.msg_seq, time_str, m.sender_name, mention_part, reply_part, m.content
     )
+}
+
+pub fn resolve_explicit_mentions(
+    explicit_mentions: &[String],
+    room_agents: &[RoomAgent],
+    exclude_self_name: Option<&str>,
+) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut push_unique = |canonical: String| {
+        if let Some(self_name) = exclude_self_name {
+            if canonical.eq_ignore_ascii_case(self_name) {
+                return;
+            }
+        }
+        if !found
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(&canonical))
+        {
+            found.push(canonical);
+        }
+    };
+
+    for exp in explicit_mentions {
+        let cleaned = exp.trim().trim_start_matches('@');
+        if cleaned.eq_ignore_ascii_case("Manager") {
+            push_unique("Manager".to_string());
+        } else if cleaned.eq_ignore_ascii_case("Human") {
+            push_unique("Human".to_string());
+        } else if let Some(ag) = room_agents
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(cleaned))
+        {
+            push_unique(ag.name.clone());
+        }
+    }
+
+    found
+}
+
+pub fn strip_leading_redundant_mentions(content: &str, mentions: &[String]) -> String {
+    if mentions.is_empty() {
+        return content.to_string();
+    }
+    let mut rest = content.trim_start();
+    loop {
+        if !rest.starts_with('@') {
+            break;
+        }
+        let after_at = &rest[1..];
+        let mut matched_len = None;
+        for m in mentions {
+            if after_at.len() >= m.len() && after_at[..m.len()].eq_ignore_ascii_case(m) {
+                let next_ch = after_at[m.len()..].chars().next();
+                if next_ch
+                    .map(|c| !c.is_alphanumeric() && c != '_' && c != '-')
+                    .unwrap_or(true)
+                {
+                    matched_len = Some(m.len());
+                    break;
+                }
+            }
+        }
+        if let Some(len) = matched_len {
+            rest = after_at[len..].trim_start_matches(|c: char| {
+                c.is_whitespace() || c == ',' || c == '，' || c == ':' || c == '：'
+            });
+        } else {
+            break;
+        }
+    }
+    if rest.is_empty() {
+        content.to_string()
+    } else {
+        rest.to_string()
+    }
 }
 
 pub fn parse_mentions(

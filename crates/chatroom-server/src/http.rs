@@ -442,7 +442,7 @@ async fn handle_recruit_agent(
     Json(req): Json<RecruitAgentRequest>,
 ) -> Result<(StatusCode, Json<RoomMessage>), ChatApiError> {
     verify_user_auth(&state, &headers)?;
-    let msg = recruit_agents_via_manager(&state.coordinator, &room_id, &req.requirement)
+    let msg = recruit_agents_via_manager(&state.coordinator, &room_id, &req.requirement, None)
         .await
         .map_err(|e| ChatApiError::Http(StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok((StatusCode::CREATED, Json(msg)))
