@@ -507,6 +507,10 @@
       </div>
       <div id="inspectorReasoningBar" style="display:none; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:8px; font-size:12px; color:var(--text-muted);">
         <label style="display:flex; align-items:center; gap:4px;">
+          模型 (model):
+          <input type="text" id="inspectedModelInput" list="availableModelsList" onchange="saveInspectedAgentReasoning()" style="padding:3px 6px; font-size:12px; width:145px;" placeholder="模型名称" />
+        </label>
+        <label style="display:flex; align-items:center; gap:4px;">
           思考强度 (effort):
           <select id="inspectedEffortSelect" onchange="saveInspectedAgentReasoning()" style="padding:3px 6px; font-size:12px;">
             <option value="">默认 (未指定)</option>
@@ -562,9 +566,15 @@
         <label>房间描述（可选）</label>
         <input type="text" id="newRoomDesc" placeholder="单聊或群聊协作说明" />
       </div>
-      <div class="form-row">
-        <label>初始默认 Agent 昵称</label>
-        <input type="text" id="newRoomAgentName" value="Assistant" />
+      <div style="display:flex; gap:10px;">
+        <div class="form-row" style="flex:1;">
+          <label>初始默认 Agent 昵称</label>
+          <input type="text" id="newRoomAgentName" value="Assistant" />
+        </div>
+        <div class="form-row" style="flex:1;">
+          <label>初始 Agent 模型（留空跟随全局默认）</label>
+          <input type="text" id="newRoomAgentModel" list="availableModelsList" placeholder="留空跟随全局默认" />
+        </div>
       </div>
       <div style="display:flex; gap:10px;">
         <div class="form-row" style="flex:1;">
@@ -627,6 +637,10 @@
         <input type="text" id="manualAgentRole" placeholder="例如：代码审查与测试专家" />
       </div>
       <div class="form-row">
+        <label>模型 (Model，留空则跟随全局默认，可选择或手填)</label>
+        <input type="text" id="manualAgentModel" list="availableModelsList" placeholder="留空跟随全局默认" />
+      </div>
+      <div class="form-row">
         <label>人设提示词 (System Prompt)</label>
         <textarea id="manualAgentPrompt" rows="4" placeholder="定义该 Agent 的专业领域与工作职责..."></textarea>
       </div>
@@ -665,11 +679,11 @@
       <h3>⚙️ 聊天室管家 (@Manager) 与默认模板设置</h3>
       <div class="form-row">
         <label>Manager 使用的模型</label>
-        <input type="text" id="mgrModelInput" />
+        <input type="text" id="mgrModelInput" list="availableModelsList" />
       </div>
       <div class="form-row">
         <label>新建 Agent 默认模型</label>
-        <input type="text" id="mgrDefaultAgentModel" />
+        <input type="text" id="mgrDefaultAgentModel" list="availableModelsList" />
       </div>
       <div style="display:flex; gap:10px;">
         <div class="form-row" style="flex:1;">
@@ -711,6 +725,8 @@
       </div>
     </div>
   </div>
+
+  <datalist id="availableModelsList"></datalist>
 
   <script>
     let authToken = localStorage.getItem('ragents_chat_token') || '';
@@ -1124,6 +1140,7 @@
       const rBar = document.getElementById('inspectorReasoningBar');
       if (rBar) {
         rBar.style.display = 'flex';
+        document.getElementById('inspectedModelInput').value = inspectedAgent.model || '';
         document.getElementById('inspectedEffortSelect').value = inspectedAgent.reasoning_effort || '';
         document.getElementById('inspectedSummarySelect').value = inspectedAgent.reasoning_summary || '';
       }
@@ -1196,11 +1213,13 @@
 
     async function saveInspectedAgentReasoning() {
       if (!inspectedAgent || !currentRoom) return;
+      const modelVal = document.getElementById('inspectedModelInput').value.trim() || null;
       const eff = document.getElementById('inspectedEffortSelect').value || null;
       const sum = document.getElementById('inspectedSummarySelect').value || null;
       const updated = await apiFetch(`/api/v1/rooms/${currentRoom.room_id}/agents/${inspectedAgent.agent_id}`, {
         method: 'PATCH',
         body: JSON.stringify({
+          model: modelVal,
           reasoning_effort: eff,
           reasoning_summary: sum
         })
@@ -1369,15 +1388,49 @@
     }
 
     /* Modals */
-    function openCreateRoomModal() { document.getElementById('createRoomModal').classList.add('open'); }
+    async function refreshAvailableModelsHint() {
+      try {
+        const data = await apiFetch('/api/v1/settings/manager');
+        const s = data.settings || {};
+        const models = new Set();
+        if (s.default_agent_model) models.add(s.default_agent_model);
+        if (s.manager_model) models.add(s.manager_model);
+        for (const node of (data.cluster_nodes || [])) {
+          const nodeModels = (node.spec && node.spec.capabilities && node.spec.capabilities.models) || [];
+          for (const m of nodeModels) {
+            if (m && m.name) models.add(m.name);
+          }
+        }
+        const dl = document.getElementById('availableModelsList');
+        if (dl) {
+          dl.innerHTML = Array.from(models).map(m => `<option value="${escapeHtml(m)}"></option>`).join('');
+        }
+        const defaultPlaceholder = s.default_agent_model
+          ? `留空跟随默认 (${s.default_agent_model})`
+          : '留空跟随全局默认';
+        const newRoomInput = document.getElementById('newRoomAgentModel');
+        if (newRoomInput) newRoomInput.placeholder = defaultPlaceholder;
+        const manualAgentInput = document.getElementById('manualAgentModel');
+        if (manualAgentInput) manualAgentInput.placeholder = defaultPlaceholder;
+      } catch (_) {}
+    }
+
+    function openCreateRoomModal() {
+      refreshAvailableModelsHint();
+      document.getElementById('createRoomModal').classList.add('open');
+    }
     function openRecruitModal() { document.getElementById('recruitModal').classList.add('open'); }
-    function openAddAgentModal() { document.getElementById('addAgentModal').classList.add('open'); }
+    function openAddAgentModal() {
+      refreshAvailableModelsHint();
+      document.getElementById('addAgentModal').classList.add('open');
+    }
     function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 
     async function submitCreateRoom() {
       const name = document.getElementById('newRoomName').value.trim() || '新聊天室';
       const description = document.getElementById('newRoomDesc').value.trim();
       const default_agent_name = document.getElementById('newRoomAgentName').value.trim() || 'Assistant';
+      const default_agent_model = document.getElementById('newRoomAgentModel').value.trim() || null;
       const reasoning_effort = document.getElementById('newRoomReasoningEffort').value || null;
       const reasoning_summary = document.getElementById('newRoomReasoningSummary').value || null;
       const workspace_path = document.getElementById('newRoomWorkdir').value.trim() || null;
@@ -1388,6 +1441,7 @@
           name,
           description,
           default_agent_name,
+          default_agent_model,
           reasoning_effort,
           reasoning_summary,
           workspace_path
@@ -1420,6 +1474,7 @@
       if (!currentRoom) return;
       const name = document.getElementById('manualAgentName').value.trim();
       const role_title = document.getElementById('manualAgentRole').value.trim() || 'AI 专家';
+      const model = document.getElementById('manualAgentModel').value.trim() || null;
       const persona_prompt = document.getElementById('manualAgentPrompt').value.trim() || `You are @${name}, a specialist AI agent.`;
       const reasoning_effort = document.getElementById('manualAgentReasoningEffort').value || null;
       const reasoning_summary = document.getElementById('manualAgentReasoningSummary').value || null;
@@ -1432,6 +1487,7 @@
           role_title,
           avatar: '🛠️',
           persona_prompt,
+          model,
           reasoning_effort,
           reasoning_summary
         })
