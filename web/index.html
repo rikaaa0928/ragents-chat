@@ -508,7 +508,8 @@
       <div id="inspectorReasoningBar" style="display:none; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:8px; font-size:12px; color:var(--text-muted);">
         <label style="display:flex; align-items:center; gap:4px;">
           模型 (model):
-          <input type="text" id="inspectedModelInput" list="availableModelsList" onchange="saveInspectedAgentReasoning()" style="padding:3px 6px; font-size:12px; width:145px;" placeholder="模型名称" />
+          <select id="inspectedModelInput" onchange="saveInspectedAgentReasoning()" style="padding:3px 6px; font-size:12px;">
+          </select>
         </label>
         <label style="display:flex; align-items:center; gap:4px;">
           思考强度 (effort):
@@ -572,8 +573,10 @@
           <input type="text" id="newRoomAgentName" value="Assistant" />
         </div>
         <div class="form-row" style="flex:1;">
-          <label>初始 Agent 模型（留空跟随全局默认）</label>
-          <input type="text" id="newRoomAgentModel" list="availableModelsList" placeholder="留空跟随全局默认" />
+          <label>初始 Agent 模型</label>
+          <select id="newRoomAgentModel">
+            <option value="">跟随全局默认</option>
+          </select>
         </div>
       </div>
       <div style="display:flex; gap:10px;">
@@ -637,8 +640,10 @@
         <input type="text" id="manualAgentRole" placeholder="例如：代码审查与测试专家" />
       </div>
       <div class="form-row">
-        <label>模型 (Model，留空则跟随全局默认，可选择或手填)</label>
-        <input type="text" id="manualAgentModel" list="availableModelsList" placeholder="留空跟随全局默认" />
+        <label>模型 (Model，来自集群 Daemon 节点已注册模型)</label>
+        <select id="manualAgentModel">
+          <option value="">跟随全局默认</option>
+        </select>
       </div>
       <div class="form-row">
         <label>人设提示词 (System Prompt)</label>
@@ -679,11 +684,11 @@
       <h3>⚙️ 聊天室管家 (@Manager) 与默认模板设置</h3>
       <div class="form-row">
         <label>Manager 使用的模型</label>
-        <input type="text" id="mgrModelInput" list="availableModelsList" />
+        <select id="mgrModelInput"></select>
       </div>
       <div class="form-row">
         <label>新建 Agent 默认模型</label>
-        <input type="text" id="mgrDefaultAgentModel" list="availableModelsList" />
+        <select id="mgrDefaultAgentModel"></select>
       </div>
       <div style="display:flex; gap:10px;">
         <div class="form-row" style="flex:1;">
@@ -788,6 +793,7 @@
           document.getElementById('authModal').classList.add('open');
           return;
         }
+        await refreshAvailableModelsHint();
         await refreshRooms();
       } catch (e) {
         console.error(e);
@@ -1140,7 +1146,7 @@
       const rBar = document.getElementById('inspectorReasoningBar');
       if (rBar) {
         rBar.style.display = 'flex';
-        document.getElementById('inspectedModelInput').value = inspectedAgent.model || '';
+        populateModelSelect('inspectedModelInput', false, inspectedAgent.model || '');
         document.getElementById('inspectedEffortSelect').value = inspectedAgent.reasoning_effort || '';
         document.getElementById('inspectedSummarySelect').value = inspectedAgent.reasoning_summary || '';
       }
@@ -1388,40 +1394,62 @@
     }
 
     /* Modals */
+    let cachedClusterModels = [];
+    let cachedDefaultAgentModel = '';
+
+    function populateModelSelect(selectId, allowFollowDefault, selectedValue) {
+      const sel = document.getElementById(selectId);
+      if (!sel) return;
+      const models = new Set(cachedClusterModels);
+      if (selectedValue) models.add(selectedValue);
+      const opts = [];
+      if (allowFollowDefault) {
+        const label = cachedDefaultAgentModel
+          ? `跟随全局默认 (${cachedDefaultAgentModel})`
+          : '跟随全局默认';
+        opts.push(`<option value="">${escapeHtml(label)}</option>`);
+      }
+      for (const m of models) {
+        opts.push(`<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`);
+      }
+      sel.innerHTML = opts.join('');
+      sel.value = selectedValue || '';
+    }
+
     async function refreshAvailableModelsHint() {
       try {
         const data = await apiFetch('/api/v1/settings/manager');
         const s = data.settings || {};
+        cachedDefaultAgentModel = s.default_agent_model || '';
         const models = new Set();
-        if (s.default_agent_model) models.add(s.default_agent_model);
-        if (s.manager_model) models.add(s.manager_model);
         for (const node of (data.cluster_nodes || [])) {
-          const nodeModels = (node.spec && node.spec.capabilities && node.spec.capabilities.models) || [];
-          for (const m of nodeModels) {
-            if (m && m.name) models.add(m.name);
+          const st = node.status || {};
+          if (st.default_model) models.add(st.default_model);
+          for (const m of (st.supported_models || [])) {
+            if (m) models.add(m);
           }
         }
-        const dl = document.getElementById('availableModelsList');
-        if (dl) {
-          dl.innerHTML = Array.from(models).map(m => `<option value="${escapeHtml(m)}"></option>`).join('');
+        if (s.default_agent_model) models.add(s.default_agent_model);
+        if (s.manager_model) models.add(s.manager_model);
+        cachedClusterModels = Array.from(models);
+        populateModelSelect('newRoomAgentModel', true, document.getElementById('newRoomAgentModel')?.value || '');
+        populateModelSelect('manualAgentModel', true, document.getElementById('manualAgentModel')?.value || '');
+        if (inspectedAgent) {
+          populateModelSelect('inspectedModelInput', false, inspectedAgent.model || '');
         }
-        const defaultPlaceholder = s.default_agent_model
-          ? `留空跟随默认 (${s.default_agent_model})`
-          : '留空跟随全局默认';
-        const newRoomInput = document.getElementById('newRoomAgentModel');
-        if (newRoomInput) newRoomInput.placeholder = defaultPlaceholder;
-        const manualAgentInput = document.getElementById('manualAgentModel');
-        if (manualAgentInput) manualAgentInput.placeholder = defaultPlaceholder;
-      } catch (_) {}
+        return data;
+      } catch (_) {
+        return null;
+      }
     }
 
-    function openCreateRoomModal() {
-      refreshAvailableModelsHint();
+    async function openCreateRoomModal() {
+      await refreshAvailableModelsHint();
       document.getElementById('createRoomModal').classList.add('open');
     }
     function openRecruitModal() { document.getElementById('recruitModal').classList.add('open'); }
-    function openAddAgentModal() {
-      refreshAvailableModelsHint();
+    async function openAddAgentModal() {
+      await refreshAvailableModelsHint();
       document.getElementById('addAgentModal').classList.add('open');
     }
     function closeModal(id) { document.getElementById(id).classList.remove('open'); }
@@ -1500,10 +1528,10 @@
     }
 
     async function openManagerSettingsModal() {
-      const data = await apiFetch('/api/v1/settings/manager');
+      const data = await refreshAvailableModelsHint() || await apiFetch('/api/v1/settings/manager');
       const s = data.settings;
-      document.getElementById('mgrModelInput').value = s.manager_model || '';
-      document.getElementById('mgrDefaultAgentModel').value = s.default_agent_model || '';
+      populateModelSelect('mgrModelInput', false, s.manager_model || '');
+      populateModelSelect('mgrDefaultAgentModel', false, s.default_agent_model || '');
       document.getElementById('mgrDefaultReasoningEffort').value = s.default_reasoning_effort || '';
       document.getElementById('mgrDefaultReasoningSummary').value = s.default_reasoning_summary || '';
       document.getElementById('mgrDefaultNodeId').value = s.default_node_id || '';
