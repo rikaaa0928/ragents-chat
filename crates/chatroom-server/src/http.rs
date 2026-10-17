@@ -8,7 +8,7 @@ use axum::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         Html, IntoResponse, Response,
     },
-    routing::{delete, get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use futures::stream::Stream;
@@ -68,7 +68,7 @@ pub fn build_chat_router(state: ChatServerState) -> Router {
         )
         .route(
             "/api/v1/rooms/{room_id}/agents/{agent_id}",
-            delete(handle_remove_agent),
+            patch(handle_patch_agent).delete(handle_remove_agent),
         )
         .route(
             "/api/v1/agents/{agent_id}/inspector",
@@ -446,6 +446,21 @@ async fn handle_recruit_agent(
         .await
         .map_err(|e| ChatApiError::Http(StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok((StatusCode::CREATED, Json(msg)))
+}
+
+async fn handle_patch_agent(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Path((room_id, agent_id)): Path<(String, String)>,
+    Json(patch): Json<PatchAgentRequest>,
+) -> Result<Json<RoomAgentPublic>, ChatApiError> {
+    verify_user_auth(&state, &headers)?;
+    let updated = state
+        .coordinator
+        .patch_agent_in_room(&room_id, &agent_id, patch)
+        .await
+        .map_err(|e| ChatApiError::Http(StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(updated.into()))
 }
 
 async fn handle_remove_agent(

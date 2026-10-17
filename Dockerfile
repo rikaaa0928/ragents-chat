@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     lsof \
     sqlite3 \
+    bubblewrap \
     ca-certificates \
     openssh-client \
     unzip \

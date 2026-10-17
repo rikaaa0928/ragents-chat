@@ -1,6 +1,35 @@
 use chrono::{DateTime, Utc};
+use openresponses_rust::{ReasoningConfig, ReasoningEffort, ReasoningSummary};
 use ragents_protocol::*;
 use serde::{Deserialize, Serialize};
+
+pub fn build_reasoning_config(
+    effort: Option<&str>,
+    summary: Option<&str>,
+) -> Option<ReasoningConfig> {
+    let parsed_effort = match effort.map(str::trim) {
+        Some("none") => Some(ReasoningEffort::None),
+        Some("low") => Some(ReasoningEffort::Low),
+        Some("medium") => Some(ReasoningEffort::Medium),
+        Some("high") => Some(ReasoningEffort::High),
+        Some("xhigh") => Some(ReasoningEffort::Xhigh),
+        _ => None,
+    };
+    let parsed_summary = match summary.map(str::trim) {
+        Some("concise") => Some(ReasoningSummary::Concise),
+        Some("detailed") => Some(ReasoningSummary::Detailed),
+        Some("auto") => Some(ReasoningSummary::Auto),
+        _ => None,
+    };
+    if parsed_effort.is_none() && parsed_summary.is_none() {
+        None
+    } else {
+        Some(ReasoningConfig {
+            effort: parsed_effort,
+            summary: parsed_summary,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagerSettings {
@@ -11,13 +40,17 @@ pub struct ManagerSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_workspace_root: Option<String>,
     pub default_agent_model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_summary: Option<String>,
     pub default_extensions: Vec<ExtensionSpec>,
     pub idle_peek_debounce_ms: u64,
     pub max_agent_relay_depth: u32,
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateManagerSettingsRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manager_model: Option<String>,
@@ -27,6 +60,8 @@ pub struct UpdateManagerSettingsRequest {
     pub default_workspace_root: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_agent_model: Option<String>,
+    pub default_reasoning_effort: Option<Option<String>>,
+    pub default_reasoning_summary: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_extensions: Option<Vec<ExtensionSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,6 +116,10 @@ pub struct CreateRoomRequest {
     pub default_agent_persona: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_agent_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -153,6 +192,10 @@ pub struct RoomAgent {
     pub avatar: String,
     pub persona_prompt: String,
     pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_summary: Option<String>,
     pub scheduling: SchedulingMode,
     pub root_session_id: SessionId,
     pub active_session_id: SessionId,
@@ -177,6 +220,10 @@ pub struct RoomAgentPublic {
     pub avatar: String,
     pub persona_prompt: String,
     pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_summary: Option<String>,
     pub scheduling: SchedulingMode,
     pub root_session_id: SessionId,
     pub active_session_id: SessionId,
@@ -200,6 +247,8 @@ impl From<RoomAgent> for RoomAgentPublic {
             avatar: a.avatar,
             persona_prompt: a.persona_prompt,
             model: a.model,
+            reasoning_effort: a.reasoning_effort,
+            reasoning_summary: a.reasoning_summary,
             scheduling: a.scheduling,
             root_session_id: a.root_session_id,
             active_session_id: a.active_session_id,
@@ -224,9 +273,21 @@ pub struct CreateAgentRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PatchAgentRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub reasoning_effort: Option<Option<String>>,
+    pub reasoning_summary: Option<Option<String>>,
 }
 
 fn default_avatar() -> String {

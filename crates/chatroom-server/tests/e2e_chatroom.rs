@@ -318,6 +318,8 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             default_agent_role: Some("主力研发助手".to_string()),
             default_agent_persona: Some("You are @Assistant.".to_string()),
             default_agent_model: Some("gpt-4.1-mini".to_string()),
+            reasoning_effort: Some("high".to_string()),
+            reasoning_summary: Some("concise".to_string()),
             node_id: None,
             workspace_path: None,
         })
@@ -730,6 +732,8 @@ async fn test_live_multi_agent_chatroom_when_env_present() {
                     .to_string(),
             ),
             default_agent_model: Some(model_name.clone()),
+            reasoning_effort: Some("high".to_string()),
+            reasoning_summary: Some("concise".to_string()),
             node_id: None,
             workspace_path: None,
         })

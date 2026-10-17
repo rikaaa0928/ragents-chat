@@ -187,6 +187,8 @@ pub async fn recruit_agents_via_manager(
                     avatar: bp.avatar,
                     persona_prompt: bp.persona_prompt,
                     model: model_to_use,
+                    reasoning_effort: mgr_settings.default_reasoning_effort.clone(),
+                    reasoning_summary: mgr_settings.default_reasoning_summary.clone(),
                     node_id: mgr_settings.default_node_id.clone(),
                     workspace_path: mgr_settings.default_workspace_root.clone(),
                 },

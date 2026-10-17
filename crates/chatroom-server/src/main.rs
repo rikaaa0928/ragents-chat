@@ -99,6 +99,8 @@ async fn main() -> anyhow::Result<()> {
         manager_model: Some(default_model.clone()),
         manager_system_prompt: None,
         default_agent_model: Some(default_model),
+        default_reasoning_effort: None,
+        default_reasoning_summary: None,
         default_extensions: if default_extensions.is_empty() {
             None
         } else {

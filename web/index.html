@@ -505,6 +505,28 @@
         <h3 id="inspectorTitle">🔍 内部 Session 实时透视</h3>
         <button id="cancelActivationBtn" class="danger" style="display:none; font-size:11px; padding:4px 8px;" onclick="cancelInspectedAgent()">⛔ 紧急中止执行</button>
       </div>
+      <div id="inspectorReasoningBar" style="display:none; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:8px; font-size:12px; color:var(--text-muted);">
+        <label style="display:flex; align-items:center; gap:4px;">
+          思考强度 (effort):
+          <select id="inspectedEffortSelect" onchange="saveInspectedAgentReasoning()" style="padding:3px 6px; font-size:12px;">
+            <option value="">默认 (未指定)</option>
+            <option value="none">none (关闭思考)</option>
+            <option value="low">low (轻量)</option>
+            <option value="medium">medium (中等)</option>
+            <option value="high">high (深度)</option>
+            <option value="xhigh">xhigh (极高)</option>
+          </select>
+        </label>
+        <label style="display:flex; align-items:center; gap:4px;">
+          思考摘要 (summary):
+          <select id="inspectedSummarySelect" onchange="saveInspectedAgentReasoning()" style="padding:3px 6px; font-size:12px;">
+            <option value="">默认 (未指定)</option>
+            <option value="auto">auto (自动)</option>
+            <option value="concise">concise (精简流式摘要)</option>
+            <option value="detailed">detailed (详细流式摘要)</option>
+          </select>
+        </label>
+      </div>
       <div class="readonly-banner">
         🔒 严格只读模式：此处实时展示 Agent 内部私密思考、工具调用与压缩血缘，禁止在此处私聊；一切对话请回到左侧聊天室。
       </div>
@@ -543,6 +565,28 @@
       <div class="form-row">
         <label>初始默认 Agent 昵称</label>
         <input type="text" id="newRoomAgentName" value="Assistant" />
+      </div>
+      <div style="display:flex; gap:10px;">
+        <div class="form-row" style="flex:1;">
+          <label>思考强度 (effort)</label>
+          <select id="newRoomReasoningEffort">
+            <option value="">跟随全局默认</option>
+            <option value="none">none (关闭思考)</option>
+            <option value="low">low (轻量)</option>
+            <option value="medium">medium (中等)</option>
+            <option value="high">high (深度)</option>
+            <option value="xhigh">xhigh (极高)</option>
+          </select>
+        </div>
+        <div class="form-row" style="flex:1;">
+          <label>思考摘要 (summary)</label>
+          <select id="newRoomReasoningSummary">
+            <option value="">跟随全局默认</option>
+            <option value="auto">auto (自动)</option>
+            <option value="concise">concise (精简流式摘要)</option>
+            <option value="detailed">detailed (详细流式摘要)</option>
+          </select>
+        </div>
       </div>
       <div class="form-row">
         <label>绑定工作目录（可选，留空则为 Floating 模式）</label>
@@ -586,6 +630,28 @@
         <label>人设提示词 (System Prompt)</label>
         <textarea id="manualAgentPrompt" rows="4" placeholder="定义该 Agent 的专业领域与工作职责..."></textarea>
       </div>
+      <div style="display:flex; gap:10px;">
+        <div class="form-row" style="flex:1;">
+          <label>思考强度 (effort)</label>
+          <select id="manualAgentReasoningEffort">
+            <option value="">跟随全局默认</option>
+            <option value="none">none (关闭思考)</option>
+            <option value="low">low (轻量)</option>
+            <option value="medium">medium (中等)</option>
+            <option value="high">high (深度)</option>
+            <option value="xhigh">xhigh (极高)</option>
+          </select>
+        </div>
+        <div class="form-row" style="flex:1;">
+          <label>思考摘要 (summary)</label>
+          <select id="manualAgentReasoningSummary">
+            <option value="">跟随全局默认</option>
+            <option value="auto">auto (自动)</option>
+            <option value="concise">concise (精简流式摘要)</option>
+            <option value="detailed">detailed (详细流式摘要)</option>
+          </select>
+        </div>
+      </div>
       <div class="modal-actions">
         <button class="secondary" onclick="closeModal('addAgentModal')">取消</button>
         <button onclick="submitManualAgent()">添加入群</button>
@@ -604,6 +670,28 @@
       <div class="form-row">
         <label>新建 Agent 默认模型</label>
         <input type="text" id="mgrDefaultAgentModel" />
+      </div>
+      <div style="display:flex; gap:10px;">
+        <div class="form-row" style="flex:1;">
+          <label>默认思考强度 (effort)</label>
+          <select id="mgrDefaultReasoningEffort">
+            <option value="">未指定 (网关默认)</option>
+            <option value="none">none (关闭思考)</option>
+            <option value="low">low (轻量)</option>
+            <option value="medium">medium (中等)</option>
+            <option value="high">high (深度)</option>
+            <option value="xhigh">xhigh (极高)</option>
+          </select>
+        </div>
+        <div class="form-row" style="flex:1;">
+          <label>默认思考摘要 (summary)</label>
+          <select id="mgrDefaultReasoningSummary">
+            <option value="">未指定 (网关默认)</option>
+            <option value="auto">auto (自动)</option>
+            <option value="concise">concise (精简流式摘要)</option>
+            <option value="detailed">detailed (详细流式摘要)</option>
+          </select>
+        </div>
       </div>
       <div class="form-row">
         <label>默认绑定节点 ID（可选，Pinned 模式需填）</label>
@@ -882,6 +970,9 @@
         const actHtml = actDetail
           ? `<div style="font-size:11px; margin-top:3px; color:${isErr ? '#f87171' : '#93c5fd'}; font-weight:500;">${escapeHtml(actDetail)}</div>`
           : '';
+        const reasoningTag = (a.reasoning_effort || a.reasoning_summary)
+          ? ` · 🧠 ${escapeHtml(a.reasoning_effort || 'default')}/${escapeHtml(a.reasoning_summary || 'default')}`
+          : '';
         return `
           <div class="agent-card ${sel}" onclick="inspectAgent('${a.agent_id}')">
             <div style="min-width:0; flex:1;">
@@ -891,7 +982,7 @@
                 <span style="font-size:11px; color:var(--text-muted); font-weight:400;">(${escapeHtml(a.role_title)})</span>
               </div>
               <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">
-                ${stateText} · model: ${escapeHtml(a.model)} · 已读 #${a.last_delivered_seq}
+                ${stateText} · model: ${escapeHtml(a.model)}${reasoningTag} · 已读 #${a.last_delivered_seq}
               </div>
               ${actHtml}
             </div>
@@ -1030,6 +1121,12 @@
       document.getElementById('inspectorTitle').textContent = `🔍 内部透视: @${inspectedAgent.name}`;
       document.getElementById('cancelActivationBtn').style.display =
         inspectedAgent.active_activation_id ? 'inline-block' : 'none';
+      const rBar = document.getElementById('inspectorReasoningBar');
+      if (rBar) {
+        rBar.style.display = 'flex';
+        document.getElementById('inspectedEffortSelect').value = inspectedAgent.reasoning_effort || '';
+        document.getElementById('inspectedSummarySelect').value = inspectedAgent.reasoning_summary || '';
+      }
 
       const bar = document.getElementById('lineageBar');
       const pills = [];
@@ -1095,6 +1192,22 @@
     async function cancelInspectedAgent() {
       if (!inspectedAgent) return;
       await apiFetch(`/api/v1/agents/${inspectedAgent.agent_id}/cancel`, { method: 'POST' });
+    }
+
+    async function saveInspectedAgentReasoning() {
+      if (!inspectedAgent || !currentRoom) return;
+      const eff = document.getElementById('inspectedEffortSelect').value || null;
+      const sum = document.getElementById('inspectedSummarySelect').value || null;
+      const updated = await apiFetch(`/api/v1/rooms/${currentRoom.room_id}/agents/${inspectedAgent.agent_id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          reasoning_effort: eff,
+          reasoning_summary: sum
+        })
+      });
+      inspectedAgent = updated;
+      renderAgentRoster();
+      renderInspectorHeaderAndLineage();
     }
 
     function formatContextItemHtml(item) {
@@ -1265,11 +1378,20 @@
       const name = document.getElementById('newRoomName').value.trim() || '新聊天室';
       const description = document.getElementById('newRoomDesc').value.trim();
       const default_agent_name = document.getElementById('newRoomAgentName').value.trim() || 'Assistant';
+      const reasoning_effort = document.getElementById('newRoomReasoningEffort').value || null;
+      const reasoning_summary = document.getElementById('newRoomReasoningSummary').value || null;
       const workspace_path = document.getElementById('newRoomWorkdir').value.trim() || null;
       closeModal('createRoomModal');
       const created = await apiFetch('/api/v1/rooms', {
         method: 'POST',
-        body: JSON.stringify({ name, description, default_agent_name, workspace_path })
+        body: JSON.stringify({
+          name,
+          description,
+          default_agent_name,
+          reasoning_effort,
+          reasoning_summary,
+          workspace_path
+        })
       });
       await refreshRooms();
       await selectRoom(created.room.room_id);
@@ -1299,11 +1421,20 @@
       const name = document.getElementById('manualAgentName').value.trim();
       const role_title = document.getElementById('manualAgentRole').value.trim() || 'AI 专家';
       const persona_prompt = document.getElementById('manualAgentPrompt').value.trim() || `You are @${name}, a specialist AI agent.`;
+      const reasoning_effort = document.getElementById('manualAgentReasoningEffort').value || null;
+      const reasoning_summary = document.getElementById('manualAgentReasoningSummary').value || null;
       if (!name) return;
       closeModal('addAgentModal');
       await apiFetch(`/api/v1/rooms/${currentRoom.room_id}/agents`, {
         method: 'POST',
-        body: JSON.stringify({ name, role_title, avatar: '🛠️', persona_prompt })
+        body: JSON.stringify({
+          name,
+          role_title,
+          avatar: '🛠️',
+          persona_prompt,
+          reasoning_effort,
+          reasoning_summary
+        })
       });
     }
 
@@ -1317,6 +1448,8 @@
       const s = data.settings;
       document.getElementById('mgrModelInput').value = s.manager_model || '';
       document.getElementById('mgrDefaultAgentModel').value = s.default_agent_model || '';
+      document.getElementById('mgrDefaultReasoningEffort').value = s.default_reasoning_effort || '';
+      document.getElementById('mgrDefaultReasoningSummary').value = s.default_reasoning_summary || '';
       document.getElementById('mgrDefaultNodeId').value = s.default_node_id || '';
       document.getElementById('mgrDefaultWorkdir').value = s.default_workspace_root || '';
       document.getElementById('mgrSystemPrompt').value = s.manager_system_prompt || '';
@@ -1329,6 +1462,8 @@
         body: JSON.stringify({
           manager_model: document.getElementById('mgrModelInput').value.trim(),
           default_agent_model: document.getElementById('mgrDefaultAgentModel').value.trim(),
+          default_reasoning_effort: document.getElementById('mgrDefaultReasoningEffort').value || null,
+          default_reasoning_summary: document.getElementById('mgrDefaultReasoningSummary').value || null,
           default_node_id: document.getElementById('mgrDefaultNodeId').value.trim() || null,
           default_workspace_root: document.getElementById('mgrDefaultWorkdir').value.trim() || null,
           manager_system_prompt: document.getElementById('mgrSystemPrompt').value.trim()

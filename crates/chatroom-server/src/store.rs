@@ -59,16 +59,18 @@ impl ChatroomStore {
              PRAGMA busy_timeout = 5000;
 
              CREATE TABLE IF NOT EXISTS manager_settings (
-                 id                      INTEGER PRIMARY KEY CHECK (id = 1),
-                 manager_model           TEXT NOT NULL,
-                 manager_system_prompt   TEXT NOT NULL,
-                 default_node_id         TEXT,
-                 default_workspace_root  TEXT,
-                 default_agent_model     TEXT NOT NULL,
-                 default_extensions_json TEXT NOT NULL,
-                 idle_peek_debounce_ms   INTEGER NOT NULL DEFAULT 800,
-                 max_agent_relay_depth   INTEGER NOT NULL DEFAULT 12,
-                 updated_at              TEXT NOT NULL
+                 id                        INTEGER PRIMARY KEY CHECK (id = 1),
+                 manager_model             TEXT NOT NULL,
+                 manager_system_prompt     TEXT NOT NULL,
+                 default_node_id           TEXT,
+                 default_workspace_root    TEXT,
+                 default_agent_model       TEXT NOT NULL,
+                 default_reasoning_effort  TEXT,
+                 default_reasoning_summary TEXT,
+                 default_extensions_json   TEXT NOT NULL,
+                 idle_peek_debounce_ms     INTEGER NOT NULL DEFAULT 800,
+                 max_agent_relay_depth     INTEGER NOT NULL DEFAULT 12,
+                 updated_at                TEXT NOT NULL
              );
 
              CREATE TABLE IF NOT EXISTS rooms (
@@ -96,6 +98,8 @@ impl ChatroomStore {
                  avatar                  TEXT NOT NULL,
                  persona_prompt          TEXT NOT NULL,
                  model                   TEXT NOT NULL,
+                 reasoning_effort        TEXT,
+                 reasoning_summary       TEXT,
                  scheduling_json         TEXT NOT NULL,
                  root_session_id         TEXT NOT NULL,
                  active_session_id       TEXT NOT NULL,
@@ -170,7 +174,8 @@ Output ONLY valid JSON without markdown code fences.";
         let conn = self.conn.lock().expect("store mutex poisoned");
         let row = conn.query_row(
             "SELECT manager_model, manager_system_prompt, default_node_id, default_workspace_root,
-                    default_agent_model, default_extensions_json, idle_peek_debounce_ms, max_agent_relay_depth, updated_at
+                    default_agent_model, default_reasoning_effort, default_reasoning_summary,
+                    default_extensions_json, idle_peek_debounce_ms, max_agent_relay_depth, updated_at
              FROM manager_settings WHERE id = 1",
             [],
             |r| {
@@ -180,10 +185,12 @@ Output ONLY valid JSON without markdown code fences.";
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, Option<String>>(3)?,
                     r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                    r.get::<_, i64>(6)?,
-                    r.get::<_, i64>(7)?,
-                    r.get::<_, String>(8)?,
+                    r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, i64>(8)?,
+                    r.get::<_, i64>(9)?,
+                    r.get::<_, String>(10)?,
                 ))
             },
         )?;
@@ -194,10 +201,12 @@ Output ONLY valid JSON without markdown code fences.";
             default_node_id: row.2,
             default_workspace_root: row.3,
             default_agent_model: row.4,
-            default_extensions: serde_json::from_str(&row.5).unwrap_or_default(),
-            idle_peek_debounce_ms: row.6 as u64,
-            max_agent_relay_depth: row.7 as u32,
-            updated_at: parse_dt(&row.8),
+            default_reasoning_effort: row.5,
+            default_reasoning_summary: row.6,
+            default_extensions: serde_json::from_str(&row.7).unwrap_or_default(),
+            idle_peek_debounce_ms: row.8 as u64,
+            max_agent_relay_depth: row.9 as u32,
+            updated_at: parse_dt(&row.10),
         })
     }
 
@@ -221,6 +230,12 @@ Output ONLY valid JSON without markdown code fences.";
         if let Some(am) = patch.default_agent_model {
             current.default_agent_model = am;
         }
+        if let Some(eff) = patch.default_reasoning_effort {
+            current.default_reasoning_effort = eff.filter(|s| !s.trim().is_empty());
+        }
+        if let Some(sum) = patch.default_reasoning_summary {
+            current.default_reasoning_summary = sum.filter(|s| !s.trim().is_empty());
+        }
         if let Some(exts) = patch.default_extensions {
             current.default_extensions = exts;
         }
@@ -240,10 +255,12 @@ Output ONLY valid JSON without markdown code fences.";
                 default_node_id = ?3,
                 default_workspace_root = ?4,
                 default_agent_model = ?5,
-                default_extensions_json = ?6,
-                idle_peek_debounce_ms = ?7,
-                max_agent_relay_depth = ?8,
-                updated_at = ?9
+                default_reasoning_effort = ?6,
+                default_reasoning_summary = ?7,
+                default_extensions_json = ?8,
+                idle_peek_debounce_ms = ?9,
+                max_agent_relay_depth = ?10,
+                updated_at = ?11
              WHERE id = 1",
             params![
                 &current.manager_model,
@@ -251,6 +268,8 @@ Output ONLY valid JSON without markdown code fences.";
                 &current.default_node_id,
                 &current.default_workspace_root,
                 &current.default_agent_model,
+                &current.default_reasoning_effort,
+                &current.default_reasoning_summary,
                 serde_json::to_string(&current.default_extensions)?,
                 current.idle_peek_debounce_ms as i64,
                 current.max_agent_relay_depth as i64,
@@ -472,11 +491,12 @@ Output ONLY valid JSON without markdown code fences.";
         tx.execute(
             "INSERT INTO room_agents (
                 agent_id, room_id, name, role_title, avatar, persona_prompt,
-                model, scheduling_json, root_session_id, active_session_id,
+                model, reasoning_effort, reasoning_summary, scheduling_json,
+                root_session_id, active_session_id,
                 session_chain_json, last_delivered_seq, last_roster_version,
                 allow_speak_in_turn, runtime_state, active_activation_id,
                 agent_secret_token, created_by, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 &agent.agent_id,
                 &agent.room_id,
@@ -485,6 +505,8 @@ Output ONLY valid JSON without markdown code fences.";
                 &agent.avatar,
                 &agent.persona_prompt,
                 &agent.model,
+                &agent.reasoning_effort,
+                &agent.reasoning_summary,
                 serde_json::to_string(&agent.scheduling)?,
                 agent.root_session_id.as_str(),
                 agent.active_session_id.as_str(),
@@ -505,11 +527,11 @@ Output ONLY valid JSON without markdown code fences.";
     }
 
     fn row_to_agent(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoomAgent> {
-        let scheduling_str: String = r.get(7)?;
-        let chain_str: String = r.get(10)?;
-        let state_str: String = r.get(14)?;
-        let act_opt: Option<String> = r.get(15)?;
-        let created_str: String = r.get(18)?;
+        let scheduling_str: String = r.get(9)?;
+        let chain_str: String = r.get(12)?;
+        let state_str: String = r.get(16)?;
+        let act_opt: Option<String> = r.get(17)?;
+        let created_str: String = r.get(20)?;
         Ok(RoomAgent {
             agent_id: r.get(0)?,
             room_id: r.get(1)?,
@@ -518,19 +540,21 @@ Output ONLY valid JSON without markdown code fences.";
             avatar: r.get(4)?,
             persona_prompt: r.get(5)?,
             model: r.get(6)?,
+            reasoning_effort: r.get(7)?,
+            reasoning_summary: r.get(8)?,
             scheduling: serde_json::from_str(&scheduling_str).unwrap_or(SchedulingMode::Floating {
                 node_selector: Default::default(),
             }),
-            root_session_id: SessionId::new(r.get::<_, String>(8)?),
-            active_session_id: SessionId::new(r.get::<_, String>(9)?),
+            root_session_id: SessionId::new(r.get::<_, String>(10)?),
+            active_session_id: SessionId::new(r.get::<_, String>(11)?),
             session_chain: serde_json::from_str(&chain_str).unwrap_or_default(),
-            last_delivered_seq: r.get::<_, i64>(11)? as u64,
-            last_roster_version: r.get::<_, i64>(12)? as u64,
-            allow_speak_in_turn: r.get::<_, i64>(13)? != 0,
+            last_delivered_seq: r.get::<_, i64>(13)? as u64,
+            last_roster_version: r.get::<_, i64>(14)? as u64,
+            allow_speak_in_turn: r.get::<_, i64>(15)? != 0,
             runtime_state: AgentRuntimeState::from_str(&state_str),
             active_activation_id: act_opt.map(ActivationId::new),
-            agent_secret_token: r.get(16)?,
-            created_by: r.get(17)?,
+            agent_secret_token: r.get(18)?,
+            created_by: r.get(19)?,
             created_at: parse_dt(&created_str),
         })
     }
@@ -539,7 +563,8 @@ Output ONLY valid JSON without markdown code fences.";
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT agent_id, room_id, name, role_title, avatar, persona_prompt,
-                    model, scheduling_json, root_session_id, active_session_id,
+                    model, reasoning_effort, reasoning_summary, scheduling_json,
+                    root_session_id, active_session_id,
                     session_chain_json, last_delivered_seq, last_roster_version,
                     allow_speak_in_turn, runtime_state, active_activation_id,
                     agent_secret_token, created_by, created_at
@@ -557,7 +582,8 @@ Output ONLY valid JSON without markdown code fences.";
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.query_row(
             "SELECT agent_id, room_id, name, role_title, avatar, persona_prompt,
-                    model, scheduling_json, root_session_id, active_session_id,
+                    model, reasoning_effort, reasoning_summary, scheduling_json,
+                    root_session_id, active_session_id,
                     session_chain_json, last_delivered_seq, last_roster_version,
                     allow_speak_in_turn, runtime_state, active_activation_id,
                     agent_secret_token, created_by, created_at
@@ -576,7 +602,8 @@ Output ONLY valid JSON without markdown code fences.";
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.query_row(
             "SELECT agent_id, room_id, name, role_title, avatar, persona_prompt,
-                    model, scheduling_json, root_session_id, active_session_id,
+                    model, reasoning_effort, reasoning_summary, scheduling_json,
+                    root_session_id, active_session_id,
                     session_chain_json, last_delivered_seq, last_roster_version,
                     allow_speak_in_turn, runtime_state, active_activation_id,
                     agent_secret_token, created_by, created_at
@@ -586,6 +613,38 @@ Output ONLY valid JSON without markdown code fences.";
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    pub fn update_agent_model_and_reasoning(
+        &self,
+        agent_id: &str,
+        patch: PatchAgentRequest,
+    ) -> Result<RoomAgent, ChatStoreError> {
+        let mut agent = self
+            .get_agent(agent_id)?
+            .ok_or_else(|| ChatStoreError::NotFound(format!("agent {agent_id}")))?;
+        if let Some(m) = patch.model {
+            if !m.trim().is_empty() {
+                agent.model = m.trim().to_string();
+            }
+        }
+        if let Some(eff) = patch.reasoning_effort {
+            agent.reasoning_effort = eff.filter(|s| !s.trim().is_empty());
+        }
+        if let Some(sum) = patch.reasoning_summary {
+            agent.reasoning_summary = sum.filter(|s| !s.trim().is_empty());
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "UPDATE room_agents SET model = ?1, reasoning_effort = ?2, reasoning_summary = ?3 WHERE agent_id = ?4",
+            params![
+                &agent.model,
+                &agent.reasoning_effort,
+                &agent.reasoning_summary,
+                agent_id,
+            ],
+        )?;
+        Ok(agent)
     }
 
     pub fn remove_agent(&self, room_id: &str, agent_id: &str) -> Result<RoomAgent, ChatStoreError> {

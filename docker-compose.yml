@@ -29,6 +29,11 @@ services:
     container_name: ragents-daemon
     depends_on:
       - ragents-apiserver
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
     command:
       - ragents
       - daemon

@@ -414,6 +414,8 @@ impl RoomCoordinator {
                     avatar: "🤖".to_string(),
                     persona_prompt: default_persona,
                     model: req.default_agent_model.or(Some(mgr.default_agent_model)),
+                    reasoning_effort: req.reasoning_effort.or(mgr.default_reasoning_effort),
+                    reasoning_summary: req.reasoning_summary.or(mgr.default_reasoning_summary),
                     node_id: req.node_id.or(mgr.default_node_id),
                     workspace_path: req.workspace_path.or(mgr.default_workspace_root),
                 },
@@ -458,6 +460,18 @@ impl RoomCoordinator {
             .model
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(mgr.default_agent_model);
+        let reasoning_effort = req
+            .reasoning_effort
+            .filter(|s| !s.trim().is_empty())
+            .or(mgr.default_reasoning_effort);
+        let reasoning_summary = req
+            .reasoning_summary
+            .filter(|s| !s.trim().is_empty())
+            .or(mgr.default_reasoning_summary);
+        let reasoning_cfg = build_reasoning_config(
+            reasoning_effort.as_deref(),
+            reasoning_summary.as_deref(),
+        );
 
         let scheduling = match (
             req.node_id.filter(|s| !s.trim().is_empty()),
@@ -543,7 +557,12 @@ impl RoomCoordinator {
                     producer: None,
                     desired_phase: DesiredSessionPhase::Open,
                     system_prompt: Some(req.persona_prompt.clone()),
-                    model: Some(ModelRequestSpec::new(model_name.clone())),
+                    model: Some(ModelRequestSpec {
+                        name: model_name.clone(),
+                        temperature: None,
+                        max_output_tokens: None,
+                        reasoning: reasoning_cfg,
+                    }),
                     extensions,
                     permissions,
                 },
@@ -565,6 +584,8 @@ impl RoomCoordinator {
             },
             persona_prompt: req.persona_prompt,
             model: model_name,
+            reasoning_effort,
+            reasoning_summary,
             scheduling,
             root_session_id: sess_id.clone(),
             active_session_id: sess_id.clone(),
@@ -595,6 +616,53 @@ impl RoomCoordinator {
             room: updated_room,
         });
         Ok(inserted)
+    }
+
+    pub async fn patch_agent_in_room(
+        &self,
+        room_id: &str,
+        agent_id: &str,
+        patch: PatchAgentRequest,
+    ) -> anyhow::Result<RoomAgent> {
+        let existing = self
+            .store
+            .get_agent(agent_id)?
+            .ok_or_else(|| anyhow::anyhow!("agent {agent_id} not found"))?;
+        if existing.room_id != room_id {
+            anyhow::bail!("agent {agent_id} does not belong to room {room_id}");
+        }
+
+        let updated = self
+            .store
+            .update_agent_model_and_reasoning(agent_id, patch)?;
+        let reasoning_cfg = build_reasoning_config(
+            updated.reasoning_effort.as_deref(),
+            updated.reasoning_summary.as_deref(),
+        );
+        let _ = self
+            .ragents_client
+            .patch_session(
+                &updated.active_session_id,
+                PatchSessionSpecRequest {
+                    desired_phase: None,
+                    system_prompt: None,
+                    model: Some(ModelRequestSpec {
+                        name: updated.model.clone(),
+                        temperature: None,
+                        max_output_tokens: None,
+                        reasoning: reasoning_cfg,
+                    }),
+                    extensions: None,
+                    permissions: None,
+                },
+            )
+            .await;
+
+        self.emit_room_event(ChatroomEvent::AgentUpdated {
+            room_id: room_id.to_string(),
+            agent: updated.clone().into(),
+        });
+        Ok(updated)
     }
 
     pub async fn remove_agent_from_room(
