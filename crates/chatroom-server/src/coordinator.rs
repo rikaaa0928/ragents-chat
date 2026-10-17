@@ -864,8 +864,9 @@ impl RoomCoordinator {
                 return;
             };
 
-            // Check relay depth guard when an Agent sends a message
+            // Check relay depth guard when an Agent sends a message (0 means unlimited)
             if msg.sender_kind == SenderKind::Agent
+                && room.max_agent_relay_depth > 0
                 && room.consecutive_agent_msgs >= room.max_agent_relay_depth
             {
                 if let Ok((sys_msg, updated_room)) = self.store.append_message(

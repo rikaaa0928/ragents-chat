@@ -474,6 +474,10 @@
         禁言概率(0-100%)
         <input type="number" id="ctrlMuteProb" min="0" max="100" onchange="saveRoomControls()" />%
       </label>
+      <label title="Agent连续发言接力上限轮数，设为 0 表示不限制">
+        连续接力上限(0=不限)
+        <input type="number" id="ctrlMaxRelayDepth" min="0" max="9999" onchange="saveRoomControls()" style="width:52px;" />轮
+      </label>
     </div>
 
     <div id="messagesContainer" class="messages-container"></div>
@@ -721,6 +725,10 @@
         <input type="text" id="mgrDefaultWorkdir" />
       </div>
       <div class="form-row">
+        <label>新建房间默认连续接力轮数上限（0 表示不限制）</label>
+        <input type="number" id="mgrMaxRelayDepth" min="0" max="9999" value="0" />
+      </div>
+      <div class="form-row">
         <label>Manager 系统提示词</label>
         <textarea id="mgrSystemPrompt" rows="5"></textarea>
       </div>
@@ -897,8 +905,10 @@
       document.getElementById('ctrlPeekMsgInterval').value = currentRoom.peek_msg_interval;
       document.getElementById('ctrlInterjectEnabled').checked = currentRoom.interject_enabled;
       document.getElementById('ctrlMuteProb').value = currentRoom.mute_probability;
+      document.getElementById('ctrlMaxRelayDepth').value = currentRoom.max_agent_relay_depth ?? 0;
       document.getElementById('resumeRelayBtn').style.display =
-        currentRoom.consecutive_agent_msgs >= currentRoom.max_agent_relay_depth ? 'inline-block' : 'none';
+        (currentRoom.max_agent_relay_depth > 0 && currentRoom.consecutive_agent_msgs >= currentRoom.max_agent_relay_depth)
+          ? 'inline-block' : 'none';
     }
 
     async function saveRoomControls() {
@@ -909,6 +919,7 @@
         peek_msg_interval: parseInt(document.getElementById('ctrlPeekMsgInterval').value || '1', 10),
         interject_enabled: document.getElementById('ctrlInterjectEnabled').checked,
         mute_probability: parseInt(document.getElementById('ctrlMuteProb').value || '40', 10),
+        max_agent_relay_depth: Math.max(0, parseInt(document.getElementById('ctrlMaxRelayDepth').value || '0', 10)),
       };
       currentRoom = await apiFetch(`/api/v1/rooms/${currentRoom.room_id}`, {
         method: 'PATCH',
@@ -1536,6 +1547,7 @@
       document.getElementById('mgrDefaultReasoningSummary').value = s.default_reasoning_summary || '';
       document.getElementById('mgrDefaultNodeId').value = s.default_node_id || '';
       document.getElementById('mgrDefaultWorkdir').value = s.default_workspace_root || '';
+      document.getElementById('mgrMaxRelayDepth').value = s.max_agent_relay_depth ?? 0;
       document.getElementById('mgrSystemPrompt').value = s.manager_system_prompt || '';
       document.getElementById('managerSettingsModal').classList.add('open');
     }
@@ -1550,6 +1562,7 @@
           default_reasoning_summary: document.getElementById('mgrDefaultReasoningSummary').value || null,
           default_node_id: document.getElementById('mgrDefaultNodeId').value.trim() || null,
           default_workspace_root: document.getElementById('mgrDefaultWorkdir').value.trim() || null,
+          max_agent_relay_depth: Math.max(0, parseInt(document.getElementById('mgrMaxRelayDepth').value || '0', 10)),
           manager_system_prompt: document.getElementById('mgrSystemPrompt').value.trim()
         })
       });

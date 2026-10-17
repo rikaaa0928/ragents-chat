@@ -69,7 +69,7 @@ impl ChatroomStore {
                  default_reasoning_summary TEXT,
                  default_extensions_json   TEXT NOT NULL,
                  idle_peek_debounce_ms     INTEGER NOT NULL DEFAULT 800,
-                 max_agent_relay_depth     INTEGER NOT NULL DEFAULT 12,
+                 max_agent_relay_depth     INTEGER NOT NULL DEFAULT 0,
                  updated_at                TEXT NOT NULL
              );
 
@@ -84,7 +84,7 @@ impl ChatroomStore {
                  peek_msg_interval       INTEGER NOT NULL DEFAULT 1,
                  interject_enabled       INTEGER NOT NULL DEFAULT 1,
                  mute_probability        INTEGER NOT NULL DEFAULT 40,
-                 max_agent_relay_depth   INTEGER NOT NULL DEFAULT 12,
+                 max_agent_relay_depth   INTEGER NOT NULL DEFAULT 0,
                  consecutive_agent_msgs  INTEGER NOT NULL DEFAULT 0,
                  created_at              TEXT NOT NULL,
                  updated_at              TEXT NOT NULL
@@ -156,7 +156,7 @@ Output ONLY valid JSON without markdown code fences.";
             "INSERT OR IGNORE INTO manager_settings (
                 id, manager_model, manager_system_prompt, default_node_id, default_workspace_root,
                 default_agent_model, default_extensions_json, idle_peek_debounce_ms, max_agent_relay_depth, updated_at
-            ) VALUES (1, ?1, ?2, NULL, NULL, ?1, ?3, 800, 12, ?4)",
+            ) VALUES (1, ?1, ?2, NULL, NULL, ?1, ?3, 800, 0, ?4)",
             params![
                 default_model,
                 default_mgr_prompt,
@@ -243,7 +243,7 @@ Output ONLY valid JSON without markdown code fences.";
             current.idle_peek_debounce_ms = ms;
         }
         if let Some(depth) = patch.max_agent_relay_depth {
-            current.max_agent_relay_depth = depth.max(1);
+            current.max_agent_relay_depth = depth;
         }
         current.updated_at = Utc::now();
 
@@ -416,7 +416,7 @@ Output ONLY valid JSON without markdown code fences.";
             room.mute_probability = mp.min(100);
         }
         if let Some(depth) = patch.max_agent_relay_depth {
-            room.max_agent_relay_depth = depth.max(1);
+            room.max_agent_relay_depth = depth;
         }
         room.updated_at = Utc::now();
 
