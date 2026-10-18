@@ -816,6 +816,7 @@
     applyTheme(currentTheme);
     let rooms = [];
     let currentRoom = null;
+    let currentManagerAgent = null;
     let currentAgents = [];
     let currentMessages = [];
     let selectedMentions = new Set();
@@ -985,6 +986,7 @@
     async function selectRoom(roomId) {
       const detail = await apiFetch(`/api/v1/rooms/${roomId}`);
       currentRoom = detail.room;
+      currentManagerAgent = detail.manager_agent || null;
       currentAgents = detail.agents;
       currentMessages = detail.messages;
       currentFlowLogs = detail.flow_logs || [];
@@ -1198,7 +1200,7 @@
           ? `<span style="font-size:11px; color:var(--accent); background:rgba(59,130,246,0.1); padding:1px 5px; border-radius:4px;">↩ 回复 #${m.reply_to_seq}</span>`
           : '';
         let sessionJumpHtml = '';
-        if (m.sender_kind === 'agent' && m.sender_id) {
+        if ((m.sender_kind === 'agent' || m.sender_kind === 'manager') && m.sender_id && m.sender_id !== 'manager') {
           sessionJumpHtml = `<span style="font-size:10px; color:var(--text-muted); cursor:pointer; text-decoration:underline;" onclick="inspectAgent('${escapeHtml(m.sender_id)}')" title="点击在右侧透视该 Agent 的内部 Session">🔍 透视 Session</span>`;
         }
         const cleanedBody = stripLeadingRedundantMentions(m.content, mentions);
@@ -1234,19 +1236,53 @@
     function renderManagerRosterCard() {
       const box = document.getElementById('managerRosterCard');
       if (!box) return;
-      const mgrModel = (cachedManagerSettings && cachedManagerSettings.manager_model) || cachedDefaultAgentModel || 'default';
-      const mgrPrompt = (cachedManagerSettings && cachedManagerSettings.manager_system_prompt) || '';
-      box.innerHTML = `
-        <div class="agent-card" style="border-style:dashed; border-color:rgba(139,92,246,0.45); background:rgba(139,92,246,0.05);" onclick="openManagerSettingsModal()">
-          <div style="min-width:0; flex:1;">
-            <div style="font-size:12px; font-weight:600; color:var(--purple);">
-              🎩 @Manager <span style="font-size:11px; color:var(--text-muted); font-weight:400;">(聊天室管家 · model: ${escapeHtml(mgrModel)})</span>
+      if (!currentManagerAgent) {
+        const mgrModel = (cachedManagerSettings && cachedManagerSettings.manager_model) || cachedDefaultAgentModel || 'default';
+        const mgrPrompt = (cachedManagerSettings && cachedManagerSettings.manager_system_prompt) || '';
+        box.innerHTML = `
+          <div class="agent-card" style="border-style:dashed; border-color:rgba(139,92,246,0.45); background:rgba(139,92,246,0.05);" onclick="openManagerSettingsModal()">
+            <div style="min-width:0; flex:1;">
+              <div style="font-size:12px; font-weight:600; color:var(--purple);">
+                🎩 @Manager <span style="font-size:11px; color:var(--text-muted); font-weight:400;">(聊天室管家 · model: ${escapeHtml(mgrModel)})</span>
+              </div>
+              <div style="font-size:11px; color:var(--text-muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(mgrPrompt)}">
+                Prompt: ${escapeHtml(mgrPrompt.slice(0, 80))}...
+              </div>
             </div>
-            <div style="font-size:11px; color:var(--text-muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(mgrPrompt)}">
-              Prompt: ${escapeHtml(mgrPrompt.slice(0, 80))}...
-            </div>
+            <button class="secondary" style="font-size:11px; padding:3px 7px; flex-shrink:0;" onclick="event.stopPropagation(); openManagerSettingsModal()">⚙️ 全局默认</button>
           </div>
-          <button class="secondary" style="font-size:11px; padding:3px 7px; flex-shrink:0;" onclick="event.stopPropagation(); openManagerSettingsModal()">📝 查看/编辑</button>
+        `;
+        return;
+      }
+
+      const m = currentManagerAgent;
+      const roomLastSeq = currentRoom ? currentRoom.last_msg_seq : 0;
+      const sel = inspectedAgent && inspectedAgent.agent_id === m.agent_id ? 'selected' : '';
+      const stateText = m.runtime_state === 'thinking'
+        ? '🔵 思考/调工具中'
+        : (m.runtime_state === 'waiting_permission' ? '🟠 等待权限审批' : '🟢 空闲 (仅点名唤醒)');
+      const reasoningTag = (m.reasoning_effort || m.reasoning_summary)
+        ? ` · 🧠 ${escapeHtml(m.reasoning_effort || 'default')}/${escapeHtml(m.reasoning_summary || 'default')}`
+        : '';
+      const actDetail = agentActivities[m.agent_id] || '';
+      const isErr = actDetail.startsWith('❌');
+      box.innerHTML = `
+        <div class="agent-card ${sel}" data-agent-id="${escapeHtml(m.agent_id)}" style="border-style:dashed; border-color:rgba(139,92,246,0.45); background:rgba(139,92,246,0.05);" onmousedown="handleAgentCardMouseDown(event, '${m.agent_id}')" onclick="inspectAgent('${m.agent_id}')">
+          <div style="min-width:0; flex:1;">
+            <div style="font-size:13px; font-weight:600; color:var(--purple);">
+              <span class="status-dot ${m.runtime_state}"></span>
+              🎩 @Manager
+              <span style="font-size:11px; color:var(--text-muted); font-weight:400;">(${escapeHtml(m.role_title)} · 工具: 加人/移人/发言)</span>
+            </div>
+            <div style="font-size:11px; color:var(--text-muted); margin-top:2px;">
+              ${stateText} · model: ${escapeHtml(m.model)}${reasoningTag} · 已读 #${m.last_delivered_seq}/#${roomLastSeq}
+            </div>
+            <div style="font-size:11px; color:var(--text-muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(m.persona_prompt || '')}">
+              Prompt: ${escapeHtml(m.persona_prompt || '')}
+            </div>
+            <div style="font-size:11px; margin-top:3px; font-weight:500; display:${actDetail ? 'block' : 'none'}; color:${isErr ? '#f87171' : '#93c5fd'};">${escapeHtml(actDetail)}</div>
+          </div>
+          <button class="secondary" style="font-size:11px; padding:3px 7px; flex-shrink:0;" onmousedown="event.stopPropagation();" onclick="event.stopPropagation(); openManagerSettingsModal()">⚙️ 全局默认</button>
         </div>
       `;
     }
@@ -1379,21 +1415,27 @@
             renderRoomList();
           }
         } else if (ev.type === 'agent_updated') {
-          const prevCount = currentAgents.length;
-          const idx = currentAgents.findIndex(a => a.agent_id === ev.agent.agent_id);
-          if (idx >= 0) currentAgents[idx] = ev.agent;
-          else currentAgents.push(ev.agent);
-          if (prevCount === 1 && currentAgents.length > 1) {
-            selectedMentions.clear();
+          if (ev.agent && String(ev.agent.name).toLowerCase() === 'manager') {
+            currentManagerAgent = ev.agent;
+            renderManagerRosterCard();
+          } else {
+            const prevCount = currentAgents.length;
+            const idx = currentAgents.findIndex(a => a.agent_id === ev.agent.agent_id);
+            if (idx >= 0) currentAgents[idx] = ev.agent;
+            else currentAgents.push(ev.agent);
+            if (prevCount === 1 && currentAgents.length > 1) {
+              selectedMentions.clear();
+              singleChatAutoPreselected = false;
+            }
+            const rItem = rooms.find(r => r.room.room_id === roomId);
+            if (rItem) {
+              rItem.agents = currentAgents.slice();
+              renderRoomList();
+            }
+            renderCurrentRoomHeader();
+            renderAgentRoster();
+            renderMentionSelectorBar();
           }
-          const rItem = rooms.find(r => r.room.room_id === roomId);
-          if (rItem) {
-            rItem.agents = currentAgents.slice();
-            renderRoomList();
-          }
-          renderCurrentRoomHeader();
-          renderAgentRoster();
-          renderMentionSelectorBar();
           if (inspectedAgent && inspectedAgent.agent_id === ev.agent.agent_id) {
             inspectedAgent = ev.agent;
             renderInspectorHeaderAndLineage();
@@ -1419,6 +1461,7 @@
             renderRoomList();
           }
           renderCurrentRoomHeader();
+          renderManagerRosterCard();
           renderAgentRoster();
         } else if (ev.type === 'peek_round_status') {
           currentFlowLogs.push({ timestamp: new Date().toISOString(), status: ev.status });
@@ -1436,6 +1479,7 @@
           }
         } else if (ev.type === 'agent_activity') {
           agentActivities[ev.agent_id] = ev.activity || '';
+          renderManagerRosterCard();
           renderAgentRoster();
         }
       };
@@ -1499,6 +1543,7 @@
       inspectedCanEditPrompt = Boolean(snap.can_edit_prompt);
       liveStreamBuffer = '';
       liveReasoningBuffer = '';
+      renderManagerRosterCard();
       renderAgentRoster();
       renderInspectorHeaderAndLineage();
       renderPendingPermissions(snap.pending_permissions || [], snap.agent.active_activation_id);
@@ -1522,8 +1567,13 @@
         })
       });
       inspectedAgent = updated;
-      const idx = currentAgents.findIndex(a => a.agent_id === updated.agent_id);
-      if (idx >= 0) currentAgents[idx] = updated;
+      if (currentManagerAgent && currentManagerAgent.agent_id === updated.agent_id) {
+        currentManagerAgent = updated;
+      } else {
+        const idx = currentAgents.findIndex(a => a.agent_id === updated.agent_id);
+        if (idx >= 0) currentAgents[idx] = updated;
+      }
+      renderManagerRosterCard();
       renderAgentRoster();
       renderInspectorHeaderAndLineage();
     }

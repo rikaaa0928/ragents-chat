@@ -1,4 +1,3 @@
-use crate::manager::recruit_agents_via_manager;
 use crate::store::ChatroomStore;
 use crate::types::*;
 use chrono::Utc;
@@ -468,6 +467,7 @@ impl RoomCoordinator {
                     .to_string()
             });
 
+        let manager_agent = self.ensure_room_manager_agent(&room.room_id).await?;
         let agent = self
             .create_agent_in_room(
                 &room.room_id,
@@ -489,10 +489,149 @@ impl RoomCoordinator {
         let updated_room = self.store.get_room(&room.room_id)?.unwrap_or(room);
         Ok(RoomDetailResponse {
             room: updated_room,
+            manager_agent: Some(manager_agent.into()),
             agents: vec![agent.into()],
             messages: vec![],
             flow_logs: vec![],
         })
+    }
+
+    pub async fn ensure_room_manager_agent(&self, room_id: &str) -> anyhow::Result<RoomAgent> {
+        if let Some(existing) = self.store.get_room_manager_agent(room_id)? {
+            return Ok(existing);
+        }
+        let room = self
+            .store
+            .get_room(room_id)?
+            .ok_or_else(|| anyhow::anyhow!("room {room_id} not found"))?;
+        let mgr = self.store.get_manager_settings()?;
+
+        let agent_id = format!("agt_mgr_{}", Uuid::now_v7());
+        let agent_secret_token = format!("agtok_{}{}", Uuid::now_v7(), Uuid::new_v4());
+        let model_name = mgr.manager_model.clone();
+        let reasoning_effort = mgr.default_reasoning_effort.clone();
+        let reasoning_summary = mgr.default_reasoning_summary.clone();
+        let reasoning_cfg = build_reasoning_config(
+            reasoning_effort.as_deref(),
+            reasoning_summary.as_deref(),
+        );
+
+        let mut extensions = Vec::new();
+        if let Some(ref compact_wasm) = self.compaction_wasm_path {
+            if compact_wasm.exists() {
+                extensions.push(ExtensionSpec {
+                    name: "compaction".to_string(),
+                    path: compact_wasm.to_string_lossy().to_string(),
+                    enabled: true,
+                    config: serde_json::json!({
+                        "enabled": true,
+                        "trigger_tokens": 64000,
+                        "keep_recent_tokens": 20000
+                    }),
+                    allowed_dirs: vec![],
+                });
+            }
+        }
+
+        let base = self.callback_base_url.trim_end_matches('/');
+        let callback_url = format!("{base}/api/v1/internal/agent-speak");
+        let add_agent_url = format!("{base}/api/v1/internal/manager/add-agent");
+        let remove_agent_url = format!("{base}/api/v1/internal/manager/remove-agent");
+
+        extensions.push(ExtensionSpec {
+            name: "chatroom".to_string(),
+            path: self.chatroom_wasm_path.to_string_lossy().to_string(),
+            enabled: true,
+            config: serde_json::json!({
+                "is_manager": true,
+                "chatroom_callback_url": callback_url,
+                "chatroom_add_agent_url": add_agent_url,
+                "chatroom_remove_agent_url": remove_agent_url,
+                "room_id": room.room_id,
+                "room_name": room.name,
+                "agent_id": agent_id,
+                "agent_name": "Manager",
+                "agent_role": "聊天室管家",
+                "agent_token": agent_secret_token,
+            }),
+            allowed_dirs: vec![],
+        });
+
+        let mut labels = BTreeMap::new();
+        labels.insert("ragents.chat.room_id".to_string(), room.room_id.clone());
+        labels.insert("ragents.chat.agent_id".to_string(), agent_id.clone());
+        labels.insert("ragents.chat.agent_name".to_string(), "Manager".to_string());
+        labels.insert("ragents.chat.role".to_string(), "chatroom_manager".to_string());
+
+        let mut permissions = PermissionPolicyLayer::default();
+        permissions.http_hosts = Some(RuleSet {
+            deny: None,
+            allow: Some(vec!["*".to_string()]),
+            default: Some(DefaultPermissionDecision::Allow),
+        });
+
+        let scheduling = SchedulingMode::Floating {
+            node_selector: BTreeMap::new(),
+        };
+
+        let created_sess = self
+            .ragents_client
+            .create_session(CreateSessionRequest {
+                session_id: None,
+                labels,
+                spec: SessionSpec {
+                    scheduling: scheduling.clone(),
+                    sources: vec![],
+                    producer: None,
+                    desired_phase: DesiredSessionPhase::Open,
+                    system_prompt: Some(mgr.manager_system_prompt.clone()),
+                    model: Some(ModelRequestSpec {
+                        name: model_name.clone(),
+                        temperature: None,
+                        max_output_tokens: None,
+                        reasoning: reasoning_cfg,
+                    }),
+                    extensions,
+                    permissions,
+                },
+                initial_activation: None,
+            })
+            .await?;
+
+        let sess_id = SessionId::new(created_sess.session.metadata.id);
+        let now = Utc::now();
+        let manager_agent = RoomAgent {
+            agent_id,
+            room_id: room.room_id,
+            name: "Manager".to_string(),
+            role_title: "聊天室管家".to_string(),
+            avatar: "🎩".to_string(),
+            persona_prompt: mgr.manager_system_prompt,
+            model: model_name,
+            reasoning_effort,
+            reasoning_summary,
+            scheduling,
+            root_session_id: sess_id.clone(),
+            active_session_id: sess_id.clone(),
+            session_chain: vec![SessionChainEntry {
+                generation: 0,
+                working_session_id: sess_id,
+                compaction_session_id: None,
+                tokens_before: None,
+                created_at: now,
+            }],
+            last_delivered_seq: room.last_msg_seq,
+            last_roster_version: room.roster_version,
+            allow_speak_in_turn: true,
+            runtime_state: AgentRuntimeState::Idle,
+            active_activation_id: None,
+            agent_secret_token,
+            created_by: "system_manager".to_string(),
+            created_at: now,
+        };
+
+        let (inserted, _) = self.store.insert_agent(manager_agent)?;
+        Ok(inserted)
     }
 
     pub async fn create_agent_in_room(
@@ -760,6 +899,11 @@ impl RoomCoordinator {
         room_id: &str,
         agent_id: &str,
     ) -> anyhow::Result<()> {
+        if let Ok(Some(ag)) = self.store.get_agent(agent_id) {
+            if ag.name.eq_ignore_ascii_case("Manager") {
+                anyhow::bail!("cannot remove built-in @Manager agent");
+            }
+        }
         let removed = self.store.remove_agent(room_id, agent_id)?;
         let _ = self
             .ragents_client
@@ -852,6 +996,148 @@ impl RoomCoordinator {
         Ok(msg)
     }
 
+    pub async fn handle_internal_manager_add_agent(
+        &self,
+        bearer_token: Option<&str>,
+        req: InternalManagerAddAgentRequest,
+    ) -> Result<RoomAgentPublic, (u16, String)> {
+        let mgr_agent = self
+            .store
+            .get_agent(&req.agent_id)
+            .map_err(|e| (500, e.to_string()))?
+            .ok_or_else(|| (404, format!("manager agent {} not found", req.agent_id)))?;
+
+        if mgr_agent.room_id != req.room_id || !mgr_agent.name.eq_ignore_ascii_case("Manager") {
+            return Err((403, "only room @Manager can call chatroom_add_agent".to_string()));
+        }
+
+        let provided = bearer_token.unwrap_or("");
+        if !constant_time_eq(provided, &mgr_agent.agent_secret_token) {
+            return Err((401, "invalid agent_secret_token".to_string()));
+        }
+
+        let clean_name: String = req
+            .name
+            .trim()
+            .trim_start_matches('@')
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let existing_agents = self
+            .store
+            .list_room_agents(&req.room_id)
+            .map_err(|e| (500, e.to_string()))?;
+        if let Some(existing) = existing_agents
+            .into_iter()
+            .find(|a| a.name.eq_ignore_ascii_case(&clean_name))
+        {
+            return Ok(existing.into());
+        }
+
+        let nodes = self.ragents_client.list_nodes().await.unwrap_or_default();
+        let available_models: Vec<String> = nodes
+            .iter()
+            .flat_map(|n| n.status.supported_models.clone())
+            .collect();
+        let mgr_settings = self
+            .store
+            .get_manager_settings()
+            .map_err(|e| (500, e.to_string()))?;
+
+        let model_to_use = req
+            .model
+            .filter(|m| {
+                !m.trim().is_empty()
+                    && (available_models.is_empty() || available_models.contains(m))
+            })
+            .or_else(|| Some(mgr_settings.default_agent_model.clone()));
+
+        let created = self
+            .create_agent_in_room(
+                &req.room_id,
+                CreateAgentRequest {
+                    name: clean_name,
+                    role_title: req.role_title,
+                    avatar: if req.avatar.trim().is_empty() {
+                        "🤖".to_string()
+                    } else {
+                        req.avatar
+                    },
+                    persona_prompt: req.persona_prompt,
+                    model: model_to_use,
+                    reasoning_effort: mgr_settings.default_reasoning_effort,
+                    reasoning_summary: mgr_settings.default_reasoning_summary,
+                    node_id: mgr_settings.default_node_id,
+                    workspace_path: mgr_settings.default_workspace_root,
+                },
+                "manager",
+            )
+            .await
+            .map_err(|e| (400, e.to_string()))?;
+
+        self.emit_flow_status(
+            &req.room_id,
+            format!(
+                "[🎩 管家加人] @Manager 调用 chatroom_add_agent 创建了 @{} ({}, model={})",
+                created.name, created.role_title, created.model
+            ),
+        );
+
+        Ok(created.into())
+    }
+
+    pub async fn handle_internal_manager_remove_agent(
+        &self,
+        bearer_token: Option<&str>,
+        req: InternalManagerRemoveAgentRequest,
+    ) -> Result<serde_json::Value, (u16, String)> {
+        let mgr_agent = self
+            .store
+            .get_agent(&req.agent_id)
+            .map_err(|e| (500, e.to_string()))?
+            .ok_or_else(|| (404, format!("manager agent {} not found", req.agent_id)))?;
+
+        if mgr_agent.room_id != req.room_id || !mgr_agent.name.eq_ignore_ascii_case("Manager") {
+            return Err((
+                403,
+                "only room @Manager can call chatroom_remove_agent".to_string(),
+            ));
+        }
+
+        let provided = bearer_token.unwrap_or("");
+        if !constant_time_eq(provided, &mgr_agent.agent_secret_token) {
+            return Err((401, "invalid agent_secret_token".to_string()));
+        }
+
+        let target_clean = req.target_name.trim().trim_start_matches('@');
+        let existing_agents = self
+            .store
+            .list_room_agents(&req.room_id)
+            .map_err(|e| (500, e.to_string()))?;
+        let target = existing_agents
+            .into_iter()
+            .find(|a| a.name.eq_ignore_ascii_case(target_clean) || a.agent_id == target_clean)
+            .ok_or_else(|| (404, format!("agent '{}' not found in room", req.target_name)))?;
+
+        self.remove_agent_from_room(&req.room_id, &target.agent_id)
+            .await
+            .map_err(|e| (400, e.to_string()))?;
+
+        self.emit_flow_status(
+            &req.room_id,
+            format!(
+                "[🎩 管家移人] @Manager 调用 chatroom_remove_agent 移除了 @{} ({})",
+                target.name, target.role_title
+            ),
+        );
+
+        Ok(serde_json::json!({
+            "ok": true,
+            "removed_agent_id": target.agent_id,
+            "removed_name": target.name,
+        }))
+    }
+
     pub async fn handle_internal_agent_speak(
         &self,
         bearer_token: Option<&str>,
@@ -880,11 +1166,24 @@ impl RoomCoordinator {
             ));
         }
 
+        let is_manager = agent.name.eq_ignore_ascii_case("Manager");
+        let sender_kind = if is_manager {
+            SenderKind::Manager
+        } else {
+            SenderKind::Agent
+        };
+
         let agents = self
             .store
             .list_room_agents(&req.room_id)
             .map_err(|e| (500, e.to_string()))?;
-        let mentions = resolve_explicit_mentions(&req.mentions, &agents, Some(&agent.name));
+        let mut mentions = resolve_explicit_mentions(&req.mentions, &agents, Some(&agent.name));
+        // Enforce Lead-Agent handoff discipline for @Manager: never wake multiple newly recruited agents simultaneously
+        if is_manager && mentions.len() > 1 {
+            if let Some(lead) = agents.first() {
+                mentions = vec![lead.name.clone()];
+            }
+        }
         let mut visible_to = resolve_explicit_mentions(&req.visible_to, &agents, None);
         // If `visible_to` is specified, ensure any explicitly @mentioned target can also see the message
         if !visible_to.is_empty() {
@@ -925,7 +1224,7 @@ impl RoomCoordinator {
             .store
             .append_message(
                 &req.room_id,
-                SenderKind::Agent,
+                sender_kind,
                 &agent.agent_id,
                 &agent.name,
                 cleaned_content,
@@ -999,36 +1298,26 @@ impl RoomCoordinator {
                 return;
             }
 
-            // 1. Check if `@Manager` was mentioned
-            if msg
-                .mentions
-                .iter()
-                .any(|m| m.eq_ignore_ascii_case("Manager"))
+            // 1. Check if `@Manager` was mentioned (one step at a time: wake ONLY @Manager first,
+            //    let @Manager execute chatroom_add_agent / chatroom_remove_agent and then call chatroom_speak
+            //    to hand off to the Lead Agent!)
+            if msg.sender_kind != SenderKind::Manager
+                && msg
+                    .mentions
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case("Manager"))
             {
                 self.emit_flow_status(
                     &room.room_id,
                     format!(
-                        "[#{} 路由] {} 点名 @Manager -> 启动管家招募与编排流程",
+                        "[#{} 路由] {} 点名 @Manager -> 唤醒 @Manager Agent 执行工具链 (先调加减人工具，再调 chatroom_speak 发言)",
                         msg.msg_seq, msg.sender_name
                     ),
                 );
-                let coord = self.clone();
-                let room_id = room.room_id.clone();
-                let req_text = msg.content.clone();
-                let caller_agent = if msg.sender_kind == SenderKind::Agent {
-                    Some(msg.sender_name.clone())
-                } else {
-                    None
-                };
-                tokio::spawn(async move {
-                    let _ = recruit_agents_via_manager(
-                        &coord,
-                        &room_id,
-                        &req_text,
-                        caller_agent.as_deref(),
-                    )
+                let _ = self
+                    .deliver_direct_mention_to_manager(&room, &agents, &msg)
                     .await;
-                });
+                return;
             }
 
             // 2. Wake up any explicitly @mentioned RoomAgents immediately via `push_realtime_message`
@@ -1169,6 +1458,122 @@ impl RoomCoordinator {
                 self.emit_room_event(ChatroomEvent::AgentUpdated {
                     room_id: room.room_id.clone(),
                     agent: thinking_agent.into(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    async fn deliver_direct_mention_to_manager(
+        &self,
+        room: &Room,
+        all_agents: &[RoomAgent],
+        trigger_msg: &RoomMessage,
+    ) -> anyhow::Result<()> {
+        let mgr_agent = self.ensure_room_manager_agent(&room.room_id).await?;
+        let unread = self.store.list_room_messages_for_agent(
+            &room.room_id,
+            mgr_agent.last_delivered_seq,
+            &mgr_agent.name,
+        )?;
+        if unread.is_empty() {
+            return Ok(());
+        }
+
+        let mgr_settings = self.store.get_manager_settings()?;
+        let nodes = self.ragents_client.list_nodes().await.unwrap_or_default();
+        let available_models: Vec<String> = nodes
+            .iter()
+            .flat_map(|n| n.status.supported_models.clone())
+            .collect();
+
+        let lead_agent_name = if trigger_msg.sender_kind == SenderKind::Agent {
+            Some(trigger_msg.sender_name.clone())
+        } else {
+            all_agents.first().map(|a| a.name.clone())
+        };
+
+        let existing_summary: Vec<String> = all_agents
+            .iter()
+            .enumerate()
+            .map(|(idx, a)| {
+                let role_tag = if idx == 0 {
+                    format!("{}, Default Room Lead", a.role_title)
+                } else {
+                    a.role_title.clone()
+                };
+                format!("@{} ({}, model={})", a.name, role_tag, a.model)
+            })
+            .collect();
+
+        let lead_hint = match &lead_agent_name {
+            Some(lead) => format!(
+                "Room Lead Coordinator: @{lead} (When you call `chatroom_speak` after adding new specialist agents, put ONLY `[\"{lead}\"]` in `mentions` to hand off coordination—never put all newly recruited agents in `mentions` at once!)"
+            ),
+            None => "Room currently has no participant agents; the first recruited agent will become the Default Room Lead.".to_string(),
+        };
+
+        let mut formatted = format_delivery_payload(
+            room,
+            all_agents,
+            &mgr_agent,
+            &unread,
+            DeliveryMode::DirectMention,
+        );
+        formatted.push_str(&format!(
+            "\n\n=== [Manager Cluster & Roster Status] ===\n\
+             - Existing Participant Agents in Room: {:?}\n\
+             - {}\n\
+             - Available Models on Cluster: {:?} (default: {})\n\
+             - Execution Order: 1) Call `chatroom_add_agent` and/or `chatroom_remove_agent` FIRST. 2) Wait for tool results confirming the roster update. 3) Call `chatroom_speak` ONCE to announce the roster update and hand off.",
+            existing_summary,
+            lead_hint,
+            available_models,
+            mgr_settings.default_agent_model
+        ));
+
+        let max_seq = room.last_msg_seq;
+        let updated_mgr = self.store.prepare_agent_delivery(
+            &mgr_agent.agent_id,
+            max_seq,
+            room.roster_version,
+            true,
+        )?;
+
+        {
+            let mut dm_guard = self
+                .direct_mentions
+                .lock()
+                .expect("direct_mentions mutex poisoned");
+            dm_guard.insert(
+                mgr_agent.agent_id.clone(),
+                DirectMentionState {
+                    from_human: true,
+                    spoke: false,
+                    nudged: false,
+                },
+            );
+        }
+
+        let resp = self
+            .ragents_client
+            .push_realtime_message(
+                &updated_mgr.active_session_id,
+                PushRealtimeMessageRequest {
+                    content: vec![MessageContent::InputText { text: formatted }],
+                },
+            )
+            .await?;
+
+        if let Some(spawned_act_id) = resp.spawned_activation_id {
+            if let Ok(thinking_mgr) = self.store.update_agent_runtime_state(
+                &mgr_agent.agent_id,
+                AgentRuntimeState::Thinking,
+                Some(spawned_act_id),
+            ) {
+                self.emit_room_event(ChatroomEvent::AgentUpdated {
+                    room_id: room.room_id.clone(),
+                    agent: thinking_mgr.into(),
                 });
             }
         }

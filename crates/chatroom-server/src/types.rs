@@ -105,6 +105,8 @@ pub struct RoomFlowLogEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomDetailResponse {
     pub room: Room,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_agent: Option<RoomAgentPublic>,
     pub agents: Vec<RoomAgentPublic>,
     pub messages: Vec<RoomMessage>,
     #[serde(default)]
@@ -389,6 +391,26 @@ pub struct InternalAgentSpeakRequest {
     pub visible_to: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InternalManagerAddAgentRequest {
+    pub room_id: String,
+    pub agent_id: String,
+    pub name: String,
+    pub role_title: String,
+    #[serde(default)]
+    pub avatar: String,
+    pub persona_prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InternalManagerRemoveAgentRequest {
+    pub room_id: String,
+    pub agent_id: String,
+    pub target_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

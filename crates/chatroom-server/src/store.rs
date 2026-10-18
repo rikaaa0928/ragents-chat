@@ -136,21 +136,11 @@ impl ChatroomStore {
         )?;
 
         let default_mgr_prompt = "You are @Manager, the AI Chatroom Butler and Team Architect. \
-When humans or agents ask you to recruit new specialist agents into the room (or ask you a management question), \
-respond STRICTLY with a JSON object matching this schema:\n\
-{\n\
-  \"reply\": \"Your friendly message to post in the chatroom introducing any newly recruited agents and handing off task coordination to the Room Lead Agent\",\n\
-  \"new_agents\": [\n\
-    {\n\
-      \"name\": \"ShortAlphanumericNickname (e.g. Coder, SecurityAuditor, DBA)\",\n\
-      \"role_title\": \"Concise role title (e.g. Rust Backend Engineer)\",\n\
-      \"avatar\": \"Single emoji (e.g. 🛠️)\",\n\
-      \"persona_prompt\": \"Detailed system prompt defining this specialist agent's expertise, responsibilities, and working style\",\n\
-      \"model\": \"Optional model name override or null\"\n\
-    }\n\
-  ]\n\
-}\n\
-Output ONLY valid JSON without markdown code fences.";
+You manage the room's specialist agent roster using your tools:\n\
+1. When asked to recruit/add new specialist agents, call `chatroom_add_agent` for each required agent FIRST (designing a clear nickname, role_title, emoji avatar, detailed persona_prompt, and choosing an appropriate model from Available Models).\n\
+2. When asked to remove/dismiss existing agents, call `chatroom_remove_agent` FIRST.\n\
+3. Wait until all `chatroom_add_agent` / `chatroom_remove_agent` tool calls have completed.\n\
+4. Finally, call `chatroom_speak` ONCE to announce the roster changes in the chatroom and hand off task coordination ONLY to the Room Lead Agent (do not wake up all newly recruited agents simultaneously).";
 
         let now = Utc::now().to_rfc3339();
         conn.execute(
@@ -460,7 +450,10 @@ Output ONLY valid JSON without markdown code fences.";
     }
 
     pub fn delete_room(&self, room_id: &str) -> Result<Vec<RoomAgent>, ChatStoreError> {
-        let agents = self.list_room_agents(room_id)?;
+        let mut agents = self.list_room_agents(room_id)?;
+        if let Ok(Some(mgr)) = self.get_room_manager_agent(room_id) {
+            agents.push(mgr);
+        }
         let conn = self.conn.lock().expect("store mutex poisoned");
         let affected = conn.execute("DELETE FROM rooms WHERE room_id = ?1", params![room_id])?;
         if affected == 0 {
@@ -476,7 +469,9 @@ Output ONLY valid JSON without markdown code fences.";
         let mut room = Self::load_room_from_conn(&tx, &agent.room_id)?
             .ok_or_else(|| ChatStoreError::NotFound(format!("room {}", agent.room_id)))?;
 
-        room.roster_version += 1;
+        if !agent.name.eq_ignore_ascii_case("Manager") {
+            room.roster_version += 1;
+        }
         room.updated_at = Utc::now();
         agent.last_delivered_seq = room.last_msg_seq;
 
@@ -569,7 +564,7 @@ Output ONLY valid JSON without markdown code fences.";
                     session_chain_json, last_delivered_seq, last_roster_version,
                     allow_speak_in_turn, runtime_state, active_activation_id,
                     agent_secret_token, created_by, created_at
-             FROM room_agents WHERE room_id = ?1 ORDER BY created_at ASC",
+             FROM room_agents WHERE room_id = ?1 AND lower(name) != 'manager' ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![room_id], Self::row_to_agent)?;
         let mut out = Vec::new();
@@ -577,6 +572,26 @@ Output ONLY valid JSON without markdown code fences.";
             out.push(r?);
         }
         Ok(out)
+    }
+
+    pub fn get_room_manager_agent(
+        &self,
+        room_id: &str,
+    ) -> Result<Option<RoomAgent>, ChatStoreError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.query_row(
+            "SELECT agent_id, room_id, name, role_title, avatar, persona_prompt,
+                    model, reasoning_effort, reasoning_summary, scheduling_json,
+                    root_session_id, active_session_id,
+                    session_chain_json, last_delivered_seq, last_roster_version,
+                    allow_speak_in_turn, runtime_state, active_activation_id,
+                    agent_secret_token, created_by, created_at
+             FROM room_agents WHERE room_id = ?1 AND lower(name) = 'manager' LIMIT 1",
+            params![room_id],
+            Self::row_to_agent,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn get_agent(&self, agent_id: &str) -> Result<Option<RoomAgent>, ChatStoreError> {

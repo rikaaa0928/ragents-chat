@@ -12,7 +12,13 @@ wit_bindgen::generate!({
 #[derive(Debug, Clone, Default, Deserialize)]
 struct ChatroomPluginConfig {
     #[serde(default)]
+    is_manager: bool,
+    #[serde(default)]
     chatroom_callback_url: String,
+    #[serde(default)]
+    chatroom_add_agent_url: String,
+    #[serde(default)]
+    chatroom_remove_agent_url: String,
     #[serde(default)]
     room_id: String,
     #[serde(default)]
@@ -71,6 +77,22 @@ struct SpeakArgs {
     visible_to: Vec<String>,
     #[serde(default)]
     reply_to_seq: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct AddAgentArgs {
+    name: String,
+    role_title: String,
+    #[serde(default)]
+    avatar: String,
+    persona_prompt: String,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RemoveAgentArgs {
+    name: String,
 }
 
 #[derive(Serialize)]
@@ -265,8 +287,44 @@ impl exports::ragent::extension::lifecycle::Guest for ChatroomExtension {
                     .and_then(|g| g.as_ref().map(|s| s.config.clone()))
                     .unwrap_or_default();
 
-                let protocol_prompt = format!(
-                    "\n\n<chatroom_protocol>\n\
+                let room_name = if cfg.room_name.is_empty() {
+                    "General"
+                } else {
+                    &cfg.room_name
+                };
+                let agent_name = if cfg.agent_name.is_empty() {
+                    "Assistant"
+                } else {
+                    &cfg.agent_name
+                };
+                let agent_role = if cfg.agent_role.is_empty() {
+                    "AI Agent"
+                } else {
+                    &cfg.agent_role
+                };
+
+                let protocol_prompt = if cfg.is_manager {
+                    format!(
+                        "\n\n<manager_protocol>\n\
+You are @Manager ({agent_role}), the built-in Chatroom Butler & Specialist Recruiter for room \"{room_name}\".\n\
+\n\
+CRITICAL RULES FOR @MANAGER TOOL EXECUTION:\n\
+1. ONE STEP AT A TIME (MODIFY ROSTER FIRST, SPEAK SECOND):\n\
+   - When asked to recruit/add new specialist agents, call `chatroom_add_agent` for each required agent FIRST.\n\
+   - When asked to remove/dismiss existing agents, call `chatroom_remove_agent` FIRST.\n\
+   - Wait until all `chatroom_add_agent` / `chatroom_remove_agent` tool calls have succeeded and updated the room roster.\n\
+   - ONLY AFTER all roster modifications are complete, call `chatroom_speak` ONCE to announce the roster update in the chatroom.\n\
+2. LEAD-AGENT HANDOFF DISCIPLINE:\n\
+   - When you call `chatroom_speak` after recruiting new specialist agents, put ONLY the Room Lead Coordinator (or the Agent who called you) in `mentions` (e.g. `mentions: [\"Assistant\"]`) so the Lead Agent can assign tasks in order.\n\
+   - NEVER put all newly recruited agents in `mentions` simultaneously!\n\
+   - If you only removed agents or answered a question from @Human without needing another Agent to act immediately, set `mentions: [\"Human\"]` or `[]`.\n\
+3. PRIVATE INNER LOOP vs PUBLIC SPEECH:\n\
+   - Normal assistant text output is private to your internal session. You MUST call `chatroom_speak` so your final reply appears in the chatroom.\n\
+</manager_protocol>"
+                    )
+                } else {
+                    format!(
+                        "\n\n<chatroom_protocol>\n\
 You are participating in the multi-participant AI chatroom \"{room_name}\" as @{agent_name} ({agent_role}).\n\
 \n\
 CRITICAL RULES FOR CHATROOM INTERACTION:\n\
@@ -284,7 +342,7 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
    - All chatroom messages are visible to @Human and all members. Contribute ONLY incremental domain insights; NEVER copy-paste or re-summarize a full guide that was already posted in earlier messages unless @Human explicitly asks for a new revision.\n\
 4. DEFAULT LEAD AGENT & @MANAGER RECRUITMENT:\n\
    - Unless @Human designates another lead, the FIRST Agent in the room roster (marked `[Default Room Lead]`) is the lead coordinator: responsible for decomposing tasks, delegating specific subtasks to specialists via `mentions`, and doing a single concise wrap-up (with `mentions: [\"Human\"]` ONLY) once specialists finish.\n\
-   - If a task requires a new specialist Agent not yet in the room, call `chatroom_speak` with `mentions: [\"Manager\"]` and describe the needed role, model, and skills.\n\
+   - If a task requires adding or removing a specialist Agent in the room, call `chatroom_speak` with `mentions: [\"Manager\"]` and describe the needed role, model, and skills.\n\
 5. PRIVATE WHISPERS & VISIBILITY ISOLATION (`visible_to`):\n\
    - By default (`visible_to` omitted or empty `[]`), your `chatroom_speak` message is public to everyone in the room.\n\
    - If you need to send a secret/private message (e.g. secret role assignment, night-phase action in Werewolf, or private backchannel), pass `visible_to: [\"TargetAgentName\"]` in `chatroom_speak`. Only the participants listed in `visible_to` (plus yourself and @Human observer) can see that message; all other Agents are physically blinded from reading it.\n\
@@ -292,23 +350,9 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
 6. WHEN PEEKING AT UNREAD MESSAGES WHILE IDLE (`[Chatroom Unread Peek]`):\n\
    - Chime in (`chatroom_speak`) ONLY if you spot an error, a critical blind spot, or high-value domain expertise that nobody else has covered.\n\
    - Otherwise (or if `[Chatroom Speak Permission: MUTED]` is active), DO NOT call `chatroom_speak` and finish with `Observed.`.\n\
-</chatroom_protocol>",
-                    room_name = if cfg.room_name.is_empty() {
-                        "General"
-                    } else {
-                        &cfg.room_name
-                    },
-                    agent_name = if cfg.agent_name.is_empty() {
-                        "Assistant"
-                    } else {
-                        &cfg.agent_name
-                    },
-                    agent_role = if cfg.agent_role.is_empty() {
-                        "AI Agent"
-                    } else {
-                        &cfg.agent_role
-                    },
-                );
+</chatroom_protocol>"
+                    )
+                };
 
                 if let Some(sys) = draft
                     .get("system_prompt")
@@ -319,6 +363,55 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                 }
 
                 if let Some(tools) = draft.get_mut("tools").and_then(Value::as_array_mut) {
+                    if cfg.is_manager {
+                        tools.push(json!({
+                            "enabled": true,
+                            "name": "chatroom_add_agent",
+                            "description": "Recruit and add a new AI specialist agent into the current chatroom. Call this tool BEFORE calling chatroom_speak so the new agent is already seated in the room when you announce them.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {
+                                        "type": "string",
+                                        "description": "Unique alphanumeric/Chinese handle without spaces or @ (e.g. 'Player1', 'SecAuditor', 'RustExpert')."
+                                    },
+                                    "role_title": {
+                                        "type": "string",
+                                        "description": "Concise role title (e.g. '安全与权限审计专家', '1号玩家·逻辑派')."
+                                    },
+                                    "avatar": {
+                                        "type": "string",
+                                        "description": "Single emoji representing this agent (e.g. '🛡️', '🦊', '🦉')."
+                                    },
+                                    "persona_prompt": {
+                                        "type": "string",
+                                        "description": "Detailed system prompt and behavioral rules for this agent."
+                                    },
+                                    "model": {
+                                        "type": "string",
+                                        "description": "Optional model identifier chosen from the cluster's Available Models."
+                                    }
+                                },
+                                "required": ["name", "role_title", "persona_prompt"]
+                            }
+                        }));
+                        tools.push(json!({
+                            "enabled": true,
+                            "name": "chatroom_remove_agent",
+                            "description": "Remove an existing AI agent from the current chatroom by name or agent_id. Call this tool BEFORE calling chatroom_speak.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {
+                                        "type": "string",
+                                        "description": "Name (e.g. 'Player1') or agent_id of the agent to remove from the room."
+                                    }
+                                },
+                                "required": ["name"]
+                            }
+                        }));
+                    }
+
                     tools.push(json!({
                         "enabled": true,
                         "name": "chatroom_speak",
@@ -382,9 +475,6 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
             "tools.call" => {
                 let call: ToolCallRequest =
                     serde_json::from_value(req.payload).map_err(|e| e.to_string())?;
-                if call.name != "chatroom_speak" {
-                    return Err(format!("unknown tool: {}", call.name));
-                }
 
                 let (cfg, is_muted) = {
                     let guard = STATE.lock().map_err(|e| e.to_string())?;
@@ -392,62 +482,169 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                     (st.config.clone(), st.is_muted_turn)
                 };
 
-                if is_muted {
-                    let res = ToolResult {
-                        success: false,
-                        output: "Permission denied: You are muted for this peek turn (read-only observation).".to_string(),
-                        error: Some("muted_in_turn".to_string()),
-                    };
-                    return Ok(json!({ "action": "continue", "payload": res }).to_string());
-                }
-
-                let args: SpeakArgs = match serde_json::from_value(call.arguments) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        let res = ToolResult {
-                            success: false,
-                            output: format!("Invalid arguments for chatroom_speak: {e}"),
-                            error: Some(e.to_string()),
+                match call.name.as_str() {
+                    "chatroom_add_agent" => {
+                        if !cfg.is_manager {
+                            let res = ToolResult {
+                                success: false,
+                                output: "Permission denied: only @Manager can call chatroom_add_agent.".to_string(),
+                                error: Some("permission_denied".to_string()),
+                            };
+                            return Ok(json!({ "action": "continue", "payload": res }).to_string());
+                        }
+                        let args: AddAgentArgs = match serde_json::from_value(call.arguments) {
+                            Ok(a) => a,
+                            Err(e) => {
+                                let res = ToolResult {
+                                    success: false,
+                                    output: format!("Invalid arguments for chatroom_add_agent: {e}"),
+                                    error: Some(e.to_string()),
+                                };
+                                return Ok(json!({ "action": "continue", "payload": res }).to_string());
+                            }
                         };
-                        return Ok(json!({ "action": "continue", "payload": res }).to_string());
+                        let payload = json!({
+                            "room_id": cfg.room_id,
+                            "agent_id": cfg.agent_id,
+                            "name": args.name,
+                            "role_title": args.role_title,
+                            "avatar": args.avatar,
+                            "persona_prompt": args.persona_prompt,
+                            "model": args.model,
+                        });
+                        let body_bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+                        let result = match post_json_via_wasi_http(
+                            &cfg.chatroom_add_agent_url,
+                            &cfg.agent_token,
+                            &body_bytes,
+                        ) {
+                            Ok((status, resp_body)) if (200..300).contains(&status) => ToolResult {
+                                success: true,
+                                output: format!("Agent added to chatroom: {resp_body}"),
+                                error: None,
+                            },
+                            Ok((status, resp_body)) => ToolResult {
+                                success: false,
+                                output: format!("Failed to add agent (HTTP {status}): {resp_body}"),
+                                error: Some(format!("HTTP {status}: {resp_body}")),
+                            },
+                            Err(err) => ToolResult {
+                                success: false,
+                                output: format!("Failed to reach chatroom server: {err}"),
+                                error: Some(err),
+                            },
+                        };
+                        Ok(json!({ "action": "continue", "payload": result }).to_string())
                     }
-                };
+                    "chatroom_remove_agent" => {
+                        if !cfg.is_manager {
+                            let res = ToolResult {
+                                success: false,
+                                output: "Permission denied: only @Manager can call chatroom_remove_agent.".to_string(),
+                                error: Some("permission_denied".to_string()),
+                            };
+                            return Ok(json!({ "action": "continue", "payload": res }).to_string());
+                        }
+                        let args: RemoveAgentArgs = match serde_json::from_value(call.arguments) {
+                            Ok(a) => a,
+                            Err(e) => {
+                                let res = ToolResult {
+                                    success: false,
+                                    output: format!("Invalid arguments for chatroom_remove_agent: {e}"),
+                                    error: Some(e.to_string()),
+                                };
+                                return Ok(json!({ "action": "continue", "payload": res }).to_string());
+                            }
+                        };
+                        let payload = json!({
+                            "room_id": cfg.room_id,
+                            "agent_id": cfg.agent_id,
+                            "target_name": args.name,
+                        });
+                        let body_bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+                        let result = match post_json_via_wasi_http(
+                            &cfg.chatroom_remove_agent_url,
+                            &cfg.agent_token,
+                            &body_bytes,
+                        ) {
+                            Ok((status, resp_body)) if (200..300).contains(&status) => ToolResult {
+                                success: true,
+                                output: format!("Agent removed from chatroom: {resp_body}"),
+                                error: None,
+                            },
+                            Ok((status, resp_body)) => ToolResult {
+                                success: false,
+                                output: format!("Failed to remove agent (HTTP {status}): {resp_body}"),
+                                error: Some(format!("HTTP {status}: {resp_body}")),
+                            },
+                            Err(err) => ToolResult {
+                                success: false,
+                                output: format!("Failed to reach chatroom server: {err}"),
+                                error: Some(err),
+                            },
+                        };
+                        Ok(json!({ "action": "continue", "payload": result }).to_string())
+                    }
+                    "chatroom_speak" => {
+                        if is_muted {
+                            let res = ToolResult {
+                                success: false,
+                                output: "Permission denied: You are muted for this peek turn (read-only observation).".to_string(),
+                                error: Some("muted_in_turn".to_string()),
+                            };
+                            return Ok(json!({ "action": "continue", "payload": res }).to_string());
+                        }
 
-                let payload = json!({
-                    "room_id": cfg.room_id,
-                    "agent_id": cfg.agent_id,
-                    "content": args.content,
-                    "mentions": args.mentions,
-                    "visible_to": args.visible_to,
-                    "reply_to_seq": args.reply_to_seq,
-                });
-                let body_bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+                        let args: SpeakArgs = match serde_json::from_value(call.arguments) {
+                            Ok(a) => a,
+                            Err(e) => {
+                                let res = ToolResult {
+                                    success: false,
+                                    output: format!("Invalid arguments for chatroom_speak: {e}"),
+                                    error: Some(e.to_string()),
+                                };
+                                return Ok(json!({ "action": "continue", "payload": res }).to_string());
+                            }
+                        };
 
-                let result = match post_json_via_wasi_http(
-                    &cfg.chatroom_callback_url,
-                    &cfg.agent_token,
-                    &body_bytes,
-                ) {
-                    Ok((status, resp_body)) if (200..300).contains(&status) => ToolResult {
-                        success: true,
-                        output: format!("Message posted to chatroom: {resp_body}"),
-                        error: None,
-                    },
-                    Ok((status, resp_body)) => ToolResult {
-                        success: false,
-                        output: format!(
-                            "Chatroom rejected message (HTTP {status}): {resp_body}"
-                        ),
-                        error: Some(format!("HTTP {status}: {resp_body}")),
-                    },
-                    Err(err) => ToolResult {
-                        success: false,
-                        output: format!("Failed to reach chatroom server: {err}"),
-                        error: Some(err),
-                    },
-                };
+                        let payload = json!({
+                            "room_id": cfg.room_id,
+                            "agent_id": cfg.agent_id,
+                            "content": args.content,
+                            "mentions": args.mentions,
+                            "visible_to": args.visible_to,
+                            "reply_to_seq": args.reply_to_seq,
+                        });
+                        let body_bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
 
-                Ok(json!({ "action": "continue", "payload": result }).to_string())
+                        let result = match post_json_via_wasi_http(
+                            &cfg.chatroom_callback_url,
+                            &cfg.agent_token,
+                            &body_bytes,
+                        ) {
+                            Ok((status, resp_body)) if (200..300).contains(&status) => ToolResult {
+                                success: true,
+                                output: format!("Message posted to chatroom: {resp_body}"),
+                                error: None,
+                            },
+                            Ok((status, resp_body)) => ToolResult {
+                                success: false,
+                                output: format!(
+                                    "Chatroom rejected message (HTTP {status}): {resp_body}"
+                                ),
+                                error: Some(format!("HTTP {status}: {resp_body}")),
+                            },
+                            Err(err) => ToolResult {
+                                success: false,
+                                output: format!("Failed to reach chatroom server: {err}"),
+                                error: Some(err),
+                            },
+                        };
+
+                        Ok(json!({ "action": "continue", "payload": result }).to_string())
+                    }
+                    other => Err(format!("unknown tool: {other}")),
+                }
             }
             other => Err(format!("unsupported hook: {other}")),
         }

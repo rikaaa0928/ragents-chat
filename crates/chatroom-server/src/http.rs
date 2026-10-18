@@ -90,6 +90,14 @@ pub fn build_chat_router(state: ChatServerState) -> Router {
             "/api/v1/internal/agent-speak",
             post(handle_internal_agent_speak),
         )
+        .route(
+            "/api/v1/internal/manager/add-agent",
+            post(handle_internal_manager_add_agent),
+        )
+        .route(
+            "/api/v1/internal/manager/remove-agent",
+            post(handle_internal_manager_remove_agent),
+        )
         .with_state(state)
 }
 
@@ -306,6 +314,12 @@ async fn handle_get_room(
         .store
         .get_room(&room_id)?
         .ok_or_else(|| ChatApiError::Http(StatusCode::NOT_FOUND, "room not found".into()))?;
+    let manager_agent = state
+        .coordinator
+        .ensure_room_manager_agent(&room_id)
+        .await
+        .ok()
+        .map(Into::into);
     let agents: Vec<RoomAgentPublic> = state
         .coordinator
         .store
@@ -317,6 +331,7 @@ async fn handle_get_room(
     let flow_logs = state.coordinator.get_room_flow_logs(&room_id);
     Ok(Json(RoomDetailResponse {
         room,
+        manager_agent,
         agents,
         messages,
         flow_logs,
@@ -666,6 +681,53 @@ async fn handle_internal_agent_speak(
             "message_id": msg.message_id,
         })),
     ))
+}
+
+async fn handle_internal_manager_add_agent(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Json(req): Json<InternalManagerAddAgentRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ChatApiError> {
+    let bearer = extract_bearer_or_cookie_token(&headers);
+    let created = state
+        .coordinator
+        .handle_internal_manager_add_agent(bearer.as_deref(), req)
+        .await
+        .map_err(|(code, err)| {
+            ChatApiError::Http(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST),
+                err,
+            )
+        })?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "ok": true,
+            "agent_id": created.agent_id,
+            "name": created.name,
+            "role_title": created.role_title,
+            "model": created.model,
+        })),
+    ))
+}
+
+async fn handle_internal_manager_remove_agent(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Json(req): Json<InternalManagerRemoveAgentRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ChatApiError> {
+    let bearer = extract_bearer_or_cookie_token(&headers);
+    let res = state
+        .coordinator
+        .handle_internal_manager_remove_agent(bearer.as_deref(), req)
+        .await
+        .map_err(|(code, err)| {
+            ChatApiError::Http(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST),
+                err,
+            )
+        })?;
+    Ok((StatusCode::OK, Json(res)))
 }
 
 pub enum ChatApiError {

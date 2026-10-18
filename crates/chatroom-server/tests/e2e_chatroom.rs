@@ -37,6 +37,7 @@ impl ModelBackend for ChatroomTestModelBackend {
     ) -> Result<ResponseResource, CoreError> {
         let mut all_user_texts = Vec::new();
         let mut last_item_is_tool_output = false;
+        let mut last_tool_output_text = String::new();
 
         if let Some(Input::Items(ref items)) = request.input {
             for item in items {
@@ -54,8 +55,9 @@ impl ModelBackend for ChatroomTestModelBackend {
                         all_user_texts.push(txt);
                         last_item_is_tool_output = false;
                     }
-                    Item::FunctionCallOutput { .. } => {
+                    Item::FunctionCallOutput { output, .. } => {
                         last_item_is_tool_output = true;
+                        last_tool_output_text = format!("{output:?}");
                     }
                     _ => {}
                 }
@@ -78,30 +80,86 @@ impl ModelBackend for ChatroomTestModelBackend {
             .unwrap()
             .push((latest_user.clone(), tool_names.clone()));
 
-        // 1. If this is the temporary @Manager session
-        if request
-            .instructions
-            .as_deref()
-            .unwrap_or("")
-            .contains("You are @Manager")
-        {
-            let mgr_json = json!({
-                "reply": "我已经为您招募了安全审计专家 @SecAuditor 入群！",
-                "new_agents": [
-                    {
-                        "name": "SecAuditor",
-                        "role_title": "安全与权限审计专家",
-                        "avatar": "🛡️",
-                        "persona_prompt": "You are @SecAuditor, a security specialist."
-                    }
-                ]
-            });
-            return Ok(make_openresponses_resource(
-                "resp_mgr",
-                "gpt-4.1-mini",
-                vec![Item::assistant_message(mgr_json.to_string())],
-                None,
-            ));
+        // 1. If this is the @Manager Agent Session (equipped with chatroom_add_agent, chatroom_remove_agent, chatroom_speak)
+        if tool_names.iter().any(|t| t == "chatroom_add_agent") {
+            if !last_item_is_tool_output {
+                if latest_user.contains("REMOVE_SECAUDITOR") {
+                    return Ok(make_openresponses_resource(
+                        "resp_mgr_rm",
+                        "gpt-4.1-mini",
+                        vec![Item::FunctionCall {
+                            id: Some("fc_mgr_rm".into()),
+                            call_id: "call_mgr_rm_1".into(),
+                            name: "chatroom_remove_agent".into(),
+                            arguments: json!({
+                                "name": "SecAuditor"
+                            })
+                            .to_string(),
+                            status: Some(FunctionCallStatus::Completed),
+                        }],
+                        None,
+                    ));
+                }
+                return Ok(make_openresponses_resource(
+                    "resp_mgr_add",
+                    "gpt-4.1-mini",
+                    vec![Item::FunctionCall {
+                        id: Some("fc_mgr_add".into()),
+                        call_id: "call_mgr_add_1".into(),
+                        name: "chatroom_add_agent".into(),
+                        arguments: json!({
+                            "name": "SecAuditor",
+                            "role_title": "安全与权限审计专家",
+                            "avatar": "🛡️",
+                            "persona_prompt": "You are @SecAuditor, a security specialist."
+                        })
+                        .to_string(),
+                        status: Some(FunctionCallStatus::Completed),
+                    }],
+                    None,
+                ));
+            } else if last_tool_output_text.contains("Agent added to chatroom") {
+                return Ok(make_openresponses_resource(
+                    "resp_mgr_speak",
+                    "gpt-4.1-mini",
+                    vec![Item::FunctionCall {
+                        id: Some("fc_mgr_speak".into()),
+                        call_id: "call_mgr_speak_1".into(),
+                        name: "chatroom_speak".into(),
+                        arguments: json!({
+                            "content": "我已经为您招募了安全审计专家 @SecAuditor 入群！",
+                            "mentions": ["Human"]
+                        })
+                        .to_string(),
+                        status: Some(FunctionCallStatus::Completed),
+                    }],
+                    None,
+                ));
+            } else if last_tool_output_text.contains("Agent removed from chatroom") {
+                return Ok(make_openresponses_resource(
+                    "resp_mgr_rm_speak",
+                    "gpt-4.1-mini",
+                    vec![Item::FunctionCall {
+                        id: Some("fc_mgr_rm_speak".into()),
+                        call_id: "call_mgr_rm_speak_1".into(),
+                        name: "chatroom_speak".into(),
+                        arguments: json!({
+                            "content": "已按您的要求将 @SecAuditor 移出本群。",
+                            "mentions": ["Human"]
+                        })
+                        .to_string(),
+                        status: Some(FunctionCallStatus::Completed),
+                    }],
+                    None,
+                ));
+            } else {
+                return Ok(make_openresponses_resource(
+                    "resp_mgr_done",
+                    "gpt-4.1-mini",
+                    vec![Item::assistant_message("Observed.")],
+                    None,
+                ));
+            }
         }
 
         // 2. If the previous step was a `chatroom_speak` tool call output, finish the turn cleanly
@@ -632,6 +690,48 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         interjected,
         "Peeking agent with roll >= mute_probability should actively interject via chatroom_speak"
     );
+
+    // 12. Test `@Manager` Agent removal via `chatroom_remove_agent` -> `chatroom_speak` and verify @Manager Inspector
+    let mgr_rm_msg: RoomMessage = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/recruit"))
+        .bearer_auth(chat_auth_token)
+        .json(&RecruitAgentRequest {
+            requirement: "REMOVE_SECAUDITOR 请把 SecAuditor 移出群聊".to_string(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(mgr_rm_msg.sender_kind, SenderKind::Manager);
+    assert!(mgr_rm_msg.content.contains("移出本群"));
+
+    let detail_after_remove: RoomDetailResponse = http
+        .get(format!("{chat_base}/api/v1/rooms/{room_id}"))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail_after_remove.agents.len(), 1);
+    assert!(detail_after_remove.manager_agent.is_some());
+
+    let mgr_agent_id = detail_after_remove.manager_agent.unwrap().agent_id;
+    let mgr_inspector: InspectorResponse = http
+        .get(format!("{chat_base}/api/v1/agents/{mgr_agent_id}/inspector"))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mgr_ctx_json = serde_json::to_string(&mgr_inspector.context).unwrap();
+    assert!(mgr_ctx_json.contains("chatroom_add_agent"));
+    assert!(mgr_ctx_json.contains("chatroom_remove_agent"));
 
     cancel.cancel();
 }
