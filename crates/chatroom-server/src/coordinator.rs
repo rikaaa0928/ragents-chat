@@ -285,6 +285,7 @@ impl RoomCoordinator {
                                 "System",
                                 format!("⚠️ @{} 内部执行报错：{}", updated.name, err_msg),
                                 vec![],
+                                vec![],
                                 None,
                                 Some(env.session_id.clone()),
                                 env.activation_id.clone(),
@@ -733,6 +734,7 @@ impl RoomCoordinator {
             mentions.push(agents[0].name.clone());
         }
 
+        let visible_to = resolve_explicit_mentions(&req.visible_to, &agents, None);
         let (msg, updated_room) = self.store.append_message(
             room_id,
             SenderKind::Human,
@@ -744,6 +746,7 @@ impl RoomCoordinator {
             },
             req.content,
             mentions,
+            visible_to,
             req.reply_to_seq,
             None,
             None,
@@ -795,6 +798,15 @@ impl RoomCoordinator {
             .list_room_agents(&req.room_id)
             .map_err(|e| (500, e.to_string()))?;
         let mentions = resolve_explicit_mentions(&req.mentions, &agents, Some(&agent.name));
+        let mut visible_to = resolve_explicit_mentions(&req.visible_to, &agents, None);
+        // If `visible_to` is specified, ensure any explicitly @mentioned target can also see the message
+        if !visible_to.is_empty() {
+            for m in &mentions {
+                if !visible_to.iter().any(|v| v.eq_ignore_ascii_case(m)) {
+                    visible_to.push(m.clone());
+                }
+            }
+        }
         let cleaned_content = strip_leading_redundant_mentions(&req.content, &mentions);
 
         // Mark that this agent has spoken in its current turn
@@ -831,6 +843,7 @@ impl RoomCoordinator {
                 &agent.name,
                 cleaned_content,
                 mentions,
+                visible_to,
                 req.reply_to_seq,
                 Some(agent.active_session_id),
                 agent.active_activation_id,
@@ -881,6 +894,7 @@ impl RoomCoordinator {
                         "群内 Agent 已连续发言达到上限 ({} 轮)，已自动暂停接力。人类发言或点击“继续讨论”即可恢复。",
                         room.max_agent_relay_depth
                     ),
+                    vec![],
                     vec![],
                     None,
                     None,
@@ -955,14 +969,16 @@ impl RoomCoordinator {
         target_agent: &RoomAgent,
         from_human: bool,
     ) -> anyhow::Result<()> {
-        let unread = self
-            .store
-            .list_room_messages(&room.room_id, target_agent.last_delivered_seq)?;
+        let unread = self.store.list_room_messages_for_agent(
+            &room.room_id,
+            target_agent.last_delivered_seq,
+            &target_agent.name,
+        )?;
         if unread.is_empty() {
             return Ok(());
         }
 
-        let max_seq = unread.last().map(|m| m.msg_seq).unwrap_or(room.last_msg_seq);
+        let max_seq = room.last_msg_seq;
         let formatted = format_delivery_payload(
             room,
             all_agents,
@@ -1187,13 +1203,20 @@ impl RoomCoordinator {
                 return;
             };
 
-            let Ok(unread) = self
-                .store
-                .list_room_messages(room_id, target_agent.last_delivered_seq)
-            else {
+            let Ok(unread) = self.store.list_room_messages_for_agent(
+                room_id,
+                target_agent.last_delivered_seq,
+                &target_agent.name,
+            ) else {
                 return;
             };
             if unread.is_empty() {
+                let _ = self.store.prepare_agent_delivery(
+                    &target_agent.agent_id,
+                    room.last_msg_seq,
+                    target_agent.last_roster_version,
+                    true,
+                );
                 {
                     let mut guard = self
                         .room_peek_states
@@ -1207,7 +1230,7 @@ impl RoomCoordinator {
                 return;
             }
 
-            let max_seq = unread.last().map(|m| m.msg_seq).unwrap_or(room.last_msg_seq);
+            let max_seq = room.last_msg_seq;
             let mode = if allow_speak {
                 DeliveryMode::PeekAllowed { roll }
             } else {
@@ -1390,9 +1413,20 @@ fn format_single_room_message(m: &RoomMessage) -> String {
         let tags: Vec<String> = m.mentions.iter().map(|n| format!("@{n}")).collect();
         format!(" -> {}", tags.join(" "))
     };
+    let visibility_part = if m.visible_to.is_empty() {
+        String::new()
+    } else {
+        let mut vis_tags = vec![format!("@{}", m.sender_name)];
+        for v in &m.visible_to {
+            if !v.eq_ignore_ascii_case(&m.sender_name) {
+                vis_tags.push(format!("@{v}"));
+            }
+        }
+        format!(" [🔒 Private Whisper visible ONLY to: {}]", vis_tags.join(", "))
+    };
     format!(
-        "[#{} | {} | {}{}{}]: {}",
-        m.msg_seq, time_str, m.sender_name, mention_part, reply_part, m.content
+        "[#{} | {} | {}{}{}{}]: {}",
+        m.msg_seq, time_str, m.sender_name, mention_part, visibility_part, reply_part, m.content
     )
 }
 

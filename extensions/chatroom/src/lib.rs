@@ -68,6 +68,8 @@ struct SpeakArgs {
     #[serde(default)]
     mentions: Vec<String>,
     #[serde(default)]
+    visible_to: Vec<String>,
+    #[serde(default)]
     reply_to_seq: Option<u64>,
 }
 
@@ -283,7 +285,11 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
 4. DEFAULT LEAD AGENT & @MANAGER RECRUITMENT:\n\
    - Unless @Human designates another lead, the FIRST Agent in the room roster (marked `[Default Room Lead]`) is the lead coordinator: responsible for decomposing tasks, delegating specific subtasks to specialists via `mentions`, and doing a single concise wrap-up (with `mentions: [\"Human\"]` ONLY) once specialists finish.\n\
    - If a task requires a new specialist Agent not yet in the room, call `chatroom_speak` with `mentions: [\"Manager\"]` and describe the needed role, model, and skills.\n\
-5. WHEN PEEKING AT UNREAD MESSAGES WHILE IDLE (`[Chatroom Unread Peek]`):\n\
+5. PRIVATE WHISPERS & VISIBILITY ISOLATION (`visible_to`):\n\
+   - By default (`visible_to` omitted or empty `[]`), your `chatroom_speak` message is public to everyone in the room.\n\
+   - If you need to send a secret/private message (e.g. secret role assignment, night-phase action in Werewolf, or private backchannel), pass `visible_to: [\"TargetAgentName\"]` in `chatroom_speak`. Only the participants listed in `visible_to` (plus yourself and @Human observer) can see that message; all other Agents are physically blinded from reading it.\n\
+   - When replying to a `[🔒 Private Whisper ...]` message that must remain secret, remember to also set `visible_to` (e.g. `visible_to: [\"Judge\"]`) so your reply stays private!\n\
+6. WHEN PEEKING AT UNREAD MESSAGES WHILE IDLE (`[Chatroom Unread Peek]`):\n\
    - Chime in (`chatroom_speak`) ONLY if you spot an error, a critical blind spot, or high-value domain expertise that nobody else has covered.\n\
    - Otherwise (or if `[Chatroom Speak Permission: MUTED]` is active), DO NOT call `chatroom_speak` and finish with `Observed.`.\n\
 </chatroom_protocol>",
@@ -328,6 +334,11 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                                     "type": "array",
                                     "items": { "type": "string" },
                                     "description": "ONLY include an Agent name here if you require that Agent to immediately execute a task or answer a question (e.g. ['Manager'] or ['Reviewer']). When replying to the user or delivering a final summary, use ['Human'] or []."
+                                },
+                                "visible_to": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "description": "Optional visibility whitelist for secret/private whispers (e.g. ['Player1'] or ['Judge', 'Player1']). If omitted or empty, everyone in the room can see the message. If non-empty, ONLY the listed participants (plus yourself and @Human observer) can see it."
                                 },
                                 "reply_to_seq": {
                                     "type": "integer",
@@ -407,6 +418,7 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                     "agent_id": cfg.agent_id,
                     "content": args.content,
                     "mentions": args.mentions,
+                    "visible_to": args.visible_to,
                     "reply_to_seq": args.reply_to_seq,
                 });
                 let body_bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;

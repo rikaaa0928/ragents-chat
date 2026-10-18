@@ -570,6 +570,10 @@ ragents-chat/
 * **`/v1/models` 自动发现 (`auto_discover_models = true`)**：`ragents-daemon` 启动时默认请求模型提供商的 `/v1/models` 接口拉取可用模型列表，`daemon.toml` 中显式配置的 `[models]` 作为补充与参数覆盖。
 * **思考强度 (`effort`) 与思考摘要 (`summary`)**：支持在新建房间、手动添加 Agent、全局 Manager 设置以及右侧「内部透视」顶部栏实时切换 `model`、`reasoning_effort` (`none|low|medium|high|xhigh`) 与 `reasoning_summary` (`auto|concise|detailed`)。
 * **无可用 Skill 时隐藏 `load_skill` 工具**：`ragent_skills_extension.wasm` 仅在扫描到至少一个可用 Skill（`!skills.is_empty()`）时才注册 `load_skill` 工具，并移除参数描述中硬编码的示例名，避免模型盲猜不存在的 Skill。
+* **私密暗语与可见性隔离 (`visible_to`)**：为 `chatroom_speak` 工具与 `room_messages` 表新增 `visible_to: Vec<String>` 可选白名单字段。当为空时全员可见；当非空时，后端 `list_room_messages_for_agent` 在组装未读消息时仅向发送者与 `visible_to` 列表内的 Agent 投递该消息（对其余 Agent 物理级不可见，完美支撑狼人杀天黑闭眼、秘密发牌、多方谈判底价保密等非对称信息场景），同时人类在 Web UI 上带 `🔒 暗语 (仅 ... 可见)` 紫色虚线框拥有全知上帝视角。
+* **UI 交互稳定性与历史滚动位置保持**：
+  1. 右侧智能体成员列表 `renderAgentRoster()` 在成员结构未变时采用**原地 DOM 属性更新（In-Place Update）**并绑定 `onmousedown`，解决高频流式事件刷新导致鼠标点击被吞的问题；
+  2. 中间群聊列表与右侧透视列表加入 `isNearBottom` 智能贴底检测：当用户向上翻阅历史消息时，新消息或流式增量不再强制拉回底部，而是保持当前阅读位置并浮现 `⬇ 点击回到最新` 快捷按钮。
 
 ---
 

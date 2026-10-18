@@ -1051,17 +1051,25 @@
       box.innerHTML = currentMessages.map(m => {
         const cls = m.sender_kind || 'human';
         const mentions = m.mentions || [];
+        const visibleTo = m.visible_to || [];
         const mentionsHtml = mentions.length > 0
           ? `<span style="color:var(--text-muted); margin:0 2px;">➔</span>` + mentions.map(n => `<span class="mention-pill">@${escapeHtml(n)}</span>`).join('')
           : '';
+        let whisperHtml = '';
+        if (visibleTo.length > 0) {
+          const allVis = [m.sender_name, ...visibleTo.filter(v => String(v).toLowerCase() !== String(m.sender_name).toLowerCase())];
+          whisperHtml = `<span style="font-size:11px; background:rgba(139,92,246,0.16); color:var(--purple); padding:1px 6px; border-radius:4px; border:1px solid rgba(139,92,246,0.35); margin-left:4px;">🔒 暗语 (仅 ${allVis.map(v => '@' + escapeHtml(v)).join(', ')} 可见)</span>`;
+        }
         const cleanedBody = stripLeadingRedundantMentions(m.content, mentions);
         const timeStr = new Date(m.created_at).toLocaleTimeString();
+        const cardStyle = visibleTo.length > 0 ? 'border-style:dashed; border-color:rgba(139,92,246,0.55); background:rgba(139,92,246,0.05);' : '';
         return `
-          <div class="msg-card ${cls}">
+          <div class="msg-card ${cls}" style="${cardStyle}">
             <div class="msg-meta" style="flex-wrap:wrap;">
               <span>#${m.msg_seq}</span>
               <span class="msg-sender">${escapeHtml(m.sender_name)}</span>
               ${mentionsHtml}
+              ${whisperHtml}
               <span style="margin-left:auto;">${timeStr}</span>
             </div>
             <div class="msg-body">${escapeHtml(cleanedBody)}</div>

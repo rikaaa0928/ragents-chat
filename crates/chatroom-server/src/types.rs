@@ -338,6 +338,8 @@ pub struct RoomMessage {
     pub sender_name: String,
     pub content: String,
     pub mentions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visible_to: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_seq: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -354,6 +356,8 @@ pub struct PostMessageRequest {
     pub content: String,
     #[serde(default)]
     pub mentions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visible_to: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_seq: Option<u64>,
 }
@@ -369,6 +373,8 @@ pub struct InternalAgentSpeakRequest {
     pub content: String,
     #[serde(default)]
     pub mentions: Vec<String>,
+    #[serde(default)]
+    pub visible_to: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_seq: Option<u64>,
 }

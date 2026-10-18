@@ -246,6 +246,7 @@ pub async fn recruit_agents_via_manager(
         "Manager",
         final_reply,
         mentions,
+        vec![],
         None,
         Some(mgr_sess_id),
         Some(mgr_act_id),

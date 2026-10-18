@@ -126,6 +126,7 @@ impl ChatroomStore {
                  sender_name             TEXT NOT NULL,
                  content                 TEXT NOT NULL,
                  mentions_json           TEXT NOT NULL DEFAULT '[]',
+                 visible_to_json         TEXT NOT NULL DEFAULT '[]',
                  reply_to_seq            INTEGER,
                  source_session_id       TEXT,
                  source_activation_id    TEXT,
@@ -133,6 +134,10 @@ impl ChatroomStore {
                  PRIMARY KEY (room_id, msg_seq)
              );",
         )?;
+        let _ = conn.execute(
+            "ALTER TABLE room_messages ADD COLUMN visible_to_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        );
 
         let default_mgr_prompt = "You are @Manager, the AI Chatroom Butler and Team Architect. \
 When humans or agents ask you to recruit new specialist agents into the room (or ask you a management question), \
@@ -760,6 +765,7 @@ Output ONLY valid JSON without markdown code fences.";
         sender_name: &str,
         content: String,
         mentions: Vec<String>,
+        visible_to: Vec<String>,
         reply_to_seq: Option<u64>,
         source_session_id: Option<SessionId>,
         source_activation_id: Option<ActivationId>,
@@ -797,6 +803,7 @@ Output ONLY valid JSON without markdown code fences.";
             sender_name: sender_name.to_string(),
             content,
             mentions,
+            visible_to,
             reply_to_seq,
             source_session_id,
             source_activation_id,
@@ -806,8 +813,8 @@ Output ONLY valid JSON without markdown code fences.";
         tx.execute(
             "INSERT INTO room_messages (
                 room_id, msg_seq, message_id, sender_kind, sender_id, sender_name,
-                content, mentions_json, reply_to_seq, source_session_id, source_activation_id, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                content, mentions_json, visible_to_json, reply_to_seq, source_session_id, source_activation_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 &msg.room_id,
                 msg.msg_seq as i64,
@@ -817,6 +824,7 @@ Output ONLY valid JSON without markdown code fences.";
                 &msg.sender_name,
                 &msg.content,
                 serde_json::to_string(&msg.mentions)?,
+                serde_json::to_string(&msg.visible_to)?,
                 msg.reply_to_seq.map(|s| s as i64),
                 msg.source_session_id.as_ref().map(|s| s.as_str()),
                 msg.source_activation_id.as_ref().map(|a| a.as_str()),
@@ -849,11 +857,12 @@ Output ONLY valid JSON without markdown code fences.";
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT room_id, msg_seq, message_id, sender_kind, sender_id, sender_name,
-                    content, mentions_json, reply_to_seq, source_session_id, source_activation_id, created_at
+                    content, mentions_json, visible_to_json, reply_to_seq, source_session_id, source_activation_id, created_at
              FROM room_messages WHERE room_id = ?1 AND msg_seq > ?2 ORDER BY msg_seq ASC",
         )?;
         let rows = stmt.query_map(params![room_id, after_seq as i64], |r| {
             let mentions_str: String = r.get(7)?;
+            let visible_str: String = r.get(8)?;
             Ok(RoomMessage {
                 room_id: r.get(0)?,
                 msg_seq: r.get::<_, i64>(1)? as u64,
@@ -863,10 +872,11 @@ Output ONLY valid JSON without markdown code fences.";
                 sender_name: r.get(5)?,
                 content: r.get(6)?,
                 mentions: serde_json::from_str(&mentions_str).unwrap_or_default(),
-                reply_to_seq: r.get::<_, Option<i64>>(8)?.map(|s| s as u64),
-                source_session_id: r.get::<_, Option<String>>(9)?.map(SessionId::new),
-                source_activation_id: r.get::<_, Option<String>>(10)?.map(ActivationId::new),
-                created_at: parse_dt(&r.get::<_, String>(11)?),
+                visible_to: serde_json::from_str(&visible_str).unwrap_or_default(),
+                reply_to_seq: r.get::<_, Option<i64>>(9)?.map(|s| s as u64),
+                source_session_id: r.get::<_, Option<String>>(10)?.map(SessionId::new),
+                source_activation_id: r.get::<_, Option<String>>(11)?.map(ActivationId::new),
+                created_at: parse_dt(&r.get::<_, String>(12)?),
             })
         })?;
         let mut out = Vec::new();
@@ -874,6 +884,29 @@ Output ONLY valid JSON without markdown code fences.";
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// Returns unread room messages after `after_seq` filtered by `visible_to` for `agent_name`:
+    /// - Messages with `visible_to.is_empty()` are public to all agents.
+    /// - Messages with non-empty `visible_to` are visible ONLY to their sender (`sender_name`) and
+    ///   agents explicitly listed in `visible_to`.
+    pub fn list_room_messages_for_agent(
+        &self,
+        room_id: &str,
+        after_seq: u64,
+        agent_name: &str,
+    ) -> Result<Vec<RoomMessage>, ChatStoreError> {
+        let all = self.list_room_messages(room_id, after_seq)?;
+        Ok(all
+            .into_iter()
+            .filter(|m| {
+                m.visible_to.is_empty()
+                    || m.sender_name.eq_ignore_ascii_case(agent_name)
+                    || m.visible_to
+                        .iter()
+                        .any(|v| v.eq_ignore_ascii_case(agent_name))
+            })
+            .collect())
     }
 }
 

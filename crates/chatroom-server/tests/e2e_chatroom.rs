@@ -345,6 +345,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             sender_name: "Alice".to_string(),
             content: "你好，请帮我看看架构设计！".to_string(),
             mentions: vec![],
+            visible_to: vec![],
             reply_to_seq: None,
         })
         .send()
@@ -409,6 +410,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             sender_name: "Alice".to_string(),
             content: "TEST_FORGET_SPEAK 请回答这个问题".to_string(),
             mentions: vec!["Assistant".to_string()],
+            visible_to: vec![],
             reply_to_seq: None,
         })
         .send()
@@ -521,6 +523,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             sender_name: "Alice".to_string(),
             content: "这是一条不点名任何人的群公告（测试全员禁言窥屏）".to_string(),
             mentions: vec![],
+            visible_to: vec![],
             reply_to_seq: None,
         })
         .send()
@@ -597,6 +600,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             sender_name: "Alice".to_string(),
             content: "TRIGGER_INTERJECT 大家觉得这个方案有没有安全隐患？（未点名任何人的自由讨论）".to_string(),
             mentions: vec![],
+            visible_to: vec![],
             reply_to_seq: None,
         })
         .send()
@@ -755,6 +759,7 @@ async fn test_live_multi_agent_chatroom_when_env_present() {
             sender_name: "Human".to_string(),
             content: "你好！请用一句话介绍你在分布式一致性方面的专长。".to_string(),
             mentions: vec![],
+            visible_to: vec![],
             reply_to_seq: None,
         })
         .send()
