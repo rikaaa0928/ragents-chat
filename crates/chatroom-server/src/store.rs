@@ -624,6 +624,16 @@ Output ONLY valid JSON without markdown code fences.";
         let mut agent = self
             .get_agent(agent_id)?
             .ok_or_else(|| ChatStoreError::NotFound(format!("agent {agent_id}")))?;
+        if let Some(rt) = patch.role_title {
+            if !rt.trim().is_empty() {
+                agent.role_title = rt.trim().to_string();
+            }
+        }
+        if let Some(pp) = patch.persona_prompt {
+            if !pp.trim().is_empty() {
+                agent.persona_prompt = pp.trim().to_string();
+            }
+        }
         if let Some(m) = patch.model {
             if !m.trim().is_empty() {
                 agent.model = m.trim().to_string();
@@ -637,8 +647,10 @@ Output ONLY valid JSON without markdown code fences.";
         }
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
-            "UPDATE room_agents SET model = ?1, reasoning_effort = ?2, reasoning_summary = ?3 WHERE agent_id = ?4",
+            "UPDATE room_agents SET role_title = ?1, persona_prompt = ?2, model = ?3, reasoning_effort = ?4, reasoning_summary = ?5 WHERE agent_id = ?6",
             params![
+                &agent.role_title,
+                &agent.persona_prompt,
                 &agent.model,
                 &agent.reasoning_effort,
                 &agent.reasoning_summary,

@@ -478,6 +478,19 @@
         连续接力上限(0=不限)
         <input type="number" id="ctrlMaxRelayDepth" min="0" max="9999" onchange="saveRoomControls()" style="width:52px;" />轮
       </label>
+      <button class="secondary" style="margin-left:auto; font-size:11px; padding:3px 9px;" onclick="toggleFlowLogDrawer()">🧭 流程轨迹 (<span id="flowLogCount">0</span>)</button>
+    </div>
+
+    <!-- Real-time Peek & Routing State Summary + Expandable Flow Trace Drawer -->
+    <div id="flowSummaryBar" style="display:none; padding:6px 18px; background:var(--panel-2); border-bottom:1px solid var(--border); font-size:11px; color:var(--text-muted); display:none; flex-direction:column; gap:6px;">
+      <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+        <span id="stateBadgePeek" class="badge"></span>
+        <span id="stateBadgeInterject" class="badge"></span>
+        <span id="stateBadgeRelay" class="badge"></span>
+        <span id="stateBadgeRoster" class="badge"></span>
+        <span id="latestFlowStatusText" style="color:var(--purple); font-weight:500; flex:1; min-width:180px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
+      </div>
+      <div id="flowLogDrawer" style="display:none; max-height:150px; overflow-y:auto; background:var(--code-bg); border:1px solid var(--border); border-radius:6px; padding:6px 10px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; line-height:1.5;"></div>
     </div>
 
     <div id="messagesContainer" class="messages-container" onscroll="onMessagesScroll()"></div>
@@ -504,13 +517,17 @@
           <button class="secondary" onclick="openAddAgentModal()">+ 手动添加</button>
         </div>
       </div>
+      <div id="managerRosterCard" style="margin-bottom:6px;"></div>
       <div id="agentRosterList"></div>
     </div>
 
     <div class="inspector-section">
       <div class="section-title-row">
         <h3 id="inspectorTitle">🔍 内部 Session 实时透视</h3>
-        <button id="cancelActivationBtn" class="danger" style="display:none; font-size:11px; padding:4px 8px;" onclick="cancelInspectedAgent()">⛔ 紧急中止执行</button>
+        <div style="display:flex; gap:6px; align-items:center;">
+          <button id="togglePromptPanelBtn" class="secondary" style="display:none; font-size:11px; padding:4px 8px;" onclick="toggleInspectorPromptPanel()">📝 System Prompt</button>
+          <button id="cancelActivationBtn" class="danger" style="display:none; font-size:11px; padding:4px 8px;" onclick="cancelInspectedAgent()">⛔ 紧急中止执行</button>
+        </div>
       </div>
       <div id="inspectorReasoningBar" style="display:none; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:8px; font-size:12px; color:var(--text-muted);">
         <label style="display:flex; align-items:center; gap:4px;">
@@ -538,6 +555,26 @@
             <option value="detailed">detailed (详细流式摘要)</option>
           </select>
         </label>
+      </div>
+
+      <!-- View & Pre-First-Run Edit Panel for Agent System Prompt -->
+      <div id="inspectorPromptPanel" style="display:none; background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:10px; margin-bottom:8px; font-size:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; gap:8px;">
+          <div style="font-weight:600;">📝 Agent 角色与 System Prompt</div>
+          <span id="promptEditStatusBadge" class="badge"></span>
+        </div>
+        <div style="display:flex; gap:8px; margin-bottom:6px; align-items:center;">
+          <label style="font-size:11px; color:var(--text-muted); white-space:nowrap;">角色头衔:</label>
+          <input type="text" id="inspectedRoleTitleInput" style="flex:1; font-size:12px; padding:4px 8px;" />
+        </div>
+        <div style="margin-bottom:6px;">
+          <label style="display:block; font-size:11px; color:var(--text-muted); margin-bottom:3px;">人设提示词 (Persona / System Prompt):</label>
+          <textarea id="inspectedPersonaPromptInput" rows="5" style="width:100%; font-size:12px; line-height:1.45; font-family:ui-monospace, SFMono-Regular, Menlo, monospace;"></textarea>
+        </div>
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span id="promptEditHintText" style="font-size:11px; color:var(--text-muted);"></span>
+          <button id="saveAgentPromptBtn" onclick="saveInspectedAgentPrompt()" style="font-size:11px; padding:4px 10px;">💾 保存 Prompt 修改</button>
+        </div>
       </div>
       <div class="readonly-banner">
         🔒 严格只读模式：此处实时展示 Agent 内部私密思考、工具调用与压缩血缘，禁止在此处私聊；一切对话请回到左侧聊天室。
@@ -583,11 +620,19 @@
           <input type="text" id="newRoomAgentName" value="Assistant" />
         </div>
         <div class="form-row" style="flex:1;">
-          <label>初始 Agent 模型</label>
-          <select id="newRoomAgentModel">
-            <option value="">跟随全局默认</option>
-          </select>
+          <label>初始 Agent 角色头衔</label>
+          <input type="text" id="newRoomAgentRole" value="全能 AI 研发助手" />
         </div>
+      </div>
+      <div class="form-row">
+        <label>初始 Agent 模型</label>
+        <select id="newRoomAgentModel">
+          <option value="">跟随全局默认</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>初始 Agent 人设提示词 (System Prompt，建房后在首次运行前也可随时编辑)</label>
+        <textarea id="newRoomAgentPersona" rows="3">You are a helpful, pragmatic software engineering and research assistant.</textarea>
       </div>
       <div style="display:flex; gap:10px;">
         <div class="form-row" style="flex:1;">
@@ -778,10 +823,15 @@
 
     let inspectedAgent = null;
     let inspectedSessionId = null;
+    let inspectedCanEditPrompt = false;
+    let inspectorPromptPanelOpen = true;
     let inspectorEventSource = null;
     let liveStreamBuffer = '';
     let liveReasoningBuffer = '';
     let agentActivities = {};
+    let currentFlowLogs = [];
+    let flowDrawerOpen = true;
+    let cachedManagerSettings = null;
     let messagesPinnedToBottom = true;
     let inspectorPinnedToBottom = true;
     let programmaticScrollingMessages = false;
@@ -936,6 +986,7 @@
       currentRoom = detail.room;
       currentAgents = detail.agents;
       currentMessages = detail.messages;
+      currentFlowLogs = detail.flow_logs || [];
 
       // Single-chat default: when there is exactly 1 agent in the room, explicitly pre-select @<SoleAgent>
       selectedMentions.clear();
@@ -945,13 +996,79 @@
 
       messagesPinnedToBottom = true;
       renderCurrentRoomHeader();
+      renderFlowMonitor();
       renderMessages(true);
       renderMentionSelectorBar();
+      renderManagerRosterCard();
       renderAgentRoster();
       subscribeRoomStream(roomId);
 
       if (currentAgents.length > 0 && (!inspectedAgent || inspectedAgent.room_id !== roomId)) {
         await inspectAgent(currentAgents[0].agent_id);
+      }
+    }
+
+    function toggleFlowLogDrawer() {
+      flowDrawerOpen = !flowDrawerOpen;
+      renderFlowMonitor();
+    }
+
+    function renderFlowMonitor() {
+      const bar = document.getElementById('flowSummaryBar');
+      if (!currentRoom || !bar) return;
+      bar.style.display = 'flex';
+
+      const peekBadge = document.getElementById('stateBadgePeek');
+      if (peekBadge) {
+        peekBadge.className = `badge ${currentRoom.peek_enabled ? 'group' : 'single'}`;
+        peekBadge.textContent = currentRoom.peek_enabled
+          ? `👀 空闲窥屏: 开启 (静默 ${currentRoom.peek_idle_secs}s · 间隔 ≥${currentRoom.peek_msg_interval}条)`
+          : `⚪ 空闲窥屏: 已关闭`;
+      }
+
+      const interjectBadge = document.getElementById('stateBadgeInterject');
+      if (interjectBadge) {
+        const allowInterject = currentRoom.peek_enabled && currentRoom.interject_enabled;
+        interjectBadge.className = `badge ${allowInterject ? 'group' : 'single'}`;
+        interjectBadge.textContent = allowInterject
+          ? `💬 主动插嘴: 允许 (禁言率 ${currentRoom.mute_probability}% · 插嘴率 ${100 - currentRoom.mute_probability}%)`
+          : `🔇 主动插嘴: 关闭 (仅只读窥屏)`;
+      }
+
+      const relayBadge = document.getElementById('stateBadgeRelay');
+      if (relayBadge) {
+        const limitStr = currentRoom.max_agent_relay_depth > 0 ? `${currentRoom.max_agent_relay_depth}` : '∞(不限)';
+        relayBadge.className = 'badge single';
+        relayBadge.textContent = `🔄 连续Agent发言: ${currentRoom.consecutive_agent_msgs} / ${limitStr} 轮`;
+      }
+
+      const rosterBadge = document.getElementById('stateBadgeRoster');
+      if (rosterBadge) {
+        rosterBadge.className = 'badge single';
+        rosterBadge.textContent = `📋 名册 v${currentRoom.roster_version} · 消息 #${currentRoom.last_msg_seq}`;
+      }
+
+      const countEl = document.getElementById('flowLogCount');
+      if (countEl) countEl.textContent = String(currentFlowLogs.length);
+
+      const latestEl = document.getElementById('latestFlowStatusText');
+      if (latestEl) {
+        const lastEntry = currentFlowLogs.length > 0 ? currentFlowLogs[currentFlowLogs.length - 1] : null;
+        latestEl.textContent = lastEntry ? `最新流程: ${lastEntry.status}` : '等待消息触发路由或窥屏流程...';
+      }
+
+      const drawer = document.getElementById('flowLogDrawer');
+      if (drawer) {
+        drawer.style.display = flowDrawerOpen ? 'block' : 'none';
+        if (currentFlowLogs.length === 0) {
+          drawer.innerHTML = '<div style="color:var(--text-muted);">暂无调度/窥屏轨迹记录。发送消息后将在此处实时展示：点名路由、暗语过滤、空闲窥屏触发、各 Agent 掷骰点数与插嘴/静默决策。</div>';
+        } else {
+          drawer.innerHTML = currentFlowLogs.map(item => {
+            const t = item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : '';
+            return `<div><span style="color:var(--text-muted);">[${escapeHtml(t)}]</span> ${escapeHtml(item.status)}</div>`;
+          }).join('');
+          drawer.scrollTop = drawer.scrollHeight;
+        }
       }
     }
 
@@ -969,6 +1086,7 @@
       document.getElementById('resumeRelayBtn').style.display =
         (currentRoom.max_agent_relay_depth > 0 && currentRoom.consecutive_agent_msgs >= currentRoom.max_agent_relay_depth)
           ? 'inline-block' : 'none';
+      renderFlowMonitor();
     }
 
     async function saveRoomControls() {
@@ -1052,24 +1170,37 @@
         const cls = m.sender_kind || 'human';
         const mentions = m.mentions || [];
         const visibleTo = m.visible_to || [];
+        const kindLabel = cls === 'human' ? '👤 HUMAN' : (cls === 'manager' ? '🎩 MANAGER' : (cls === 'system' ? '⚙️ SYSTEM' : '🤖 AGENT'));
         const mentionsHtml = mentions.length > 0
-          ? `<span style="color:var(--text-muted); margin:0 2px;">➔</span>` + mentions.map(n => `<span class="mention-pill">@${escapeHtml(n)}</span>`).join('')
-          : '';
+          ? `<span style="color:var(--text-muted); margin:0 2px;">➔ 点名唤醒:</span>` + mentions.map(n => `<span class="mention-pill">@${escapeHtml(n)}</span>`).join('')
+          : `<span style="font-size:11px; color:var(--text-muted);">(无显式点名)</span>`;
         let whisperHtml = '';
         if (visibleTo.length > 0) {
           const allVis = [m.sender_name, ...visibleTo.filter(v => String(v).toLowerCase() !== String(m.sender_name).toLowerCase())];
           whisperHtml = `<span style="font-size:11px; background:rgba(139,92,246,0.16); color:var(--purple); padding:1px 6px; border-radius:4px; border:1px solid rgba(139,92,246,0.35); margin-left:4px;">🔒 暗语 (仅 ${allVis.map(v => '@' + escapeHtml(v)).join(', ')} 可见)</span>`;
+        } else {
+          whisperHtml = `<span style="font-size:10px; color:var(--text-muted);">🌐 全员可见</span>`;
+        }
+        const replyHtml = m.reply_to_seq
+          ? `<span style="font-size:11px; color:var(--accent); background:rgba(59,130,246,0.1); padding:1px 5px; border-radius:4px;">↩ 回复 #${m.reply_to_seq}</span>`
+          : '';
+        let sessionJumpHtml = '';
+        if (m.sender_kind === 'agent' && m.sender_id) {
+          sessionJumpHtml = `<span style="font-size:10px; color:var(--text-muted); cursor:pointer; text-decoration:underline;" onclick="inspectAgent('${escapeHtml(m.sender_id)}')" title="点击在右侧透视该 Agent 的内部 Session">🔍 透视 Session</span>`;
         }
         const cleanedBody = stripLeadingRedundantMentions(m.content, mentions);
         const timeStr = new Date(m.created_at).toLocaleTimeString();
         const cardStyle = visibleTo.length > 0 ? 'border-style:dashed; border-color:rgba(139,92,246,0.55); background:rgba(139,92,246,0.05);' : '';
         return `
           <div class="msg-card ${cls}" style="${cardStyle}">
-            <div class="msg-meta" style="flex-wrap:wrap;">
-              <span>#${m.msg_seq}</span>
-              <span class="msg-sender">${escapeHtml(m.sender_name)}</span>
+            <div class="msg-meta" style="flex-wrap:wrap; gap:6px;">
+              <span style="font-weight:700;">#${m.msg_seq}</span>
+              <span style="font-size:10px; padding:1px 5px; border-radius:4px; background:var(--panel-2); border:1px solid var(--border);">${kindLabel}</span>
+              <span class="msg-sender">@${escapeHtml(m.sender_name)}</span>
               ${mentionsHtml}
               ${whisperHtml}
+              ${replyHtml}
+              ${sessionJumpHtml}
               <span style="margin-left:auto;">${timeStr}</span>
             </div>
             <div class="msg-body">${escapeHtml(cleanedBody)}</div>
@@ -1087,12 +1218,34 @@
       }
     }
 
+    function renderManagerRosterCard() {
+      const box = document.getElementById('managerRosterCard');
+      if (!box) return;
+      const mgrModel = (cachedManagerSettings && cachedManagerSettings.manager_model) || cachedDefaultAgentModel || 'default';
+      const mgrPrompt = (cachedManagerSettings && cachedManagerSettings.manager_system_prompt) || '';
+      box.innerHTML = `
+        <div class="agent-card" style="border-style:dashed; border-color:rgba(139,92,246,0.45); background:rgba(139,92,246,0.05);" onclick="openManagerSettingsModal()">
+          <div style="min-width:0; flex:1;">
+            <div style="font-size:12px; font-weight:600; color:var(--purple);">
+              🎩 @Manager <span style="font-size:11px; color:var(--text-muted); font-weight:400;">(聊天室管家 · model: ${escapeHtml(mgrModel)})</span>
+            </div>
+            <div style="font-size:11px; color:var(--text-muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(mgrPrompt)}">
+              Prompt: ${escapeHtml(mgrPrompt.slice(0, 80))}...
+            </div>
+          </div>
+          <button class="secondary" style="font-size:11px; padding:3px 7px; flex-shrink:0;" onclick="event.stopPropagation(); openManagerSettingsModal()">📝 查看/编辑</button>
+        </div>
+      `;
+    }
+
     function renderAgentRoster() {
       const box = document.getElementById('agentRosterList');
       if (currentAgents.length === 0) {
         box.innerHTML = '<div style="color:var(--text-muted); font-size:12px;">暂无成员</div>';
         return;
       }
+
+      const roomLastSeq = currentRoom ? currentRoom.last_msg_seq : 0;
 
       // Check if existing DOM cards match currentAgents in order; if so, update in-place so active clicks are never dropped!
       const existingCards = Array.from(box.querySelectorAll('.agent-card'));
@@ -1111,15 +1264,28 @@
             dot.className = `status-dot ${a.runtime_state}`;
           }
 
+          const titleRoleEl = card.querySelector('.agent-role-span');
+          if (titleRoleEl) {
+            titleRoleEl.textContent = `(${a.role_title})`;
+          }
+
           const stateText = a.runtime_state === 'thinking'
             ? '🔵 思考/执行中'
             : (a.runtime_state === 'waiting_permission' ? '🟠 等待权限审批' : '🟢 空闲');
           const reasoningTag = (a.reasoning_effort || a.reasoning_summary)
             ? ` · 🧠 ${a.reasoning_effort || 'default'}/${a.reasoning_summary || 'default'}`
             : '';
+          const speakPermText = a.allow_speak_in_turn ? '🔊 允许发言' : '🔇 本轮窥屏禁言';
+          const unreadCount = Math.max(0, roomLastSeq - (a.last_delivered_seq || 0));
           const metaEl = card.querySelector('.agent-meta-line');
           if (metaEl) {
-            metaEl.textContent = `${stateText} · model: ${a.model}${reasoningTag} · 已读 #${a.last_delivered_seq}`;
+            metaEl.textContent = `${stateText} · ${speakPermText} · model: ${a.model}${reasoningTag} · 已读 #${a.last_delivered_seq}/#${roomLastSeq} (未读 ${unreadCount})`;
+          }
+
+          const promptEl = card.querySelector('.agent-prompt-line');
+          if (promptEl) {
+            promptEl.textContent = `Prompt: ${a.persona_prompt || ''}`;
+            promptEl.title = a.persona_prompt || '';
           }
 
           const actDetail = agentActivities[a.agent_id] || '';
@@ -1149,6 +1315,8 @@
         const reasoningTag = (a.reasoning_effort || a.reasoning_summary)
           ? ` · 🧠 ${escapeHtml(a.reasoning_effort || 'default')}/${escapeHtml(a.reasoning_summary || 'default')}`
           : '';
+        const speakPermText = a.allow_speak_in_turn ? '🔊 允许发言' : '🔇 本轮窥屏禁言';
+        const unreadCount = Math.max(0, roomLastSeq - (a.last_delivered_seq || 0));
         const leadBadge = (idx === 0 && currentAgents.length > 1)
           ? `<span style="font-size:10px; background:rgba(59,130,246,0.15); color:var(--accent); padding:1px 5px; border-radius:4px; margin-left:4px;" title="默认主导统筹 Agent">👑 主导</span>`
           : '';
@@ -1158,10 +1326,13 @@
               <div style="font-size:13px; font-weight:600;">
                 <span class="status-dot ${a.runtime_state}"></span>
                 ${escapeHtml(a.avatar)} @${escapeHtml(a.name)}${leadBadge}
-                <span style="font-size:11px; color:var(--text-muted); font-weight:400;">(${escapeHtml(a.role_title)})</span>
+                <span class="agent-role-span" style="font-size:11px; color:var(--text-muted); font-weight:400;">(${escapeHtml(a.role_title)})</span>
               </div>
               <div class="agent-meta-line" style="font-size:11px; color:var(--text-muted); margin-top:2px;">
-                ${stateText} · model: ${escapeHtml(a.model)}${reasoningTag} · 已读 #${a.last_delivered_seq}
+                ${stateText} · ${speakPermText} · model: ${escapeHtml(a.model)}${reasoningTag} · 已读 #${a.last_delivered_seq}/#${roomLastSeq} (未读 ${unreadCount})
+              </div>
+              <div class="agent-prompt-line" style="font-size:11px; color:var(--text-muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(a.persona_prompt || '')}">
+                Prompt: ${escapeHtml(a.persona_prompt || '')}
               </div>
               <div class="agent-act-line" style="font-size:11px; margin-top:3px; font-weight:500; display:${actDetail ? 'block' : 'none'}; color:${isErr ? '#f87171' : '#93c5fd'};">${escapeHtml(actDetail)}</div>
             </div>
@@ -1235,13 +1406,17 @@
             renderRoomList();
           }
           renderCurrentRoomHeader();
+          renderAgentRoster();
         } else if (ev.type === 'peek_round_status') {
+          currentFlowLogs.push({ timestamp: new Date().toISOString(), status: ev.status });
+          if (currentFlowLogs.length > 120) currentFlowLogs.shift();
+          renderFlowMonitor();
           document.getElementById('peekStatusLabel').textContent = ev.status;
           setTimeout(() => {
             if (document.getElementById('peekStatusLabel').textContent === ev.status) {
               document.getElementById('peekStatusLabel').textContent = '';
             }
-          }, 3500);
+          }, 5000);
         } else if (ev.type === 'permission_alert') {
           if (inspectedAgent && inspectedAgent.agent_id === ev.agent_id) {
             refreshInspectorSnapshot(ev.agent_id, null);
@@ -1303,6 +1478,7 @@
       const snap = await apiFetch(`/api/v1/agents/${agentId}/inspector${q}`);
       inspectedAgent = snap.agent;
       inspectedSessionId = snap.selected_session_id;
+      inspectedCanEditPrompt = Boolean(snap.can_edit_prompt);
       liveStreamBuffer = '';
       liveReasoningBuffer = '';
       renderAgentRoster();
@@ -1311,17 +1487,78 @@
       renderInspectorHistory(snap.context, snap.events || [], forceScrollBottom);
     }
 
+    function toggleInspectorPromptPanel() {
+      inspectorPromptPanelOpen = !inspectorPromptPanelOpen;
+      renderInspectorHeaderAndLineage();
+    }
+
+    async function saveInspectedAgentPrompt() {
+      if (!inspectedAgent || !currentRoom) return;
+      const role_title = document.getElementById('inspectedRoleTitleInput').value.trim();
+      const persona_prompt = document.getElementById('inspectedPersonaPromptInput').value.trim();
+      const updated = await apiFetch(`/api/v1/rooms/${currentRoom.room_id}/agents/${inspectedAgent.agent_id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          role_title: role_title || null,
+          persona_prompt: persona_prompt || null
+        })
+      });
+      inspectedAgent = updated;
+      const idx = currentAgents.findIndex(a => a.agent_id === updated.agent_id);
+      if (idx >= 0) currentAgents[idx] = updated;
+      renderAgentRoster();
+      renderInspectorHeaderAndLineage();
+    }
+
     function renderInspectorHeaderAndLineage() {
       if (!inspectedAgent) return;
       document.getElementById('inspectorTitle').textContent = `🔍 内部透视: @${inspectedAgent.name}`;
       document.getElementById('cancelActivationBtn').style.display =
         inspectedAgent.active_activation_id ? 'inline-block' : 'none';
+      const toggleBtn = document.getElementById('togglePromptPanelBtn');
+      if (toggleBtn) {
+        toggleBtn.style.display = 'inline-block';
+        toggleBtn.textContent = inspectorPromptPanelOpen ? '🔼 收起 Prompt' : '📝 查看/编辑 Prompt';
+      }
       const rBar = document.getElementById('inspectorReasoningBar');
       if (rBar) {
         rBar.style.display = 'flex';
         populateModelSelect('inspectedModelInput', false, inspectedAgent.model || '');
         document.getElementById('inspectedEffortSelect').value = inspectedAgent.reasoning_effort || '';
         document.getElementById('inspectedSummarySelect').value = inspectedAgent.reasoning_summary || '';
+      }
+
+      const pPanel = document.getElementById('inspectorPromptPanel');
+      if (pPanel) {
+        pPanel.style.display = inspectorPromptPanelOpen ? 'block' : 'none';
+        const roleInput = document.getElementById('inspectedRoleTitleInput');
+        const promptInput = document.getElementById('inspectedPersonaPromptInput');
+        const badge = document.getElementById('promptEditStatusBadge');
+        const hint = document.getElementById('promptEditHintText');
+        const saveBtn = document.getElementById('saveAgentPromptBtn');
+
+        if (document.activeElement !== roleInput) {
+          roleInput.value = inspectedAgent.role_title || '';
+        }
+        if (document.activeElement !== promptInput) {
+          promptInput.value = inspectedAgent.persona_prompt || '';
+        }
+
+        if (inspectedCanEditPrompt) {
+          badge.className = 'badge group';
+          badge.textContent = '🟢 尚未触发首次运行 (允许修改)';
+          promptInput.readOnly = false;
+          roleInput.readOnly = false;
+          saveBtn.style.display = 'inline-block';
+          hint.textContent = '提示：该 Agent 尚未执行任何对话回合，可自由修改其 System Prompt 并同步到底层 Session。';
+        } else {
+          badge.className = 'badge single';
+          badge.textContent = '🔒 已触发运行 (System Prompt 已锁定只读)';
+          promptInput.readOnly = true;
+          roleInput.readOnly = true;
+          saveBtn.style.display = 'none';
+          hint.textContent = '提示：该 Agent 已产生会话上下文，为保证上下文一致性与 KV Cache，System Prompt 为只读状态。';
+        }
       }
 
       const bar = document.getElementById('lineageBar');
@@ -1416,12 +1653,19 @@
         if (text.startsWith('[Compaction Summary]')) {
           return `<div class="log-entry"><span class="tag compact">[Compaction Summary]</span>${escapeHtml(text)}</div>`;
         }
-        return `<div class="log-entry"><span class="tag input">[Context:${escapeHtml(role)}]</span>${escapeHtml(text)}</div>`;
+        const roleTitle = role === 'user'
+          ? '[Context:user (投递给 Agent 的完整聊天室上下文载荷)]'
+          : `[Context:${role} (Agent 内部私密草稿/回复)]`;
+        return `<div class="log-entry"><span class="tag input">${escapeHtml(roleTitle)}</span>\n${escapeHtml(text)}</div>`;
       } else if (item.type === 'function_call') {
-        return `<div class="log-entry"><span class="tag tool">[ToolCall:${escapeHtml(item.name)}]</span>${escapeHtml(item.arguments || '')}</div>`;
+        let formattedArgs = item.arguments || '';
+        try {
+          formattedArgs = JSON.stringify(JSON.parse(formattedArgs), null, 2);
+        } catch (_) {}
+        return `<div class="log-entry"><span class="tag tool">[ToolCall:${escapeHtml(item.name)}]</span>\n${escapeHtml(formattedArgs)}</div>`;
       } else if (item.type === 'function_call_output') {
-        const out = typeof item.output === 'string' ? item.output : JSON.stringify(item.output);
-        return `<div class="log-entry"><span class="tag tool">[ToolResult]</span>${escapeHtml(out.slice(0, 1200))}</div>`;
+        const out = typeof item.output === 'string' ? item.output : JSON.stringify(item.output, null, 2);
+        return `<div class="log-entry"><span class="tag tool">[ToolResult]</span>\n${escapeHtml(out)}</div>`;
       }
       return '';
     }
@@ -1611,6 +1855,7 @@
       try {
         const data = await apiFetch('/api/v1/settings/manager');
         const s = data.settings || {};
+        cachedManagerSettings = s;
         cachedDefaultAgentModel = s.default_agent_model || '';
         const models = new Set();
         for (const node of (data.cluster_nodes || [])) {
@@ -1628,6 +1873,7 @@
         if (inspectedAgent) {
           populateModelSelect('inspectedModelInput', false, inspectedAgent.model || '');
         }
+        renderManagerRosterCard();
         return data;
       } catch (_) {
         return null;
@@ -1649,6 +1895,8 @@
       const name = document.getElementById('newRoomName').value.trim() || '新聊天室';
       const description = document.getElementById('newRoomDesc').value.trim();
       const default_agent_name = document.getElementById('newRoomAgentName').value.trim() || 'Assistant';
+      const default_agent_role = document.getElementById('newRoomAgentRole').value.trim() || '全能 AI 研发助手';
+      const default_agent_persona = document.getElementById('newRoomAgentPersona').value.trim() || null;
       const default_agent_model = document.getElementById('newRoomAgentModel').value.trim() || null;
       const reasoning_effort = document.getElementById('newRoomReasoningEffort').value || null;
       const reasoning_summary = document.getElementById('newRoomReasoningSummary').value || null;
@@ -1660,6 +1908,8 @@
           name,
           description,
           default_agent_name,
+          default_agent_role,
+          default_agent_persona,
           default_agent_model,
           reasoning_effort,
           reasoning_summary,
@@ -1733,7 +1983,7 @@
     }
 
     async function saveManagerSettings() {
-      await apiFetch('/api/v1/settings/manager', {
+      const updated = await apiFetch('/api/v1/settings/manager', {
         method: 'PUT',
         body: JSON.stringify({
           manager_model: document.getElementById('mgrModelInput').value.trim(),
@@ -1746,6 +1996,8 @@
           manager_system_prompt: document.getElementById('mgrSystemPrompt').value.trim()
         })
       });
+      cachedManagerSettings = updated;
+      renderManagerRosterCard();
       closeModal('managerSettingsModal');
     }
 

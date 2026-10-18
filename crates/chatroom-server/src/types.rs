@@ -97,10 +97,18 @@ pub struct RoomSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomFlowLogEntry {
+    pub timestamp: DateTime<Utc>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomDetailResponse {
     pub room: Room,
     pub agents: Vec<RoomAgentPublic>,
     pub messages: Vec<RoomMessage>,
+    #[serde(default)]
+    pub flow_logs: Vec<RoomFlowLogEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,6 +293,10 @@ pub struct CreateAgentRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PatchAgentRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persona_prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub reasoning_effort: Option<Option<String>>,
     pub reasoning_summary: Option<Option<String>>,
@@ -424,6 +436,8 @@ pub struct InspectorResponse {
     pub context: Option<SessionContextResponse>,
     pub events: Vec<SessionEventEnvelope>,
     pub pending_permissions: Vec<PermissionRequest>,
+    #[serde(default)]
+    pub can_edit_prompt: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

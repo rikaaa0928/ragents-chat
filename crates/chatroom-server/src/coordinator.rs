@@ -45,6 +45,7 @@ pub struct RoomCoordinator {
     pub inspector_event_tx: broadcast::Sender<SessionEventEnvelope>,
     direct_mentions: Arc<Mutex<HashMap<String, DirectMentionState>>>,
     room_peek_states: Arc<Mutex<HashMap<String, RoomPeekState>>>,
+    room_flow_logs: Arc<Mutex<HashMap<String, VecDeque<RoomFlowLogEntry>>>>,
 }
 
 impl RoomCoordinator {
@@ -67,7 +68,41 @@ impl RoomCoordinator {
             inspector_event_tx,
             direct_mentions: Arc::new(Mutex::new(HashMap::new())),
             room_peek_states: Arc::new(Mutex::new(HashMap::new())),
+            room_flow_logs: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn emit_flow_status(&self, room_id: &str, status: impl Into<String>) {
+        let status_str = status.into();
+        {
+            let mut guard = self
+                .room_flow_logs
+                .lock()
+                .expect("room_flow_logs mutex poisoned");
+            let q = guard.entry(room_id.to_string()).or_default();
+            q.push_back(RoomFlowLogEntry {
+                timestamp: Utc::now(),
+                status: status_str.clone(),
+            });
+            while q.len() > 120 {
+                q.pop_front();
+            }
+        }
+        self.emit_room_event(ChatroomEvent::PeekRoundStatus {
+            room_id: room_id.to_string(),
+            status: status_str,
+        });
+    }
+
+    pub fn get_room_flow_logs(&self, room_id: &str) -> Vec<RoomFlowLogEntry> {
+        let guard = self
+            .room_flow_logs
+            .lock()
+            .expect("room_flow_logs mutex poisoned");
+        guard
+            .get(room_id)
+            .map(|q| q.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn subscribe_room_events(&self) -> broadcast::Receiver<ChatroomEvent> {
@@ -319,7 +354,7 @@ impl RoomCoordinator {
         // 1. Check Direct-@ Auto-Nudge: if agent was explicitly @mentioned by a Human, completed without error,
         //    and forgot to call `chatroom_speak`, send 1 lightweight reminder!
         //    (When @mentioned by another Agent, silent observation `Observed.` is allowed to avoid polite ack loops.)
-        let should_nudge = {
+        let (should_nudge, silent_agent_mention) = {
             let mut dm_guard = self
                 .direct_mentions
                 .lock()
@@ -327,17 +362,25 @@ impl RoomCoordinator {
             if let Some(state) = dm_guard.get_mut(&agent.agent_id) {
                 if completed_ok && state.from_human && !state.spoke && !state.nudged {
                     state.nudged = true;
-                    true
+                    (true, false)
                 } else {
+                    let was_silent = completed_ok && !state.spoke;
                     dm_guard.remove(&agent.agent_id);
-                    false
+                    (false, was_silent)
                 }
             } else {
-                false
+                (false, false)
             }
         };
 
         if should_nudge {
+            self.emit_flow_status(
+                &agent.room_id,
+                format!(
+                    "[🔔 漏调提醒] @{} 被人类点名后完成内部回合但未调用 chatroom_speak -> 系统发送 1 次 Auto-Nudge 提醒",
+                    agent.name
+                ),
+            );
             let nudge_text = format!(
                 "[System Reminder for @{}]: You were explicitly @mentioned in the chatroom and finished your internal turn, \
                  but you did NOT call `chatroom_speak`. Nobody in the chatroom can see your internal output. \
@@ -360,6 +403,16 @@ impl RoomCoordinator {
             return;
         }
 
+        if silent_agent_mention {
+            self.emit_flow_status(
+                &agent.room_id,
+                format!(
+                    "[🤫 静默已读] @{} 完成点名回合，判断无需公开发言 (Observed.)，静默结束",
+                    agent.name
+                ),
+            );
+        }
+
         // 2. Check if this agent was the active candidate in the room's sequential peek queue
         let advance_peek = {
             let mut peek_guard = self
@@ -379,6 +432,13 @@ impl RoomCoordinator {
         };
 
         if advance_peek {
+            self.emit_flow_status(
+                &agent.room_id,
+                format!(
+                    "[👀 窥屏完毕] @{} 完成本轮窥屏且未插嘴 (Observed.) -> 继续推进下一顺位",
+                    agent.name
+                ),
+            );
             self.step_sequential_peek_queue(&agent.room_id).await;
         } else {
             self.schedule_room_peek_if_ready(&agent.room_id);
@@ -431,6 +491,7 @@ impl RoomCoordinator {
             room: updated_room,
             agents: vec![agent.into()],
             messages: vec![],
+            flow_logs: vec![],
         })
     }
 
@@ -635,6 +696,28 @@ impl RoomCoordinator {
             anyhow::bail!("agent {agent_id} does not belong to room {room_id}");
         }
 
+        let prompt_changed = patch
+            .persona_prompt
+            .as_ref()
+            .map(|p| p.trim() != existing.persona_prompt.trim())
+            .unwrap_or(false);
+
+        if prompt_changed {
+            let has_started = existing.runtime_state != AgentRuntimeState::Idle
+                || existing.active_activation_id.is_some()
+                || self
+                    .ragents_client
+                    .get_session_context(&existing.active_session_id)
+                    .await
+                    .map(|ctx| !ctx.effective_items.is_empty())
+                    .unwrap_or(false);
+            if has_started {
+                anyhow::bail!(
+                    "该 Agent 已触发过运行，System Prompt 已锁定为只读（仅在第一次触发运行前允许编辑）"
+                );
+            }
+        }
+
         let updated = self
             .store
             .update_agent_model_and_reasoning(agent_id, patch)?;
@@ -648,7 +731,11 @@ impl RoomCoordinator {
                 &updated.active_session_id,
                 PatchSessionSpecRequest {
                     desired_phase: None,
-                    system_prompt: None,
+                    system_prompt: if prompt_changed {
+                        Some(updated.persona_prompt.clone())
+                    } else {
+                        None
+                    },
                     model: Some(ModelRequestSpec {
                         name: updated.model.clone(),
                         temperature: None,
@@ -918,6 +1005,13 @@ impl RoomCoordinator {
                 .iter()
                 .any(|m| m.eq_ignore_ascii_case("Manager"))
             {
+                self.emit_flow_status(
+                    &room.room_id,
+                    format!(
+                        "[#{} 路由] {} 点名 @Manager -> 启动管家招募与编排流程",
+                        msg.msg_seq, msg.sender_name
+                    ),
+                );
                 let coord = self.clone();
                 let room_id = room.room_id.clone();
                 let req_text = msg.content.clone();
@@ -939,6 +1033,7 @@ impl RoomCoordinator {
 
             // 2. Wake up any explicitly @mentioned RoomAgents immediately via `push_realtime_message`
             let mut mentioned_agent_ids = HashSet::new();
+            let mut woken_names = Vec::new();
             let from_human = msg.sender_kind == SenderKind::Human;
             for mention_name in &msg.mentions {
                 if let Some(target_agent) = agents
@@ -949,9 +1044,55 @@ impl RoomCoordinator {
                         continue;
                     }
                     mentioned_agent_ids.insert(target_agent.agent_id.clone());
+                    woken_names.push(format!("@{}", target_agent.name));
                     let _ = self
                         .deliver_direct_mention_to_agent(&room, &agents, target_agent, from_human)
                         .await;
+                }
+            }
+
+            let vis_tag = if msg.visible_to.is_empty() {
+                "公开广播".to_string()
+            } else {
+                format!("🔒 暗语(仅 {:?} 可见)", msg.visible_to)
+            };
+
+            if !woken_names.is_empty() {
+                self.emit_flow_status(
+                    &room.room_id,
+                    format!(
+                        "[#{} 路由] {} 发送{} -> 显式点名唤醒 {}",
+                        msg.msg_seq,
+                        msg.sender_name,
+                        vis_tag,
+                        woken_names.join(", ")
+                    ),
+                );
+            } else if !msg
+                .mentions
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case("Manager"))
+            {
+                if !room.peek_enabled {
+                    self.emit_flow_status(
+                        &room.room_id,
+                        format!(
+                            "[#{} 路由] {} 发送{} (无点名唤醒目标，空闲窥屏已关闭 peek_enabled=false)",
+                            msg.msg_seq, msg.sender_name, vis_tag
+                        ),
+                    );
+                } else {
+                    self.emit_flow_status(
+                        &room.room_id,
+                        format!(
+                            "[#{} 路由] {} 发送{} (无点名目标) -> 启动空闲窥屏计时 ({}s 静默后检测，间隔阈值 ≥{} 条)",
+                            msg.msg_seq,
+                            msg.sender_name,
+                            vis_tag,
+                            room.peek_idle_secs,
+                            room.peek_msg_interval
+                        ),
+                    );
                 }
             }
 
@@ -1118,18 +1259,38 @@ impl RoomCoordinator {
         // Roll 0..=100 for each candidate agent, filter by `mute_probability`, and sort eligible descending!
         let mut eligible = Vec::new();
         let mut muted = Vec::new();
+        let mut roll_summary = Vec::new();
         {
             let mut rng = rand::thread_rng();
             for ag in candidates {
                 let roll: u8 = rng.gen_range(0..=100);
                 if room.interject_enabled && roll >= room.mute_probability {
                     eligible.push((ag.agent_id.clone(), roll));
+                    roll_summary.push(format!("@{}=🎲{}(≥{}% 可插嘴)", ag.name, roll, room.mute_probability));
                 } else {
                     muted.push((ag.agent_id.clone(), roll));
+                    roll_summary.push(format!(
+                        "@{}=🎲{}({} 禁言只读)",
+                        ag.name,
+                        roll,
+                        if room.interject_enabled {
+                            format!("<{}%", room.mute_probability)
+                        } else {
+                            "插嘴已关".to_string()
+                        }
+                    ));
                 }
             }
         }
         eligible.sort_by(|a, b| b.1.cmp(&a.1));
+
+        self.emit_flow_status(
+            room_id,
+            format!(
+                "[🎲 窥屏掷骰] 触发空闲窥屏轮次: {}",
+                roll_summary.join(" | ")
+            ),
+        );
 
         {
             let mut guard = self
@@ -1186,6 +1347,10 @@ impl RoomCoordinator {
             };
 
             let Some((agent_id, roll, allow_speak)) = next_pick else {
+                self.emit_flow_status(
+                    room_id,
+                    "[✅ 窥屏轮次结束] 本轮所有候选 Agent 已完成窥屏，无人主动插嘴".to_string(),
+                );
                 return;
             };
 
@@ -1211,6 +1376,15 @@ impl RoomCoordinator {
                 return;
             };
             if unread.is_empty() {
+                self.emit_flow_status(
+                    room_id,
+                    format!(
+                        "[🙈 窥屏跳过] @{} 在 #{}..#{} 间无可见消息 (暗语已物理过滤) -> 推进游标并跳过",
+                        target_agent.name,
+                        target_agent.last_delivered_seq + 1,
+                        room.last_msg_seq
+                    ),
+                );
                 let _ = self.store.prepare_agent_delivery(
                     &target_agent.agent_id,
                     room.last_msg_seq,
@@ -1248,19 +1422,20 @@ impl RoomCoordinator {
                 return;
             };
 
-            self.emit_room_event(ChatroomEvent::PeekRoundStatus {
-                room_id: room_id.to_string(),
-                status: format!(
-                    "@{} 正在窥屏 (roll={}, {})",
+            self.emit_flow_status(
+                room_id,
+                format!(
+                    "[👀 正在窥屏] @{} 正在浏览 {} 条未读消息 (roll={}, {})",
                     updated_agent.name,
+                    unread.len(),
                     roll,
                     if allow_speak {
-                        "可插嘴"
+                        "ALLOWED 可主动插嘴"
                     } else {
-                        "本轮禁言只读"
+                        "MUTED 本轮禁言只读(已剥夺发言工具)"
                     }
                 ),
-            });
+            );
 
             if let Ok(resp) = self
                 .ragents_client
