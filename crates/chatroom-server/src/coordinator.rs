@@ -676,24 +676,45 @@ impl RoomCoordinator {
             reasoning_summary.as_deref(),
         );
 
-        let scheduling = match (
-            req.node_id.filter(|s| !s.trim().is_empty()),
-            req.workspace_path.filter(|s| !s.trim().is_empty()),
-        ) {
-            (Some(n), Some(w)) => {
+        let scheduling = match req.workspace_path.filter(|s| !s.trim().is_empty()) {
+            Some(w) => {
                 let p = Path::new(&w);
                 let abs_w = if p.is_absolute() {
                     p.to_path_buf()
                 } else {
                     std::env::current_dir()?.join(p)
                 };
+                let nodes = self.ragents_client.list_nodes().await.unwrap_or_default();
+                let target_node_id = req
+                    .node_id
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| nodes.first().map(|n| n.metadata.id.clone()))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("no active daemon nodes available for workspace_path")
+                    })?;
+
+                if let Some(node) = nodes.iter().find(|n| n.metadata.id == target_node_id) {
+                    if !node.status.allowed_workspace_dirs.is_empty()
+                        && !is_workspace_path_allowed(
+                            &abs_w,
+                            &node.status.allowed_workspace_dirs,
+                        )
+                    {
+                        anyhow::bail!(
+                            "工作目录 '{}' 不在节点 '{}' 允许的目录白名单内 (允许目录: {:?})",
+                            abs_w.display(),
+                            target_node_id,
+                            node.status.allowed_workspace_dirs
+                        );
+                    }
+                }
                 let _ = std::fs::create_dir_all(&abs_w);
                 SchedulingMode::Pinned {
-                    node_id: NodeId::new(n),
+                    node_id: NodeId::new(target_node_id),
                     workspace_path: abs_w,
                 }
             }
-            _ => SchedulingMode::Floating {
+            None => SchedulingMode::Floating {
                 node_selector: BTreeMap::new(),
             },
         };

@@ -10,7 +10,10 @@ use ragents_apiserver::{
 };
 use ragents_client::RagentsClient;
 use ragents_core::{make_openresponses_resource, CoreError, ModelBackend, ModelEndpointConfig};
-use ragents_daemon::{AgentDaemon, DaemonConfig, ExecutorMode, LocalModelConfig};
+use ragents_daemon::{
+    default_allowed_workspace_dirs, parse_workspace_dirs_csv, AgentDaemon, DaemonConfig,
+    ExecutorMode, LocalModelConfig,
+};
 use ragents_protocol::*;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -321,6 +324,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         default_system_prompt: "You are a helpful agent.".to_string(),
         default_model: Some("gpt-4.1-mini".to_string()),
         temp_root_dir: tmp.path().join("daemon_tmp"),
+        allowed_workspace_dirs: parse_workspace_dirs_csv("/a/b/c,/a/b/d"),
         labels: BTreeMap::new(),
         auto_discover_models: false,
         models,
@@ -743,6 +747,46 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
     assert!(mgr_ctx_json.contains("chatroom_add_agent"));
     assert!(mgr_ctx_json.contains("chatroom_remove_agent"));
 
+    // 13. Test `allowed_workspace_dirs` restriction when creating an Agent in the room:
+    //     `/var/forbidden_ws` must be rejected (400), while a subdirectory under `/tmp` must succeed (201).
+    let bad_ws_resp = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/agents"))
+        .bearer_auth(chat_auth_token)
+        .json(&CreateAgentRequest {
+            name: "BadWsAgent".to_string(),
+            role_title: "测试非法目录".to_string(),
+            avatar: "🚫".to_string(),
+            persona_prompt: "Test".to_string(),
+            model: Some("gpt-4.1-mini".to_string()),
+            reasoning_effort: None,
+            reasoning_summary: None,
+            node_id: None,
+            workspace_path: Some("/var/forbidden_ws_dir".to_string()),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_ws_resp.status().as_u16(), 400);
+
+    let ok_ws_resp = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/agents"))
+        .bearer_auth(chat_auth_token)
+        .json(&CreateAgentRequest {
+            name: "TmpWsAgent".to_string(),
+            role_title: "测试合法/tmp目录".to_string(),
+            avatar: "✅".to_string(),
+            persona_prompt: "Test".to_string(),
+            model: Some("gpt-4.1-mini".to_string()),
+            reasoning_effort: None,
+            reasoning_summary: None,
+            node_id: None,
+            workspace_path: Some(tmp.path().join("allowed_tmp_ws").to_string_lossy().to_string()),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok_ws_resp.status().as_u16(), 201);
+
     cancel.cancel();
 }
 
@@ -797,6 +841,7 @@ async fn test_live_multi_agent_chatroom_when_env_present() {
         default_system_prompt: "You are a helpful AI agent.".to_string(),
         default_model: Some(model_name.clone()),
         temp_root_dir: tmp.path().join("daemon_tmp"),
+        allowed_workspace_dirs: default_allowed_workspace_dirs(),
         labels: BTreeMap::new(),
         auto_discover_models: true,
         models,

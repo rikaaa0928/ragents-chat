@@ -5,6 +5,8 @@ max_concurrent_runners = 8
 default_system_prompt = "You are a helpful AI assistant running inside the ragents container cluster."
 default_model = "gemini-3.8-flash"
 temp_root_dir = "/var/lib/ragents/tmp"
+# 允许创建 Agent 工作目录 (workspace_path) 的父目录白名单（默认总是包含 /tmp）
+allowed_workspace_dirs = ["/tmp", "/var/lib/ragents/workspaces"]
 # 自动从模型提供商 `/v1/models` 接口拉取可用模型列表，下方 `[models]` 配置作为补充与参数覆盖（默认开启）
 auto_discover_models = true
 
