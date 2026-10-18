@@ -819,6 +819,7 @@
     let currentAgents = [];
     let currentMessages = [];
     let selectedMentions = new Set();
+    let singleChatAutoPreselected = false;
     let roomEventSource = null;
 
     let inspectedAgent = null;
@@ -988,10 +989,13 @@
       currentMessages = detail.messages;
       currentFlowLogs = detail.flow_logs || [];
 
-      // Single-chat default: when there is exactly 1 agent in the room, explicitly pre-select @<SoleAgent>
+      // Single-chat default: when there is exactly 1 agent in the room, pre-select @<SoleAgent> until user picks another or types @...
       selectedMentions.clear();
       if (currentAgents.length === 1) {
         selectedMentions.add(currentAgents[0].name);
+        singleChatAutoPreselected = true;
+      } else {
+        singleChatAutoPreselected = false;
       }
 
       messagesPinnedToBottom = true;
@@ -1133,6 +1137,15 @@
     }
 
     function toggleMention(name) {
+      if (singleChatAutoPreselected) {
+        singleChatAutoPreselected = false;
+        if (currentAgents.length === 1 && name !== currentAgents[0].name) {
+          selectedMentions.clear();
+          selectedMentions.add(name);
+          renderMentionSelectorBar();
+          return;
+        }
+      }
       if (selectedMentions.has(name)) {
         selectedMentions.delete(name);
       } else {
@@ -1433,7 +1446,11 @@
       const input = document.getElementById('messageInput');
       const content = input.value.trim();
       if (!content) return;
-      const mentions = Array.from(selectedMentions);
+      // If single-chat auto-preselected the sole agent, but the user explicitly typed `@Manager ...` at the start,
+      // do not send the auto-preselected agent in `mentions`!
+      const mentions = (singleChatAutoPreselected && content.startsWith('@'))
+        ? []
+        : Array.from(selectedMentions);
       input.value = '';
       messagesPinnedToBottom = true;
       await apiFetch(`/api/v1/rooms/${currentRoom.room_id}/messages`, {
@@ -1447,6 +1464,7 @@
       if (currentAgents.length === 1) {
         selectedMentions.clear();
         selectedMentions.add(currentAgents[0].name);
+        singleChatAutoPreselected = true;
         renderMentionSelectorBar();
       }
     }

@@ -1709,24 +1709,41 @@ pub fn parse_mentions(
         }
     }
 
-    for token in content.split_whitespace() {
-        if let Some(after_at) = token.strip_prefix('@') {
-            let cleaned =
-                after_at.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
-            if cleaned.is_empty() {
-                continue;
-            }
-            if cleaned.eq_ignore_ascii_case("Manager") {
-                push_unique("Manager".to_string());
-            } else if cleaned.eq_ignore_ascii_case("Human") {
-                push_unique("Human".to_string());
-            } else if let Some(ag) = room_agents
-                .iter()
-                .find(|a| a.name.eq_ignore_ascii_case(cleaned))
-            {
-                push_unique(ag.name.clone());
-            }
+    // Only extract @mentions from the LEADING prefix of `content` (e.g. "@Manager @Judge hello..."),
+    // never from `@Name` references buried inside the body text or rule descriptions!
+    let mut rest = content.trim_start();
+    while rest.starts_with('@') {
+        let after_at = &rest[1..];
+        let token_len = after_at
+            .find(|c: char| {
+                c.is_whitespace()
+                    || c == ','
+                    || c == '，'
+                    || c == ':'
+                    || c == '：'
+                    || c == ')'
+                    || c == '）'
+            })
+            .unwrap_or(after_at.len());
+        let candidate = &after_at[..token_len];
+        if candidate.is_empty() {
+            break;
         }
+        if candidate.eq_ignore_ascii_case("Manager") {
+            push_unique("Manager".to_string());
+        } else if candidate.eq_ignore_ascii_case("Human") {
+            push_unique("Human".to_string());
+        } else if let Some(ag) = room_agents
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(candidate))
+        {
+            push_unique(ag.name.clone());
+        } else {
+            break;
+        }
+        rest = after_at[token_len..].trim_start_matches(|c: char| {
+            c.is_whitespace() || c == ',' || c == '，' || c == ':' || c == '：'
+        });
     }
 
     found
