@@ -134,10 +134,6 @@ impl ChatroomStore {
                  PRIMARY KEY (room_id, msg_seq)
              );",
         )?;
-        let _ = conn.execute(
-            "ALTER TABLE room_messages ADD COLUMN visible_to_json TEXT NOT NULL DEFAULT '[]'",
-            [],
-        );
 
         let default_mgr_prompt = "You are @Manager, the AI Chatroom Butler and Team Architect. \
 When humans or agents ask you to recruit new specialist agents into the room (or ask you a management question), \
