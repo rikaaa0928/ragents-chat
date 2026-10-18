@@ -439,7 +439,7 @@ impl RoomCoordinator {
                 ),
             );
             self.step_sequential_peek_queue(&agent.room_id).await;
-        } else {
+        } else if !agent.name.eq_ignore_ascii_case("Manager") {
             self.schedule_room_peek_if_ready(&agent.room_id);
         }
     }
@@ -1357,6 +1357,15 @@ impl RoomCoordinator {
                         woken_names.join(", ")
                     ),
                 );
+            } else if msg.sender_kind == SenderKind::Manager {
+                self.emit_flow_status(
+                    &room.room_id,
+                    format!(
+                        "[#{} 路由] Manager 发送{} (无点名唤醒 Agent，管家消息不触发空闲窥屏与插嘴)",
+                        msg.msg_seq, vis_tag
+                    ),
+                );
+                return;
             } else if !msg
                 .mentions
                 .iter()
@@ -1385,8 +1394,8 @@ impl RoomCoordinator {
                 }
             }
 
-            // 3. If no agents were explicitly @mentioned (or after they finish), schedule the room's Peek & Interjection check
-            if mentioned_agent_ids.is_empty() {
+            // 3. If no agents were explicitly @mentioned (and sender is not @Manager), schedule the room's Peek & Interjection check
+            if mentioned_agent_ids.is_empty() && msg.sender_kind != SenderKind::Manager {
                 self.schedule_room_peek_if_ready(&room.room_id);
             }
         })
@@ -1648,12 +1657,21 @@ impl RoomCoordinator {
             return;
         }
 
-        // Find all agents that have unread messages meeting `peek_msg_interval`
+        // Find all agents that have countable unread messages meeting `peek_msg_interval`
+        // (@Manager's messages and @Manager-only requests do NOT count toward `peek_msg_interval`,
+        //  though they ARE still included in the unread context once a peek actually occurs!)
         let candidates: Vec<&RoomAgent> = agents
             .iter()
             .filter(|a| {
-                let unread_count = room.last_msg_seq.saturating_sub(a.last_delivered_seq);
-                unread_count >= u64::from(room.peek_msg_interval.max(1))
+                let unread_msgs = self
+                    .store
+                    .list_room_messages_for_agent(room_id, a.last_delivered_seq, &a.name)
+                    .unwrap_or_default();
+                let countable_unread = unread_msgs
+                    .iter()
+                    .filter(|m| is_peek_countable_message(m))
+                    .count() as u64;
+                countable_unread >= u64::from(room.peek_msg_interval.max(1))
             })
             .collect();
 
@@ -1979,6 +1997,19 @@ fn format_delivery_payload(
     }
 
     out
+}
+
+fn is_peek_countable_message(m: &RoomMessage) -> bool {
+    if m.sender_kind == SenderKind::Manager || m.sender_kind == SenderKind::System {
+        return false;
+    }
+    // Messages addressed exclusively to @Manager also do not count toward peek_msg_interval
+    if !m.mentions.is_empty()
+        && m.mentions.iter().all(|t| t.eq_ignore_ascii_case("Manager"))
+    {
+        return false;
+    }
+    true
 }
 
 fn format_single_room_message(m: &RoomMessage) -> String {

@@ -590,20 +590,26 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
 
     // Wait for muted peek turns to execute
     let mut saw_muted_peek_without_speak_tool = false;
+    let mut saw_manager_msg_inside_peek_context = false;
     for _ in 0..40 {
         {
             let guard = seen_tools.lock().unwrap();
             for (prompt, tools) in guard.iter() {
-                if prompt.contains("[Chatroom Speak Permission: MUTED]") {
+                if prompt.contains("[Chatroom Unread Peek")
+                    && prompt.contains("[Chatroom Speak Permission: MUTED]")
+                {
                     assert!(
                         !tools.contains(&"chatroom_speak".to_string()),
                         "chatroom.wasm must strip chatroom_speak tool when muted!"
                     );
                     saw_muted_peek_without_speak_tool = true;
+                    if prompt.contains("我已经为您招募了安全审计专家 @SecAuditor 入群！") {
+                        saw_manager_msg_inside_peek_context = true;
+                    }
                 }
             }
         }
-        if saw_muted_peek_without_speak_tool {
+        if saw_muted_peek_without_speak_tool && saw_manager_msg_inside_peek_context {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -611,6 +617,10 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
     assert!(
         saw_muted_peek_without_speak_tool,
         "Muted peek must strip chatroom_speak tool via model.request.prepare"
+    );
+    assert!(
+        saw_manager_msg_inside_peek_context,
+        "Manager messages must not trigger peek by themselves, but must be included when a peek occurs"
     );
 
     // 11. Test Sequential Peek & Active Interjection (`mute_probability = 0`):
