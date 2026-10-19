@@ -20,7 +20,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-const WEB_INDEX_HTML: &str = include_str!("../../../web/index.html");
+const WEB_INDEX_HTML: &str = include_str!("../../../web/dist/index.html");
 const AUTH_COOKIE_NAME: &str = "ragents_chat_token";
 
 #[derive(Clone)]

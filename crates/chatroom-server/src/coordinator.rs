@@ -434,7 +434,7 @@ impl RoomCoordinator {
             self.emit_flow_status(
                 &agent.room_id,
                 format!(
-                    "[👀 窥屏完毕] @{} 完成本轮窥屏且未插嘴 (Observed.) -> 继续推进下一顺位",
+                    "[👀 窥屏完毕] @{} 完成本轮窥屏且未插话 (Observed.) -> 继续推进下一顺位",
                     agent.name
                 ),
             );
@@ -676,47 +676,94 @@ impl RoomCoordinator {
             reasoning_summary.as_deref(),
         );
 
-        let scheduling = match req.workspace_path.filter(|s| !s.trim().is_empty()) {
-            Some(w) => {
-                let p = Path::new(&w);
-                let abs_w = if p.is_absolute() {
-                    p.to_path_buf()
-                } else {
-                    std::env::current_dir()?.join(p)
-                };
-                let nodes = self.ragents_client.list_nodes().await.unwrap_or_default();
-                let target_node_id = req
-                    .node_id
-                    .filter(|s| !s.trim().is_empty())
-                    .or_else(|| nodes.first().map(|n| n.metadata.id.clone()))
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("no active daemon nodes available for workspace_path")
-                    })?;
+        let force_floating = req.node_id.as_deref() == Some("__floating__");
+        let existing_room_pinned = if !force_floating {
+            self.store
+                .list_room_agents(room_id)
+                .ok()
+                .and_then(|list| {
+                    list.into_iter().find_map(|a| match a.scheduling {
+                        SchedulingMode::Pinned {
+                            node_id,
+                            workspace_path,
+                        } => Some((
+                            node_id.to_string(),
+                            workspace_path.to_string_lossy().to_string(),
+                        )),
+                        _ => None,
+                    })
+                })
+        } else {
+            None
+        };
 
-                if let Some(node) = nodes.iter().find(|n| n.metadata.id == target_node_id) {
-                    if !node.status.allowed_workspace_dirs.is_empty()
-                        && !is_workspace_path_allowed(
-                            &abs_w,
-                            &node.status.allowed_workspace_dirs,
-                        )
-                    {
-                        anyhow::bail!(
-                            "工作目录 '{}' 不在节点 '{}' 允许的目录白名单内 (允许目录: {:?})",
-                            abs_w.display(),
-                            target_node_id,
-                            node.status.allowed_workspace_dirs
-                        );
+        let effective_node_id = if force_floating {
+            None
+        } else {
+            req.node_id
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| existing_room_pinned.as_ref().map(|(n, _)| n.clone()))
+                .or_else(|| mgr.default_node_id.filter(|s| !s.trim().is_empty()))
+        };
+
+        let effective_workspace_path = if force_floating {
+            None
+        } else {
+            req.workspace_path
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| existing_room_pinned.as_ref().map(|(_, w)| w.clone()))
+                .or_else(|| mgr.default_workspace_root.filter(|s| !s.trim().is_empty()))
+        };
+
+        let scheduling = if force_floating
+            || (effective_node_id.is_none() && effective_workspace_path.is_none())
+        {
+            SchedulingMode::Floating {
+                node_selector: BTreeMap::new(),
+            }
+        } else {
+            let nodes = self.ragents_client.list_nodes().await.unwrap_or_default();
+            let target_node_id = effective_node_id
+                .or_else(|| nodes.first().map(|n| n.metadata.id.clone()))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no active daemon nodes available for pinned scheduling")
+                })?;
+
+            let target_node = nodes.iter().find(|n| n.metadata.id == target_node_id);
+            let abs_w = match effective_workspace_path {
+                Some(w) => {
+                    let p = Path::new(&w);
+                    if p.is_absolute() {
+                        p.to_path_buf()
+                    } else {
+                        std::env::current_dir()?.join(p)
                     }
                 }
-                let _ = std::fs::create_dir_all(&abs_w);
-                SchedulingMode::Pinned {
-                    node_id: NodeId::new(target_node_id),
-                    workspace_path: abs_w,
+                None => {
+                    let base_dir = target_node
+                        .and_then(|n| n.status.allowed_workspace_dirs.first().cloned())
+                        .unwrap_or_else(|| "/tmp".to_string());
+                    Path::new(&base_dir).join(format!("chatroom-{room_id}"))
+                }
+            };
+
+            if let Some(node) = target_node {
+                if !node.status.allowed_workspace_dirs.is_empty()
+                    && !is_workspace_path_allowed(&abs_w, &node.status.allowed_workspace_dirs)
+                {
+                    anyhow::bail!(
+                        "工作目录 '{}' 不在节点 '{}' 允许的目录白名单内 (允许目录: {:?})",
+                        abs_w.display(),
+                        target_node_id,
+                        node.status.allowed_workspace_dirs
+                    );
                 }
             }
-            None => SchedulingMode::Floating {
-                node_selector: BTreeMap::new(),
-            },
+            let _ = std::fs::create_dir_all(&abs_w);
+            SchedulingMode::Pinned {
+                node_id: NodeId::new(target_node_id),
+                workspace_path: abs_w,
+            }
         };
 
         let mut extensions = mgr.default_extensions;
@@ -1088,8 +1135,8 @@ impl RoomCoordinator {
                     model: model_to_use,
                     reasoning_effort: mgr_settings.default_reasoning_effort,
                     reasoning_summary: mgr_settings.default_reasoning_summary,
-                    node_id: mgr_settings.default_node_id,
-                    workspace_path: mgr_settings.default_workspace_root,
+                    node_id: None,
+                    workspace_path: None,
                 },
                 "manager",
             )
@@ -1382,7 +1429,7 @@ impl RoomCoordinator {
                 self.emit_flow_status(
                     &room.room_id,
                     format!(
-                        "[#{} 路由] Manager 发送{} (无点名唤醒 Agent，管家消息不触发空闲窥屏与插嘴)",
+                        "[#{} 路由] Manager 发送{} (无点名唤醒 Agent，管家消息不触发空闲窥屏与插话)",
                         msg.msg_seq, vis_tag
                     ),
                 );
@@ -1710,7 +1757,7 @@ impl RoomCoordinator {
                 let roll: u8 = rng.gen_range(0..=100);
                 if room.interject_enabled && roll >= room.mute_probability {
                     eligible.push((ag.agent_id.clone(), roll));
-                    roll_summary.push(format!("@{}=🎲{}(≥{}% 可插嘴)", ag.name, roll, room.mute_probability));
+                    roll_summary.push(format!("@{}=🎲{}(≥{}% 可插话)", ag.name, roll, room.mute_probability));
                 } else {
                     muted.push((ag.agent_id.clone(), roll));
                     roll_summary.push(format!(
@@ -1720,7 +1767,7 @@ impl RoomCoordinator {
                         if room.interject_enabled {
                             format!("<{}%", room.mute_probability)
                         } else {
-                            "插嘴已关".to_string()
+                            "插话已关".to_string()
                         }
                     ));
                 }
@@ -1793,7 +1840,7 @@ impl RoomCoordinator {
             let Some((agent_id, roll, allow_speak)) = next_pick else {
                 self.emit_flow_status(
                     room_id,
-                    "[✅ 窥屏轮次结束] 本轮所有候选 Agent 已完成窥屏，无人主动插嘴".to_string(),
+                    "[✅ 窥屏轮次结束] 本轮所有候选 Agent 已完成窥屏，无人主动插话".to_string(),
                 );
                 return;
             };
@@ -1874,7 +1921,7 @@ impl RoomCoordinator {
                     unread.len(),
                     roll,
                     if allow_speak {
-                        "ALLOWED 可主动插嘴"
+                        "ALLOWED 可主动插话"
                     } else {
                         "MUTED 本轮禁言只读(已剥夺发言工具)"
                     }

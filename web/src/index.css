@@ -1,0 +1,78 @@
+@import "tailwindcss";
+
+:root {
+  --bg-sidebar: #f9f9f9;
+  --bg-main: #ffffff;
+  --bg-surface: #f4f4f4;
+  --bg-surface-2: #ececec;
+  --bg-elevated: #ffffff;
+  --bg-code: #f7f7f8;
+  --bg-hover: rgba(0, 0, 0, 0.045);
+  --bg-active: rgba(0, 0, 0, 0.075);
+  --bg-human: #f4f4f4;
+
+  --text-primary: #0d0d0d;
+  --text-secondary: #5d5d5d;
+  --text-muted: #8f8f8f;
+
+  --border-subtle: rgba(0, 0, 0, 0.075);
+  --border-default: rgba(0, 0, 0, 0.12);
+
+  --btn-primary-bg: #0d0d0d;
+  --btn-primary-text: #ffffff;
+  --btn-primary-hover: #262626;
+}
+
+[data-theme="dark"] {
+  --bg-sidebar: #171717;
+  --bg-main: #212121;
+  --bg-surface: #2f2f2f;
+  --bg-surface-2: #383838;
+  --bg-elevated: #262626;
+  --bg-code: #141414;
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-active: rgba(255, 255, 255, 0.11);
+  --bg-human: #2f2f2f;
+
+  --text-primary: #ececec;
+  --text-secondary: #b4b4b4;
+  --text-muted: #7a7a7a;
+
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-default: rgba(255, 255, 255, 0.14);
+
+  --btn-primary-bg: #ffffff;
+  --btn-primary-text: #0d0d0d;
+  --btn-primary-hover: #e5e5e5;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background-color: var(--bg-main);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", Roboto, sans-serif;
+}
+
+.font-mono-code {
+  font-family: "SF Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* Subtle Codex Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}

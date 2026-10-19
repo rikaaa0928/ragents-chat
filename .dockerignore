@@ -6,3 +6,5 @@ extensions/*/target
 *.sqlite-shm
 *.sqlite-wal
 .env
+web/node_modules
+
