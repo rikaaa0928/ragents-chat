@@ -563,12 +563,7 @@ impl RoomCoordinator {
         labels.insert("ragents.chat.agent_name".to_string(), "Manager".to_string());
         labels.insert("ragents.chat.role".to_string(), "chatroom_manager".to_string());
 
-        let mut permissions = PermissionPolicyLayer::default();
-        permissions.http_hosts = Some(RuleSet {
-            deny: None,
-            allow: Some(vec!["*".to_string()]),
-            default: Some(DefaultPermissionDecision::Allow),
-        });
+        let permissions = PermissionPolicyLayer::default();
 
         let scheduling = SchedulingMode::Floating {
             node_selector: BTreeMap::new(),
@@ -810,12 +805,7 @@ impl RoomCoordinator {
         labels.insert("ragents.chat.agent_id".to_string(), agent_id.clone());
         labels.insert("ragents.chat.agent_name".to_string(), clean_name.clone());
 
-        let mut permissions = PermissionPolicyLayer::default();
-        permissions.http_hosts = Some(RuleSet {
-            deny: None,
-            allow: Some(vec!["*".to_string()]),
-            default: Some(DefaultPermissionDecision::Allow),
-        });
+        let permissions = PermissionPolicyLayer::default();
 
         let created_sess = self
             .ragents_client

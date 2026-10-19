@@ -52,17 +52,17 @@ enabled = true
 config = { enabled = true, trigger_tokens = 64000, keep_recent_tokens = 20000 }
 
 [default_permissions.file_read]
-allow = ["*"]
-default = "allow"
+allow = [".", "/tmp"]
+default = "ask"
 
 [default_permissions.file_write]
-allow = [".", "/var/lib/ragents/tmp", "/tmp"]
+allow = [".", "/tmp"]
 default = "ask"
 
 [default_permissions.command_work_dir]
-allow = [".", "/var/lib/ragents/tmp", "/tmp"]
+allow = [".", "/tmp"]
 default = "ask"
 
 [default_permissions.http_hosts]
-allow = ["*"]
-default = "allow"
+allow = []
+default = "ask"
