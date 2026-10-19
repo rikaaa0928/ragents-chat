@@ -525,8 +525,8 @@ impl RoomCoordinator {
                     enabled: true,
                     config: serde_json::json!({
                         "enabled": true,
-                        "trigger_tokens": 64000,
-                        "keep_recent_tokens": 20000
+                        "trigger_tokens": 400000,
+                        "keep_recent_tokens": 64000
                     }),
                     allowed_dirs: vec![],
                 });
@@ -772,8 +772,8 @@ impl RoomCoordinator {
                     enabled: true,
                     config: serde_json::json!({
                         "enabled": true,
-                        "trigger_tokens": 64000,
-                        "keep_recent_tokens": 20000
+                        "trigger_tokens": 400000,
+                        "keep_recent_tokens": 64000
                     }),
                     allowed_dirs: vec![],
                 });

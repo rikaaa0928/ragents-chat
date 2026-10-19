@@ -49,7 +49,7 @@ config = { include_workspace = true, include_global = false, include_agents_md =
 name = "compaction"
 path = "/etc/ragents/wasm/ragent_compaction_extension.wasm"
 enabled = true
-config = { enabled = true, trigger_tokens = 64000, keep_recent_tokens = 20000 }
+config = { enabled = true, trigger_tokens = 400000, keep_recent_tokens = 64000 }
 
 [default_permissions.file_read]
 allow = [".", "/tmp"]
