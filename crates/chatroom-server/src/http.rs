@@ -539,12 +539,7 @@ async fn handle_get_inspector(
         }
     }
 
-    let can_edit_prompt = agent.runtime_state == AgentRuntimeState::Idle
-        && agent.active_activation_id.is_none()
-        && context
-            .as_ref()
-            .map(|c| c.effective_items.is_empty())
-            .unwrap_or(true);
+    let can_edit_prompt = true;
 
     let message_queues = state
         .coordinator

@@ -1284,22 +1284,6 @@ impl RoomCoordinator {
             .map(|p| p.trim() != existing.persona_prompt.trim())
             .unwrap_or(false);
 
-        if prompt_changed {
-            let has_started = existing.runtime_state != AgentRuntimeState::Idle
-                || existing.active_activation_id.is_some()
-                || self
-                    .ragents_client
-                    .get_session_context(&existing.active_session_id)
-                    .await
-                    .map(|ctx| !ctx.effective_items.is_empty())
-                    .unwrap_or(false);
-            if has_started {
-                anyhow::bail!(
-                    "该 Agent 已触发过运行，System Prompt 已锁定为只读（仅在第一次触发运行前允许编辑）"
-                );
-            }
-        }
-
         let updated = self
             .store
             .update_agent_model_and_reasoning(agent_id, patch)?;
@@ -1927,6 +1911,7 @@ impl RoomCoordinator {
                     &updated_agent.active_session_id,
                     PushRealtimeMessageRequest {
                         content: vec![MessageContent::InputText { text: formatted }],
+                        disabled_tools: vec![],
                     },
                 )
                 .await
@@ -1972,6 +1957,7 @@ impl RoomCoordinator {
                         submission_kind: SubmissionKind::Normal,
                         input: vec![Item::user_message(formatted)],
                         model_override: None,
+                        disabled_tools: vec![],
                         desired_phase: DesiredActivationPhase::Running,
                         interaction_responses: BTreeMap::new(),
                     },
@@ -2124,6 +2110,7 @@ impl RoomCoordinator {
                     &updated_mgr.active_session_id,
                     PushRealtimeMessageRequest {
                         content: vec![MessageContent::InputText { text: formatted }],
+                        disabled_tools: vec![],
                     },
                 )
                 .await
@@ -2169,6 +2156,7 @@ impl RoomCoordinator {
                         submission_kind: SubmissionKind::Normal,
                         input: vec![Item::user_message(formatted)],
                         model_override: None,
+                        disabled_tools: vec![],
                         desired_phase: DesiredActivationPhase::Running,
                         interaction_responses: BTreeMap::new(),
                     },
@@ -2487,6 +2475,11 @@ impl RoomCoordinator {
                     &updated_agent.active_session_id,
                     PushRealtimeMessageRequest {
                         content: vec![MessageContent::InputText { text: formatted }],
+                        disabled_tools: if allow_speak {
+                            vec![]
+                        } else {
+                            vec!["chatroom_speak".to_string()]
+                        },
                     },
                 )
                 .await

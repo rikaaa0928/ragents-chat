@@ -40,10 +40,16 @@ enabled = true
 config = {}
 
 [[extensions]]
+name = "agents_md"
+path = "/etc/ragents/wasm/ragent_agents_md_extension.wasm"
+enabled = true
+config = {}
+
+[[extensions]]
 name = "skills"
 path = "/etc/ragents/wasm/ragent_skills_extension.wasm"
 enabled = true
-config = { include_workspace = true, include_global = false, include_agents_md = true }
+config = { include_workspace = true, include_global = false }
 
 [[extensions]]
 name = "compaction"

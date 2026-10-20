@@ -36,7 +36,6 @@ struct ChatroomPluginConfig {
 #[derive(Debug, Default)]
 struct PluginRuntimeState {
     config: ChatroomPluginConfig,
-    is_muted_turn: bool,
 }
 
 static STATE: Mutex<Option<PluginRuntimeState>> = Mutex::new(None);
@@ -204,26 +203,6 @@ fn post_json_via_wasi_http(url: &str, bearer_token: &str, body_bytes: &[u8]) -> 
     Ok((status, String::from_utf8_lossy(&resp_bytes).to_string()))
 }
 
-fn extract_latest_user_text(items: &[Value]) -> String {
-    for item in items.iter().rev() {
-        if item.get("type").and_then(Value::as_str) == Some("message")
-            && item.get("role").and_then(Value::as_str) == Some("user")
-        {
-            if let Some(arr) = item.get("content").and_then(Value::as_array) {
-                let mut text = String::new();
-                for block in arr {
-                    if let Some(t) = block.get("text").and_then(Value::as_str) {
-                        text.push_str(t);
-                        text.push('\n');
-                    }
-                }
-                return text;
-            }
-        }
-    }
-    String::new()
-}
-
 struct ChatroomExtension;
 
 impl exports::ragent::extension::lifecycle::Guest for ChatroomExtension {
@@ -237,18 +216,6 @@ impl exports::ragent::extension::lifecycle::Guest for ChatroomExtension {
                     kind: "transform",
                     priority: 80,
                     failure: "abort",
-                },
-                Subscription {
-                    hook: "context.project.prepare",
-                    kind: "transform",
-                    priority: 50,
-                    failure: "ignore",
-                },
-                Subscription {
-                    hook: "model.request.prepare",
-                    kind: "transform",
-                    priority: 50,
-                    failure: "ignore",
                 },
                 Subscription {
                     hook: "tools.call",
@@ -269,10 +236,7 @@ impl exports::ragent::extension::lifecycle::Guest for ChatroomExtension {
                 .map_err(|e| format!("invalid chatroom plugin config: {e}"))?
         };
         let mut guard = STATE.lock().map_err(|e| e.to_string())?;
-        *guard = Some(PluginRuntimeState {
-            config: cfg,
-            is_muted_turn: false,
-        });
+        *guard = Some(PluginRuntimeState { config: cfg });
         Ok(())
     }
 
@@ -280,7 +244,6 @@ impl exports::ragent::extension::lifecycle::Guest for ChatroomExtension {
         let req: HookRequest = serde_json::from_str(&request_json).map_err(|e| e.to_string())?;
         match req.hook.as_str() {
             "agent.prepare" => {
-                let mut draft = req.payload;
                 let cfg = STATE
                     .lock()
                     .ok()
@@ -305,7 +268,7 @@ impl exports::ragent::extension::lifecycle::Guest for ChatroomExtension {
 
                 let protocol_prompt = if cfg.is_manager {
                     format!(
-                        "\n\n<manager_protocol>\n\
+                        "<manager_protocol>\n\
 You are @Manager ({agent_role}), the built-in Chatroom Butler & Specialist Recruiter for room \"{room_name}\".\n\
 \n\
 CRITICAL RULES FOR @MANAGER TOOL EXECUTION:\n\
@@ -324,7 +287,7 @@ CRITICAL RULES FOR @MANAGER TOOL EXECUTION:\n\
                     )
                 } else {
                     format!(
-                        "\n\n<chatroom_protocol>\n\
+                        "<chatroom_protocol>\n\
 You are participating in the multi-participant AI chatroom \"{room_name}\" as @{agent_name} ({agent_role}).\n\
 \n\
 CRITICAL RULES FOR CHATROOM INTERACTION:\n\
@@ -354,132 +317,103 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                     )
                 };
 
-                if let Some(sys) = draft
-                    .get("system_prompt")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                {
-                    draft["system_prompt"] = Value::String(format!("{sys}{protocol_prompt}"));
-                }
-
-                if let Some(tools) = draft.get_mut("tools").and_then(Value::as_array_mut) {
-                    if cfg.is_manager {
-                        tools.push(json!({
-                            "enabled": true,
-                            "name": "chatroom_add_agent",
-                            "description": "Recruit and add a new AI specialist agent into the current chatroom. Call this tool BEFORE calling chatroom_speak so the new agent is already seated in the room when you announce them.",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {
-                                        "type": "string",
-                                        "description": "Unique alphanumeric/Chinese handle without spaces or @ (e.g. 'Player1', 'SecAuditor', 'RustExpert')."
-                                    },
-                                    "role_title": {
-                                        "type": "string",
-                                        "description": "Concise role title (e.g. '安全与权限审计专家', '1号玩家·逻辑派')."
-                                    },
-                                    "avatar": {
-                                        "type": "string",
-                                        "description": "Single emoji representing this agent (e.g. '🛡️', '🦊', '🦉')."
-                                    },
-                                    "persona_prompt": {
-                                        "type": "string",
-                                        "description": "Detailed system prompt and behavioral rules for this agent."
-                                    },
-                                    "model": {
-                                        "type": "string",
-                                        "description": "Optional model identifier chosen from the cluster's Available Models."
-                                    }
-                                },
-                                "required": ["name", "role_title", "persona_prompt"]
-                            }
-                        }));
-                        tools.push(json!({
-                            "enabled": true,
-                            "name": "chatroom_remove_agent",
-                            "description": "Remove an existing AI agent from the current chatroom by name or agent_id. Call this tool BEFORE calling chatroom_speak.",
-                            "parameters": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {
-                                        "type": "string",
-                                        "description": "Name (e.g. 'Player1') or agent_id of the agent to remove from the room."
-                                    }
-                                },
-                                "required": ["name"]
-                            }
-                        }));
-                    }
-
+                let mut tools = Vec::new();
+                if cfg.is_manager {
                     tools.push(json!({
                         "enabled": true,
-                        "name": "chatroom_speak",
-                        "description": "Post a public message to the chatroom. Call this ONLY when you have substantive content to share. Do NOT call this for polite sign-offs ('收到', '已签收', '待命').",
+                        "name": "chatroom_add_agent",
+                        "description": "Recruit and add a new AI specialist agent into the current chatroom. Call this tool BEFORE calling chatroom_speak so the new agent is already seated in the room when you announce them.",
                         "parameters": {
                             "type": "object",
                             "properties": {
-                                "content": {
+                                "name": {
                                     "type": "string",
-                                    "description": "Message content to post publicly in the chatroom (Markdown supported). Do not prefix with redundant @Name tags already listed in `mentions`."
+                                    "description": "Unique alphanumeric/Chinese handle without spaces or @ (e.g. 'Player1', 'SecAuditor', 'RustExpert')."
                                 },
-                                "mentions": {
-                                    "type": "array",
-                                    "items": { "type": "string" },
-                                    "description": "ONLY include an Agent name here if you require that Agent to immediately execute a task or answer a question (e.g. ['Manager'] or ['Reviewer']). When replying to the user or delivering a final summary, use ['Human'] or []."
+                                "role_title": {
+                                    "type": "string",
+                                    "description": "Concise role title (e.g. '安全与权限审计专家', '1号玩家·逻辑派')."
                                 },
-                                "visible_to": {
-                                    "type": "array",
-                                    "items": { "type": "string" },
-                                    "description": "Optional visibility whitelist for secret/private whispers (e.g. ['Player1'] or ['Judge', 'Player1']). If omitted or empty, everyone in the room can see the message. If non-empty, ONLY the listed participants (plus yourself and @Human observer) can see it."
+                                "avatar": {
+                                    "type": "string",
+                                    "description": "Single emoji representing this agent (e.g. '🛡️', '🦊', '🦉')."
                                 },
-                                "reply_to_seq": {
-                                    "type": "integer",
-                                    "description": "Optional message sequence number (#seq) you are replying to."
+                                "persona_prompt": {
+                                    "type": "string",
+                                    "description": "Detailed system prompt and behavioral rules for this agent."
+                                },
+                                "model": {
+                                    "type": "string",
+                                    "description": "Optional model identifier chosen from the cluster's Available Models."
                                 }
                             },
-                            "required": ["content"]
+                            "required": ["name", "role_title", "persona_prompt"]
+                        }
+                    }));
+                    tools.push(json!({
+                        "enabled": true,
+                        "name": "chatroom_remove_agent",
+                        "description": "Remove an existing AI agent from the current chatroom by name or agent_id. Call this tool BEFORE calling chatroom_speak.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "Name (e.g. 'Player1') or agent_id of the agent to remove from the room."
+                                }
+                            },
+                            "required": ["name"]
                         }
                     }));
                 }
 
-                Ok(json!({ "action": "continue", "payload": draft }).to_string())
-            }
-            "context.project.prepare" => {
-                if let Some(items) = req.payload.as_array() {
-                    let latest_user = extract_latest_user_text(items);
-                    let muted = latest_user.contains("[Chatroom Speak Permission: MUTED]");
-                    if let Ok(mut guard) = STATE.lock() {
-                        if let Some(ref mut st) = *guard {
-                            st.is_muted_turn = muted;
-                        }
+                tools.push(json!({
+                    "enabled": true,
+                    "name": "chatroom_speak",
+                    "description": "Post a public message to the chatroom. Call this ONLY when you have substantive content to share. Do NOT call this for polite sign-offs ('收到', '已签收', '待命').",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "content": {
+                                "type": "string",
+                                "description": "Message content to post publicly in the chatroom (Markdown supported). Do not prefix with redundant @Name tags already listed in `mentions`."
+                            },
+                            "mentions": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "ONLY include an Agent name here if you require that Agent to immediately execute a task or answer a question (e.g. ['Manager'] or ['Reviewer']). When replying to the user or delivering a final summary, use ['Human'] or []."
+                            },
+                            "visible_to": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Optional visibility whitelist for secret/private whispers (e.g. ['Player1'] or ['Judge', 'Player1']). If omitted or empty, everyone in the room can see the message. If non-empty, ONLY the listed participants (plus yourself and @Human observer) can see it."
+                            },
+                            "reply_to_seq": {
+                                "type": "integer",
+                                "description": "Optional message sequence number (#seq) you are replying to."
+                            }
+                        },
+                        "required": ["content"]
                     }
-                }
-                Ok(json!({ "action": "unchanged" }).to_string())
-            }
-            "model.request.prepare" => {
-                let is_muted = STATE
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().map(|s| s.is_muted_turn))
-                    .unwrap_or(false);
-                if !is_muted {
-                    return Ok(json!({ "action": "unchanged" }).to_string());
-                }
-                let mut model_req = req.payload;
-                if let Some(tools) = model_req.get_mut("tools").and_then(Value::as_array_mut) {
-                    tools.retain(|t| t.get("name").and_then(Value::as_str) != Some("chatroom_speak"));
-                }
-                Ok(json!({ "action": "continue", "payload": model_req }).to_string())
+                }));
+
+                Ok(json!({
+                    "action": "continue",
+                    "payload": {
+                        "append_system_prompt": protocol_prompt,
+                        "tools": tools
+                    }
+                })
+                .to_string())
             }
             "tools.call" => {
                 let call: ToolCallRequest =
                     serde_json::from_value(req.payload).map_err(|e| e.to_string())?;
 
-                let (cfg, is_muted) = {
+                let cfg = {
                     let guard = STATE.lock().map_err(|e| e.to_string())?;
                     let st = guard.as_ref().ok_or("chatroom extension not initialized")?;
-                    (st.config.clone(), st.is_muted_turn)
+                    st.config.clone()
                 };
 
                 match call.name.as_str() {
@@ -586,15 +520,6 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                         Ok(json!({ "action": "continue", "payload": result }).to_string())
                     }
                     "chatroom_speak" => {
-                        if is_muted {
-                            let res = ToolResult {
-                                success: false,
-                                output: "Permission denied: You are muted for this peek turn (read-only observation).".to_string(),
-                                error: Some("muted_in_turn".to_string()),
-                            };
-                            return Ok(json!({ "action": "continue", "payload": res }).to_string());
-                        }
-
                         let args: SpeakArgs = match serde_json::from_value(call.arguments) {
                             Ok(a) => a,
                             Err(e) => {

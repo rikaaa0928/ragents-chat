@@ -158,10 +158,23 @@ export interface InspectorEventEnvelope {
   };
 }
 
+export interface PromptParts {
+  system_prompt: string;
+  node_prompt: string;
+  client_prompt: string;
+  extension_prompts: Record<string, string>;
+}
+
 export interface InspectorSnapshot {
   agent: RoomAgent;
   selected_session_id: string;
   can_edit_prompt: boolean;
+  session?: {
+    status?: {
+      latest_prompt_parts?: PromptParts | null;
+      effective_tools?: string[];
+    };
+  } | null;
   pending_permissions: PendingPermission[];
   context: {
     effective_items: ContextItem[];

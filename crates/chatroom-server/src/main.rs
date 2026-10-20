@@ -70,8 +70,11 @@ async fn main() -> anyhow::Result<()> {
     let mut default_extensions = Vec::new();
     if let Some(ref ext_dir) = cli.extensions_dir {
         for (name, filename) in [
+            ("agents_md", "ragent_agents_md_extension.wasm"),
+            ("skills", "ragent_skills_extension.wasm"),
             ("shell", "ragent_shell_extension.wasm"),
             ("file_editor", "ragent_file_editor_extension.wasm"),
+            ("image_viewer", "ragent_image_viewer_extension.wasm"),
         ] {
             let flat = ext_dir.join(filename);
             let nested = ext_dir.join(format!("{name}/target/wasm32-wasip2/release/{filename}"));

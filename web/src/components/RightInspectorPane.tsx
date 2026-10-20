@@ -764,12 +764,8 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                       }`}
                     >
                       <FileText className="w-3 h-3 text-emerald-500" />
-                      <span>System Prompt</span>
-                      {inspector?.can_edit_prompt ? (
-                        <Unlock className="w-2.5 h-2.5 text-emerald-500" />
-                      ) : (
-                        <Lock className="w-2.5 h-2.5 text-[var(--text-muted)]" />
-                      )}
+                      <span>System Prompt (四段式)</span>
+                      <Unlock className="w-2.5 h-2.5 text-emerald-500" />
                     </button>
 
                     <button
@@ -865,23 +861,15 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                   </div>
                 )}
 
-                {/* Tab 2: Role Title & System Prompt Editor */}
+                {/* Tab 2: 4-Segment System Prompt & Role Editor */}
                 {activeConfigTab === 'prompt' && (
-                  <div className="p-2.5 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] space-y-2">
+                  <div className="p-2.5 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] space-y-2.5">
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-semibold text-[11.5px] text-[var(--text-primary)]">
-                        角色头衔与人设提示词
+                        [3. Client Prompt] 角色头衔与人设提示词
                       </span>
-                      <span
-                        className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${
-                          inspector?.can_edit_prompt
-                            ? 'bg-emerald-500/12 text-emerald-600 dark:text-emerald-400'
-                            : 'bg-[var(--bg-surface)] text-[var(--text-muted)]'
-                        }`}
-                      >
-                        {inspector?.can_edit_prompt
-                          ? '🟢 首次运行前允许修改'
-                          : '🔒 已触发运行 · 只读锁定'}
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/12 text-emerald-600 dark:text-emerald-400">
+                        🟢 随时可修改 (下轮生效)
                       </span>
                     </div>
 
@@ -892,7 +880,6 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                       <input
                         type="text"
                         value={roleDraft}
-                        readOnly={!inspector?.can_edit_prompt}
                         onChange={(e) => setRoleDraft(e.target.value)}
                         className="flex-1 px-2 py-1 rounded-md bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-xs"
                       />
@@ -901,25 +888,74 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                     <textarea
                       rows={3}
                       value={promptDraft}
-                      readOnly={!inspector?.can_edit_prompt}
                       onChange={(e) => setPromptDraft(e.target.value)}
                       className="w-full p-2 rounded-md bg-[var(--bg-surface)] border border-[var(--border-subtle)] font-mono-code text-[11.5px] leading-relaxed resize-y"
                     />
 
-                    {inspector?.can_edit_prompt && (
-                      <div className="flex justify-end">
-                        <button
-                          onClick={() =>
-                            onUpdateAgentConfig(inspectedAgent.agent_id, {
-                              role_title: roleDraft.trim() || null,
-                              persona_prompt: promptDraft.trim() || null,
-                            })
-                          }
-                          className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] flex items-center gap-1 cursor-pointer"
-                        >
-                          <Save className="w-3 h-3" />
-                          <span>保存 Prompt 修改</span>
-                        </button>
+                    <div className="flex justify-end">
+                      <button
+                        onClick={() =>
+                          onUpdateAgentConfig(inspectedAgent.agent_id, {
+                            role_title: roleDraft.trim() || null,
+                            persona_prompt: promptDraft.trim() || null,
+                          })
+                        }
+                        className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] flex items-center gap-1 cursor-pointer"
+                      >
+                        <Save className="w-3 h-3" />
+                        <span>保存 Client Prompt 修改</span>
+                      </button>
+                    </div>
+
+                    {inspector?.session?.status?.latest_prompt_parts && (
+                      <div className="pt-2 border-t border-[var(--border-subtle)] space-y-1.5 text-[11px]">
+                        <div className="font-semibold text-[var(--text-secondary)]">
+                          四段式 System Prompt 实时快照 (api-server SSOT)
+                        </div>
+                        {inspector.session.status.latest_prompt_parts.system_prompt && (
+                          <details className="rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] p-2">
+                            <summary className="cursor-pointer font-medium text-[var(--text-primary)]">
+                              [1. system_prompt] 集群系统级指令
+                            </summary>
+                            <pre className="mt-1.5 whitespace-pre-wrap break-words font-mono-code text-[10.5px] text-[var(--text-secondary)]">
+                              {inspector.session.status.latest_prompt_parts.system_prompt}
+                            </pre>
+                          </details>
+                        )}
+                        {inspector.session.status.latest_prompt_parts.node_prompt && (
+                          <details className="rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] p-2">
+                            <summary className="cursor-pointer font-medium text-[var(--text-primary)]">
+                              [2. node_prompt] 节点环境指令
+                            </summary>
+                            <pre className="mt-1.5 whitespace-pre-wrap break-words font-mono-code text-[10.5px] text-[var(--text-secondary)]">
+                              {inspector.session.status.latest_prompt_parts.node_prompt}
+                            </pre>
+                          </details>
+                        )}
+                        {Object.entries(
+                          inspector.session.status.latest_prompt_parts.extension_prompts || {}
+                        ).map(([extId, extPrompt]) => (
+                          <details
+                            key={extId}
+                            className="rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] p-2"
+                          >
+                            <summary className="cursor-pointer font-medium text-[var(--text-primary)]">
+                              [4. extension_prompts.{extId}] 插件追加指令
+                            </summary>
+                            <pre className="mt-1.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words font-mono-code text-[10.5px] text-[var(--text-secondary)]">
+                              {extPrompt}
+                            </pre>
+                          </details>
+                        ))}
+                        {inspector.session.status.effective_tools &&
+                          inspector.session.status.effective_tools.length > 0 && (
+                            <div className="text-[10.5px] text-[var(--text-muted)] pt-0.5">
+                              当前生效工具 ({inspector.session.status.effective_tools.length}):{' '}
+                              <span className="font-mono-code text-[var(--text-secondary)]">
+                                {inspector.session.status.effective_tools.join(', ')}
+                              </span>
+                            </div>
+                          )}
                       </div>
                     )}
                   </div>
