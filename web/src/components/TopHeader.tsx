@@ -94,13 +94,8 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   ).length;
   const thinkingCount = agents.filter((a) => a.runtime_state === 'thinking').length;
 
-  // Derive room's primary scheduling info from its agents
-  const primaryPinnedAgent = agents.find(
-    (a) => a.scheduling?.mode === 'pinned' && (a.scheduling?.node_id || a.scheduling?.workspace_path)
-  );
-  const roomNodeId = primaryPinnedAgent?.scheduling?.node_id || room.node_id || null;
-  const roomWorkspacePath =
-    primaryPinnedAgent?.scheduling?.workspace_path || room.workspace_path || null;
+  const roomNodeId = room.node_id || null;
+  const roomWorkspacePath = room.workspace_path || null;
   const roomNodeDetail = roomNodeId
     ? clusterNodes.find((n) => n.metadata.id === roomNodeId) || null
     : null;

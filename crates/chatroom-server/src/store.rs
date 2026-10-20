@@ -130,6 +130,7 @@ impl ChatroomStore {
                  mentions_json           TEXT NOT NULL DEFAULT '[]',
                  visible_to_json         TEXT NOT NULL DEFAULT '[]',
                  reply_to_seq            INTEGER,
+                 is_realtime             INTEGER NOT NULL DEFAULT 0,
                  source_session_id       TEXT,
                  source_activation_id    TEXT,
                  created_at              TEXT NOT NULL,
@@ -145,27 +146,6 @@ You manage the room's specialist agent roster using your tools:\n\
 4. Finally, call `chatroom_speak` ONCE to announce the roster changes in the chatroom and hand off task coordination ONLY to the Room Lead Agent (do not wake up all newly recruited agents simultaneously).";
 
         let now = Utc::now().to_rfc3339();
-        let _ = conn.execute("ALTER TABLE rooms ADD COLUMN node_id TEXT", []);
-        let _ = conn.execute("ALTER TABLE rooms ADD COLUMN workspace_path TEXT", []);
-        let _ = conn.execute(
-            "UPDATE rooms
-             SET node_id = (
-                 SELECT json_extract(scheduling_json, '$.node_id')
-                 FROM room_agents
-                 WHERE room_agents.room_id = rooms.room_id
-                   AND json_extract(scheduling_json, '$.mode') = 'pinned'
-                 LIMIT 1
-             ),
-             workspace_path = (
-                 SELECT json_extract(scheduling_json, '$.workspace_path')
-                 FROM room_agents
-                 WHERE room_agents.room_id = rooms.room_id
-                   AND json_extract(scheduling_json, '$.mode') = 'pinned'
-                 LIMIT 1
-             )
-             WHERE node_id IS NULL",
-            [],
-        );
         conn.execute(
             "INSERT OR IGNORE INTO manager_settings (
                 id, manager_model, manager_system_prompt, default_node_id, default_workspace_root,
@@ -833,6 +813,7 @@ You manage the room's specialist agent roster using your tools:\n\
         mentions: Vec<String>,
         visible_to: Vec<String>,
         reply_to_seq: Option<u64>,
+        is_realtime: bool,
         source_session_id: Option<SessionId>,
         source_activation_id: Option<ActivationId>,
     ) -> Result<(RoomMessage, Room), ChatStoreError> {
@@ -871,6 +852,7 @@ You manage the room's specialist agent roster using your tools:\n\
             mentions,
             visible_to,
             reply_to_seq,
+            is_realtime,
             source_session_id,
             source_activation_id,
             created_at: room.updated_at,
@@ -879,8 +861,8 @@ You manage the room's specialist agent roster using your tools:\n\
         tx.execute(
             "INSERT INTO room_messages (
                 room_id, msg_seq, message_id, sender_kind, sender_id, sender_name,
-                content, mentions_json, visible_to_json, reply_to_seq, source_session_id, source_activation_id, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                content, mentions_json, visible_to_json, reply_to_seq, is_realtime, source_session_id, source_activation_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 &msg.room_id,
                 msg.msg_seq as i64,
@@ -892,6 +874,7 @@ You manage the room's specialist agent roster using your tools:\n\
                 serde_json::to_string(&msg.mentions)?,
                 serde_json::to_string(&msg.visible_to)?,
                 msg.reply_to_seq.map(|s| s as i64),
+                i64::from(msg.is_realtime),
                 msg.source_session_id.as_ref().map(|s| s.as_str()),
                 msg.source_activation_id.as_ref().map(|a| a.as_str()),
                 msg.created_at.to_rfc3339(),
@@ -923,7 +906,7 @@ You manage the room's specialist agent roster using your tools:\n\
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT room_id, msg_seq, message_id, sender_kind, sender_id, sender_name,
-                    content, mentions_json, visible_to_json, reply_to_seq, source_session_id, source_activation_id, created_at
+                    content, mentions_json, visible_to_json, reply_to_seq, is_realtime, source_session_id, source_activation_id, created_at
              FROM room_messages WHERE room_id = ?1 AND msg_seq > ?2 ORDER BY msg_seq ASC",
         )?;
         let rows = stmt.query_map(params![room_id, after_seq as i64], |r| {
@@ -940,9 +923,10 @@ You manage the room's specialist agent roster using your tools:\n\
                 mentions: serde_json::from_str(&mentions_str).unwrap_or_default(),
                 visible_to: serde_json::from_str(&visible_str).unwrap_or_default(),
                 reply_to_seq: r.get::<_, Option<i64>>(9)?.map(|s| s as u64),
-                source_session_id: r.get::<_, Option<String>>(10)?.map(SessionId::new),
-                source_activation_id: r.get::<_, Option<String>>(11)?.map(ActivationId::new),
-                created_at: parse_dt(&r.get::<_, String>(12)?),
+                is_realtime: r.get::<_, i64>(10).unwrap_or(0) != 0,
+                source_session_id: r.get::<_, Option<String>>(11)?.map(SessionId::new),
+                source_activation_id: r.get::<_, Option<String>>(12)?.map(ActivationId::new),
+                created_at: parse_dt(&r.get::<_, String>(13)?),
             })
         })?;
         let mut out = Vec::new();

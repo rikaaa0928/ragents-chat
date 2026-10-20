@@ -2,7 +2,7 @@ use crate::store::ChatroomStore;
 use crate::types::*;
 use chrono::Utc;
 use futures::StreamExt;
-use openresponses_rust::MessageContent;
+use openresponses_rust::{Item, MessageContent};
 use ragents_client::RagentsClient;
 use ragents_protocol::*;
 use rand::Rng;
@@ -321,6 +321,7 @@ impl RoomCoordinator {
                                 vec![],
                                 vec![],
                                 None,
+                                false,
                                 Some(env.session_id.clone()),
                                 env.activation_id.clone(),
                             ) {
@@ -673,26 +674,7 @@ impl RoomCoordinator {
 
         let force_floating = req.node_id.as_deref() == Some("__floating__");
         let existing_room_pinned = if !force_floating {
-            room.node_id
-                .clone()
-                .zip(room.workspace_path.clone())
-                .or_else(|| {
-                    self.store
-                        .list_room_agents(room_id)
-                        .ok()
-                        .and_then(|list| {
-                            list.into_iter().find_map(|a| match a.scheduling {
-                                SchedulingMode::Pinned {
-                                    node_id,
-                                    workspace_path,
-                                } => Some((
-                                    node_id.to_string(),
-                                    workspace_path.to_string_lossy().to_string(),
-                                )),
-                                _ => None,
-                            })
-                        })
-                })
+            room.node_id.clone().zip(room.workspace_path.clone())
         } else {
             None
         };
@@ -1052,6 +1034,7 @@ impl RoomCoordinator {
             mentions,
             visible_to,
             req.reply_to_seq,
+            req.is_realtime,
             None,
             None,
         )?;
@@ -1304,6 +1287,7 @@ impl RoomCoordinator {
                 mentions,
                 visible_to,
                 req.reply_to_seq,
+                false,
                 Some(agent.active_session_id),
                 agent.active_activation_id,
             )
@@ -1356,6 +1340,7 @@ impl RoomCoordinator {
                     vec![],
                     vec![],
                     None,
+                    false,
                     None,
                     None,
                 ) {
@@ -1393,7 +1378,7 @@ impl RoomCoordinator {
                 return;
             }
 
-            // 2. Wake up any explicitly @mentioned RoomAgents immediately via `push_realtime_message`
+            // 2. Wake up any explicitly @mentioned RoomAgents (via realtime queue or normal activation)
             let mut mentioned_agent_ids = HashSet::new();
             let mut woken_names = Vec::new();
             let from_human = msg.sender_kind == SenderKind::Human;
@@ -1408,7 +1393,13 @@ impl RoomCoordinator {
                     mentioned_agent_ids.insert(target_agent.agent_id.clone());
                     woken_names.push(format!("@{}", target_agent.name));
                     let _ = self
-                        .deliver_direct_mention_to_agent(&room, &agents, target_agent, from_human)
+                        .deliver_direct_mention_to_agent(
+                            &room,
+                            &agents,
+                            target_agent,
+                            from_human,
+                            msg.is_realtime,
+                        )
                         .await;
                 }
             }
@@ -1418,15 +1409,21 @@ impl RoomCoordinator {
             } else {
                 format!("🔒 暗语(仅 {:?} 可见)", msg.visible_to)
             };
+            let rt_tag = if msg.is_realtime {
+                "⚡实时消息"
+            } else {
+                "常规消息"
+            };
 
             if !woken_names.is_empty() {
                 self.emit_flow_status(
                     &room.room_id,
                     format!(
-                        "[#{} 路由] {} 发送{} -> 显式点名唤醒 {}",
+                        "[#{} 路由] {} 发送{}({}) -> 显式点名唤醒 {}",
                         msg.msg_seq,
                         msg.sender_name,
                         vis_tag,
+                        rt_tag,
                         woken_names.join(", ")
                     ),
                 );
@@ -1480,6 +1477,7 @@ impl RoomCoordinator {
         all_agents: &[RoomAgent],
         target_agent: &RoomAgent,
         from_human: bool,
+        is_realtime: bool,
     ) -> anyhow::Result<()> {
         let unread = self.store.list_room_messages_for_agent(
             &room.room_id,
@@ -1521,26 +1519,60 @@ impl RoomCoordinator {
             );
         }
 
-        let resp = self
-            .ragents_client
-            .push_realtime_message(
-                &updated_agent.active_session_id,
-                PushRealtimeMessageRequest {
-                    content: vec![MessageContent::InputText { text: formatted }],
-                },
-            )
-            .await?;
+        if is_realtime {
+            let resp = self
+                .ragents_client
+                .push_realtime_message(
+                    &updated_agent.active_session_id,
+                    PushRealtimeMessageRequest {
+                        content: vec![MessageContent::InputText { text: formatted }],
+                    },
+                )
+                .await?;
 
-        if let Some(spawned_act_id) = resp.spawned_activation_id {
-            if let Ok(thinking_agent) = self.store.update_agent_runtime_state(
-                &target_agent.agent_id,
-                AgentRuntimeState::Thinking,
-                Some(spawned_act_id),
-            ) {
-                self.emit_room_event(ChatroomEvent::AgentUpdated {
-                    room_id: room.room_id.clone(),
-                    agent: thinking_agent.into(),
-                });
+            if let Some(spawned_act_id) = resp.spawned_activation_id {
+                if let Ok(thinking_agent) = self.store.update_agent_runtime_state(
+                    &target_agent.agent_id,
+                    AgentRuntimeState::Thinking,
+                    Some(spawned_act_id),
+                ) {
+                    self.emit_room_event(ChatroomEvent::AgentUpdated {
+                        room_id: room.room_id.clone(),
+                        agent: thinking_agent.into(),
+                    });
+                }
+            }
+        } else {
+            let act = self
+                .ragents_client
+                .create_activation(CreateActivationRequest {
+                    activation_id: None,
+                    labels: BTreeMap::new(),
+                    spec: ActivationSpec {
+                        session_id: updated_agent.active_session_id.clone(),
+                        submission_kind: SubmissionKind::Normal,
+                        input: vec![Item::user_message(formatted)],
+                        model_override: None,
+                        desired_phase: DesiredActivationPhase::Running,
+                        interaction_responses: BTreeMap::new(),
+                    },
+                })
+                .await?;
+
+            if act.status.phase.is_active()
+                && updated_agent.runtime_state == AgentRuntimeState::Idle
+            {
+                let act_id = ActivationId::new(act.metadata.id);
+                if let Ok(thinking_agent) = self.store.update_agent_runtime_state(
+                    &target_agent.agent_id,
+                    AgentRuntimeState::Thinking,
+                    Some(act_id),
+                ) {
+                    self.emit_room_event(ChatroomEvent::AgentUpdated {
+                        room_id: room.room_id.clone(),
+                        agent: thinking_agent.into(),
+                    });
+                }
             }
         }
         Ok(())
@@ -1637,26 +1669,60 @@ impl RoomCoordinator {
             );
         }
 
-        let resp = self
-            .ragents_client
-            .push_realtime_message(
-                &updated_mgr.active_session_id,
-                PushRealtimeMessageRequest {
-                    content: vec![MessageContent::InputText { text: formatted }],
-                },
-            )
-            .await?;
+        if trigger_msg.is_realtime {
+            let resp = self
+                .ragents_client
+                .push_realtime_message(
+                    &updated_mgr.active_session_id,
+                    PushRealtimeMessageRequest {
+                        content: vec![MessageContent::InputText { text: formatted }],
+                    },
+                )
+                .await?;
 
-        if let Some(spawned_act_id) = resp.spawned_activation_id {
-            if let Ok(thinking_mgr) = self.store.update_agent_runtime_state(
-                &mgr_agent.agent_id,
-                AgentRuntimeState::Thinking,
-                Some(spawned_act_id),
-            ) {
-                self.emit_room_event(ChatroomEvent::AgentUpdated {
-                    room_id: room.room_id.clone(),
-                    agent: thinking_mgr.into(),
-                });
+            if let Some(spawned_act_id) = resp.spawned_activation_id {
+                if let Ok(thinking_mgr) = self.store.update_agent_runtime_state(
+                    &mgr_agent.agent_id,
+                    AgentRuntimeState::Thinking,
+                    Some(spawned_act_id),
+                ) {
+                    self.emit_room_event(ChatroomEvent::AgentUpdated {
+                        room_id: room.room_id.clone(),
+                        agent: thinking_mgr.into(),
+                    });
+                }
+            }
+        } else {
+            let act = self
+                .ragents_client
+                .create_activation(CreateActivationRequest {
+                    activation_id: None,
+                    labels: BTreeMap::new(),
+                    spec: ActivationSpec {
+                        session_id: updated_mgr.active_session_id.clone(),
+                        submission_kind: SubmissionKind::Normal,
+                        input: vec![Item::user_message(formatted)],
+                        model_override: None,
+                        desired_phase: DesiredActivationPhase::Running,
+                        interaction_responses: BTreeMap::new(),
+                    },
+                })
+                .await?;
+
+            if act.status.phase.is_active()
+                && updated_mgr.runtime_state == AgentRuntimeState::Idle
+            {
+                let act_id = ActivationId::new(act.metadata.id);
+                if let Ok(thinking_mgr) = self.store.update_agent_runtime_state(
+                    &mgr_agent.agent_id,
+                    AgentRuntimeState::Thinking,
+                    Some(act_id),
+                ) {
+                    self.emit_room_event(ChatroomEvent::AgentUpdated {
+                        room_id: room.room_id.clone(),
+                        agent: thinking_mgr.into(),
+                    });
+                }
             }
         }
         Ok(())

@@ -409,6 +409,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             mentions: vec![],
             visible_to: vec![],
             reply_to_seq: None,
+            is_realtime: false,
         })
         .send()
         .await
@@ -474,6 +475,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             mentions: vec!["Assistant".to_string()],
             visible_to: vec![],
             reply_to_seq: None,
+            is_realtime: true,
         })
         .send()
         .await
@@ -587,6 +589,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             mentions: vec![],
             visible_to: vec![],
             reply_to_seq: None,
+            is_realtime: false,
         })
         .send()
         .await
@@ -674,6 +677,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             mentions: vec![],
             visible_to: vec![],
             reply_to_seq: None,
+            is_realtime: false,
         })
         .send()
         .await
@@ -780,7 +784,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             reasoning_effort: None,
             reasoning_summary: None,
             node_id: None,
-            workspace_path: Some(tmp.path().join("allowed_tmp_ws").to_string_lossy().to_string()),
+            workspace_path: Some("/tmp/allowed_tmp_ws_e2e_test".to_string()),
         })
         .send()
         .await
@@ -916,6 +920,7 @@ async fn test_live_multi_agent_chatroom_when_env_present() {
             mentions: vec![],
             visible_to: vec![],
             reply_to_seq: None,
+            is_realtime: false,
         })
         .send()
         .await
