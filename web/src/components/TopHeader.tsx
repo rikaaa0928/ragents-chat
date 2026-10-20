@@ -98,7 +98,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   const primaryPinnedAgent = agents.find(
     (a) => a.scheduling?.mode === 'pinned' && (a.scheduling?.node_id || a.scheduling?.workspace_path)
   );
-  const roomNodeId = primaryPinnedAgent?.scheduling?.node_id || null;
+  const roomNodeId = primaryPinnedAgent?.scheduling?.node_id || room.node_id || null;
   const roomWorkspacePath =
     primaryPinnedAgent?.scheduling?.workspace_path || room.workspace_path || null;
   const roomNodeDetail = roomNodeId

@@ -2,6 +2,7 @@ export interface Room {
   room_id: string;
   name: string;
   description: string;
+  node_id?: string | null;
   workspace_path?: string | null;
   peek_enabled: boolean;
   peek_idle_secs: number;

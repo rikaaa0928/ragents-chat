@@ -77,6 +77,8 @@ impl ChatroomStore {
                  room_id                 TEXT PRIMARY KEY,
                  name                    TEXT NOT NULL,
                  description             TEXT NOT NULL DEFAULT '',
+                 node_id                 TEXT,
+                 workspace_path          TEXT,
                  last_msg_seq            INTEGER NOT NULL DEFAULT 0,
                  roster_version          INTEGER NOT NULL DEFAULT 1,
                  peek_enabled            INTEGER NOT NULL DEFAULT 0,
@@ -143,6 +145,27 @@ You manage the room's specialist agent roster using your tools:\n\
 4. Finally, call `chatroom_speak` ONCE to announce the roster changes in the chatroom and hand off task coordination ONLY to the Room Lead Agent (do not wake up all newly recruited agents simultaneously).";
 
         let now = Utc::now().to_rfc3339();
+        let _ = conn.execute("ALTER TABLE rooms ADD COLUMN node_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE rooms ADD COLUMN workspace_path TEXT", []);
+        let _ = conn.execute(
+            "UPDATE rooms
+             SET node_id = (
+                 SELECT json_extract(scheduling_json, '$.node_id')
+                 FROM room_agents
+                 WHERE room_agents.room_id = rooms.room_id
+                   AND json_extract(scheduling_json, '$.mode') = 'pinned'
+                 LIMIT 1
+             ),
+             workspace_path = (
+                 SELECT json_extract(scheduling_json, '$.workspace_path')
+                 FROM room_agents
+                 WHERE room_agents.room_id = rooms.room_id
+                   AND json_extract(scheduling_json, '$.mode') = 'pinned'
+                 LIMIT 1
+             )
+             WHERE node_id IS NULL",
+            [],
+        );
         conn.execute(
             "INSERT OR IGNORE INTO manager_settings (
                 id, manager_model, manager_system_prompt, default_node_id, default_workspace_root,
@@ -278,6 +301,8 @@ You manage the room's specialist agent roster using your tools:\n\
             room_id: room_id.clone(),
             name: name.to_string(),
             description: description.to_string(),
+            node_id: None,
+            workspace_path: None,
             last_msg_seq: 0,
             roster_version: 1,
             peek_enabled: false,
@@ -294,11 +319,11 @@ You manage the room's specialist agent roster using your tools:\n\
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
             "INSERT INTO rooms (
-                room_id, name, description, last_msg_seq, roster_version,
+                room_id, name, description, node_id, workspace_path, last_msg_seq, roster_version,
                 peek_enabled, peek_idle_secs, peek_msg_interval, interject_enabled,
                 mute_probability, max_agent_relay_depth, consecutive_agent_msgs,
                 created_at, updated_at
-             ) VALUES (?1, ?2, ?3, 0, 1, 0, 60, 20, 0, 40, ?4, 0, ?5, ?5)",
+             ) VALUES (?1, ?2, ?3, NULL, NULL, 0, 1, 0, 60, 20, 0, 40, ?4, 0, ?5, ?5)",
             params![
                 &room.room_id,
                 &room.name,
@@ -308,6 +333,20 @@ You manage the room's specialist agent roster using your tools:\n\
             ],
         )?;
         Ok(room)
+    }
+
+    pub fn set_room_binding(
+        &self,
+        room_id: &str,
+        node_id: Option<&str>,
+        workspace_path: Option<&str>,
+    ) -> Result<(), ChatStoreError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "UPDATE rooms SET node_id = ?1, workspace_path = ?2 WHERE room_id = ?3",
+            params![node_id, workspace_path, room_id],
+        )?;
+        Ok(())
     }
 
     pub fn get_room(&self, room_id: &str) -> Result<Option<Room>, ChatStoreError> {
@@ -320,7 +359,7 @@ You manage the room's specialist agent roster using your tools:\n\
             "SELECT room_id, name, description, last_msg_seq, roster_version,
                     peek_enabled, peek_idle_secs, peek_msg_interval, interject_enabled,
                     mute_probability, max_agent_relay_depth, consecutive_agent_msgs,
-                    created_at, updated_at
+                    created_at, updated_at, node_id, workspace_path
              FROM rooms WHERE room_id = ?1",
             params![room_id],
             |r| {
@@ -328,6 +367,8 @@ You manage the room's specialist agent roster using your tools:\n\
                     room_id: r.get(0)?,
                     name: r.get(1)?,
                     description: r.get(2)?,
+                    node_id: r.get(14)?,
+                    workspace_path: r.get(15)?,
                     last_msg_seq: r.get::<_, i64>(3)? as u64,
                     roster_version: r.get::<_, i64>(4)? as u64,
                     peek_enabled: r.get::<_, i64>(5)? != 0,
@@ -352,7 +393,7 @@ You manage the room's specialist agent roster using your tools:\n\
             "SELECT room_id, name, description, last_msg_seq, roster_version,
                     peek_enabled, peek_idle_secs, peek_msg_interval, interject_enabled,
                     mute_probability, max_agent_relay_depth, consecutive_agent_msgs,
-                    created_at, updated_at
+                    created_at, updated_at, node_id, workspace_path
              FROM rooms ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -360,6 +401,8 @@ You manage the room's specialist agent roster using your tools:\n\
                 room_id: r.get(0)?,
                 name: r.get(1)?,
                 description: r.get(2)?,
+                node_id: r.get(14)?,
+                workspace_path: r.get(15)?,
                 last_msg_seq: r.get::<_, i64>(3)? as u64,
                 roster_version: r.get::<_, i64>(4)? as u64,
                 peek_enabled: r.get::<_, i64>(5)? != 0,

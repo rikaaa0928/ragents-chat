@@ -1975,7 +1975,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "ragents-apiserver"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#3cf3d275106c6fdc3201c679497b41b6cf3fe3be"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#84019f1352942ef888940346c84d519e839b9663"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1998,7 +1998,7 @@ dependencies = [
 [[package]]
 name = "ragents-client"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#3cf3d275106c6fdc3201c679497b41b6cf3fe3be"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#84019f1352942ef888940346c84d519e839b9663"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2021,7 +2021,7 @@ dependencies = [
 [[package]]
 name = "ragents-core"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#3cf3d275106c6fdc3201c679497b41b6cf3fe3be"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#84019f1352942ef888940346c84d519e839b9663"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2048,7 +2048,7 @@ dependencies = [
 [[package]]
 name = "ragents-daemon"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#3cf3d275106c6fdc3201c679497b41b6cf3fe3be"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#84019f1352942ef888940346c84d519e839b9663"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2072,7 +2072,7 @@ dependencies = [
 [[package]]
 name = "ragents-protocol"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#3cf3d275106c6fdc3201c679497b41b6cf3fe3be"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#84019f1352942ef888940346c84d519e839b9663"
 dependencies = [
  "chrono",
  "openresponses-rust",
@@ -2950,8 +2950,13 @@ checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
+ "rustls 0.23.46",
+ "rustls-native-certs",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls 0.26.6",
  "tungstenite",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -3105,6 +3110,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
+ "rustls 0.23.46",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.21",
 ]

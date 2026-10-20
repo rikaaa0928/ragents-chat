@@ -75,6 +75,10 @@ pub struct Room {
     pub room_id: String,
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
     pub last_msg_seq: u64,
     pub roster_version: u64,
     pub peek_enabled: bool,

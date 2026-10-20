@@ -673,20 +673,25 @@ impl RoomCoordinator {
 
         let force_floating = req.node_id.as_deref() == Some("__floating__");
         let existing_room_pinned = if !force_floating {
-            self.store
-                .list_room_agents(room_id)
-                .ok()
-                .and_then(|list| {
-                    list.into_iter().find_map(|a| match a.scheduling {
-                        SchedulingMode::Pinned {
-                            node_id,
-                            workspace_path,
-                        } => Some((
-                            node_id.to_string(),
-                            workspace_path.to_string_lossy().to_string(),
-                        )),
-                        _ => None,
-                    })
+            room.node_id
+                .clone()
+                .zip(room.workspace_path.clone())
+                .or_else(|| {
+                    self.store
+                        .list_room_agents(room_id)
+                        .ok()
+                        .and_then(|list| {
+                            list.into_iter().find_map(|a| match a.scheduling {
+                                SchedulingMode::Pinned {
+                                    node_id,
+                                    workspace_path,
+                                } => Some((
+                                    node_id.to_string(),
+                                    workspace_path.to_string_lossy().to_string(),
+                                )),
+                                _ => None,
+                            })
+                        })
                 })
         } else {
             None
@@ -755,6 +760,13 @@ impl RoomCoordinator {
                 }
             }
             let _ = std::fs::create_dir_all(&abs_w);
+            if room.node_id.is_none() || room.workspace_path.is_none() {
+                let _ = self.store.set_room_binding(
+                    room_id,
+                    Some(&target_node_id),
+                    Some(&abs_w.to_string_lossy()),
+                );
+            }
             SchedulingMode::Pinned {
                 node_id: NodeId::new(target_node_id),
                 workspace_path: abs_w,
