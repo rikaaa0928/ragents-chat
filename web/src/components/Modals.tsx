@@ -344,7 +344,9 @@ export const Modals: React.FC<ModalsProps> = ({
                           onChange={(e) => setInitEffort(e.target.value)}
                           className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-main)] border border-[var(--border-subtle)]"
                         >
-                          <option value="">跟随全局默认</option>
+                          <option value="">
+                            跟随全局默认 ({managerSettings.default_reasoning_effort || '未设置'})
+                          </option>
                           <option value="none">none (关闭)</option>
                           <option value="low">low (轻量)</option>
                           <option value="medium">medium (中等)</option>
@@ -361,7 +363,9 @@ export const Modals: React.FC<ModalsProps> = ({
                           onChange={(e) => setInitSummary(e.target.value)}
                           className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-main)] border border-[var(--border-subtle)]"
                         >
-                          <option value="">跟随全局默认</option>
+                          <option value="">
+                            跟随全局默认 ({managerSettings.default_reasoning_summary || '未设置'})
+                          </option>
                           <option value="auto">auto (自动)</option>
                           <option value="concise">concise (精简)</option>
                           <option value="detailed">detailed (详细)</option>
@@ -566,7 +570,9 @@ export const Modals: React.FC<ModalsProps> = ({
                         onChange={(e) => setManualModel(e.target.value)}
                         className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-main)] border border-[var(--border-subtle)]"
                       >
-                        <option value="">跟随全局默认</option>
+                        <option value="">
+                          跟随全局默认 {defaultAgentModel ? `(${defaultAgentModel})` : ''}
+                        </option>
                         {availableModels.map((m) => (
                           <option key={m} value={m}>
                             {m}
@@ -584,7 +590,9 @@ export const Modals: React.FC<ModalsProps> = ({
                           onChange={(e) => setManualEffort(e.target.value)}
                           className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-main)] border border-[var(--border-subtle)]"
                         >
-                          <option value="">跟随默认</option>
+                          <option value="">
+                            跟随全局默认 ({managerSettings.default_reasoning_effort || '未设置'})
+                          </option>
                           <option value="none">none</option>
                           <option value="low">low</option>
                           <option value="medium">medium</option>
@@ -601,7 +609,9 @@ export const Modals: React.FC<ModalsProps> = ({
                           onChange={(e) => setManualSummary(e.target.value)}
                           className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-main)] border border-[var(--border-subtle)]"
                         >
-                          <option value="">跟随默认</option>
+                          <option value="">
+                            跟随全局默认 ({managerSettings.default_reasoning_summary || '未设置'})
+                          </option>
                           <option value="auto">auto</option>
                           <option value="concise">concise</option>
                           <option value="detailed">detailed</option>
