@@ -21,6 +21,7 @@ pub async fn recruit_agents_via_manager(
                 mentions: vec!["Manager".to_string()],
                 visible_to: vec![],
                 reply_to_seq: None,
+                is_realtime: false,
             },
         )
         .await?;

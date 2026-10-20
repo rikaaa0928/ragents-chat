@@ -225,6 +225,48 @@ pub struct RoomAgent {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsageBreakdown {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    pub cached_tokens: i64,
+    pub reasoning_tokens: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTokenUsage {
+    pub current_context_tokens: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_usage: Option<TokenUsageBreakdown>,
+    pub total_usage: TokenUsageBreakdown,
+    pub turn_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedMessageStatus {
+    Queued,
+    Read,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedMessageEntry {
+    pub msg_seq: u64,
+    pub sender_name: String,
+    pub content: String,
+    pub is_realtime: bool,
+    pub status: QueuedMessageStatus,
+    pub status_label: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentMessageQueueSnapshot {
+    pub realtime_messages: Vec<QueuedMessageEntry>,
+    pub normal_messages: Vec<QueuedMessageEntry>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomAgentPublic {
     pub agent_id: String,
@@ -247,6 +289,8 @@ pub struct RoomAgentPublic {
     pub runtime_state: AgentRuntimeState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_activation_id: Option<ActivationId>,
+    #[serde(default)]
+    pub token_usage: AgentTokenUsage,
     pub created_by: String,
     pub created_at: DateTime<Utc>,
 }
@@ -271,6 +315,7 @@ impl From<RoomAgent> for RoomAgentPublic {
             allow_speak_in_turn: a.allow_speak_in_turn,
             runtime_state: a.runtime_state,
             active_activation_id: a.active_activation_id,
+            token_usage: AgentTokenUsage::default(),
             created_by: a.created_by,
             created_at: a.created_at,
         }
@@ -360,6 +405,8 @@ pub struct RoomMessage {
     pub visible_to: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_seq: Option<u64>,
+    #[serde(default)]
+    pub is_realtime: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_session_id: Option<SessionId>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -378,6 +425,8 @@ pub struct PostMessageRequest {
     pub visible_to: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_seq: Option<u64>,
+    #[serde(default)]
+    pub is_realtime: bool,
 }
 
 fn default_human_name() -> String {
@@ -464,6 +513,8 @@ pub struct InspectorResponse {
     pub pending_permissions: Vec<PermissionRequest>,
     #[serde(default)]
     pub can_edit_prompt: bool,
+    #[serde(default)]
+    pub message_queues: AgentMessageQueueSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

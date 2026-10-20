@@ -9,7 +9,12 @@ import {
   ChevronRight,
   MessageSquarePlus,
 } from 'lucide-react';
-import { ManagerSettings, ClusterNode, CreateRoomPreset } from '../types';
+import {
+  ManagerSettings,
+  ClusterNode,
+  CreateRoomPreset,
+  SendShortcutMode,
+} from '../types';
 
 export type ActiveModalType =
   | null
@@ -26,6 +31,8 @@ interface ModalsProps {
   clusterNodes: ClusterNode[];
   defaultAgentModel: string;
   managerSettings: ManagerSettings;
+  sendShortcutMode: SendShortcutMode;
+  onChangeSendShortcutMode: (mode: SendShortcutMode) => void;
   createRoomPreset?: CreateRoomPreset | null;
   onSubmitAuth: (token: string) => void;
   onSubmitCreateRoom: (payload: {
@@ -60,6 +67,8 @@ export const Modals: React.FC<ModalsProps> = ({
   clusterNodes,
   defaultAgentModel,
   managerSettings,
+  sendShortcutMode,
+  onChangeSendShortcutMode,
   createRoomPreset,
   onSubmitAuth,
   onSubmitCreateRoom,
@@ -783,6 +792,26 @@ export const Modals: React.FC<ModalsProps> = ({
                     className="w-full px-2.5 py-1.5 rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] font-mono-code"
                   />
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] text-[var(--text-muted)] mb-1">
+                  发送与换行快捷键配置
+                </label>
+                <select
+                  value={sendShortcutMode}
+                  onChange={(e) =>
+                    onChangeSendShortcutMode(e.target.value as SendShortcutMode)
+                  }
+                  className="w-full px-2.5 py-1.5 rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)]"
+                >
+                  <option value="enter_send">
+                    Enter 发送，Shift+Enter 换行
+                  </option>
+                  <option value="shift_enter_send">
+                    Shift+Enter 发送，Enter (回车) 换行
+                  </option>
+                </select>
               </div>
 
               {/* Collapsible Node / Workspace Binding & Manager System Prompt */}

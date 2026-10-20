@@ -11,16 +11,21 @@ import {
   ChevronUp,
   ArrowDown,
   Bot,
+  Zap,
+  Clock,
+  Keyboard,
 } from 'lucide-react';
-import { Room, RoomAgent, ChatMessage } from '../types';
+import { Room, RoomAgent, ChatMessage, SendShortcutMode } from '../types';
 
 interface ChatAreaProps {
   room: Room | null;
   agents: RoomAgent[];
   messages: ChatMessage[];
   selectedMentions: Set<string>;
+  sendShortcutMode: SendShortcutMode;
+  onChangeSendShortcutMode: (mode: SendShortcutMode) => void;
   onToggleMention: (name: string) => void;
-  onSendMessage: (content: string) => void;
+  onSendMessage: (content: string, isRealtime: boolean) => void;
   onInspectAgent: (agentId: string) => void;
   onOpenRecruitModal: () => void;
 }
@@ -47,12 +52,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   agents,
   messages,
   selectedMentions,
+  sendShortcutMode,
+  onChangeSendShortcutMode,
   onToggleMention,
   onSendMessage,
   onInspectAgent,
   onOpenRecruitModal,
 }) => {
   const [inputText, setInputText] = useState('');
+  const [isRealtimeMsg, setIsRealtimeMsg] = useState(false); // 默认为非实时消息
   const [mentionBarOpen, setMentionBarOpen] = useState(false);
   const [expandedMetaSeqs, setExpandedMetaSeqs] = useState<Set<number>>(new Set());
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
@@ -60,29 +68,56 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const isComposingRef = useRef(false);
+  const lastCompositionEndTimeRef = useRef(0);
+  const lastScrollTopRef = useRef(0);
+  const pinnedToBottomRef = useRef(true);
 
   const scrollToBottom = () => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
+    lastScrollTopRef.current = el.scrollTop;
+    pinnedToBottomRef.current = true;
     setPinnedToBottom(true);
     setShowJumpBottom(false);
+    requestAnimationFrame(() => {
+      const cur = scrollRef.current;
+      if (cur && pinnedToBottomRef.current) {
+        cur.scrollTop = cur.scrollHeight;
+        lastScrollTopRef.current = cur.scrollTop;
+      }
+    });
   };
 
   useEffect(() => {
-    if (pinnedToBottom) {
+    pinnedToBottomRef.current = true;
+    scrollToBottom();
+  }, [room?.room_id]);
+
+  useEffect(() => {
+    if (pinnedToBottomRef.current || pinnedToBottom) {
       scrollToBottom();
     } else {
       setShowJumpBottom(true);
     }
-  }, [messages.length, room?.room_id]);
+  }, [messages.length, messages[messages.length - 1]?.msg_seq]);
 
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    const isNear = el.scrollHeight - el.scrollTop - el.clientHeight <= 56;
-    setPinnedToBottom(isNear);
-    if (isNear) setShowJumpBottom(false);
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const scrolledUp = el.scrollTop < lastScrollTopRef.current - 4;
+    lastScrollTopRef.current = el.scrollTop;
+
+    if (distanceFromBottom <= 56) {
+      pinnedToBottomRef.current = true;
+      setPinnedToBottom(true);
+      setShowJumpBottom(false);
+    } else if (scrolledUp) {
+      pinnedToBottomRef.current = false;
+      setPinnedToBottom(false);
+    }
   };
 
   const toggleMsgMeta = (seq: number) => {
@@ -102,13 +137,54 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       textareaRef.current.style.height = 'auto';
     }
     setPinnedToBottom(true);
-    onSendMessage(trimmed);
+    onSendMessage(trimmed, isRealtimeMsg);
+  };
+
+  const handleCompositionStart = () => {
+    isComposingRef.current = true;
+  };
+
+  const handleCompositionEnd = () => {
+    isComposingRef.current = false;
+    lastCompositionEndTimeRef.current = performance.now();
+  };
+
+  const handleKeyUp = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' || !isComposingRef.current) {
+      lastCompositionEndTimeRef.current = 0;
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+    const nativeEvent = e.nativeEvent;
+    const justEndedComposition =
+      lastCompositionEndTimeRef.current > 0 &&
+      performance.now() - lastCompositionEndTimeRef.current < 100;
+
+    if (
+      nativeEvent.isComposing ||
+      isComposingRef.current ||
+      nativeEvent.keyCode === 229 ||
+      e.keyCode === 229 ||
+      e.key === 'Process' ||
+      justEndedComposition
+    ) {
+      lastCompositionEndTimeRef.current = 0;
+      return;
+    }
+
+    if (e.key === 'Enter') {
+      if (sendShortcutMode === 'enter_send') {
+        if (!e.shiftKey) {
+          e.preventDefault();
+          handleSend();
+        }
+      } else {
+        if (e.shiftKey) {
+          e.preventDefault();
+          handleSend();
+        }
+      }
     }
   };
 
@@ -177,6 +253,23 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   <div key={m.msg_seq} className="flex flex-col items-end gap-1.5">
                     <div className="flex items-center gap-2 text-[11px] text-[var(--text-muted)] px-1">
                       <span className="font-mono-code">#{m.msg_seq}</span>
+                      {m.is_realtime ? (
+                        <span
+                          className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 font-medium text-[10.5px]"
+                          title="实时消息：直接注入 Agent 当前运行循环或立即唤醒"
+                        >
+                          <Zap className="w-2.5 h-2.5" />
+                          <span>实时</span>
+                        </span>
+                      ) : (
+                        <span
+                          className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-[var(--bg-surface)] text-[var(--text-muted)] font-medium text-[10.5px]"
+                          title="非实时消息：作为独立回合排队投递"
+                        >
+                          <Clock className="w-2.5 h-2.5" />
+                          <span>非实时</span>
+                        </span>
+                      )}
                       {mentions.length > 0 && (
                         <div className="flex items-center gap-1">
                           {mentions.map((tag) => (
@@ -406,10 +499,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 rows={2}
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
+                onCompositionStart={handleCompositionStart}
+                onCompositionEnd={handleCompositionEnd}
                 onKeyDown={handleKeyDown}
+                onKeyUp={handleKeyUp}
                 placeholder={
                   room
-                    ? '给聊天室发送消息（Enter 发送，Shift+Enter 换行，支持 @Agent 点名）...'
+                    ? sendShortcutMode === 'enter_send'
+                      ? '给聊天室发送消息（Enter 发送，Shift+Enter 换行，支持 @Agent 点名）...'
+                      : '给聊天室发送消息（Shift+Enter 发送，Enter 换行，支持 @Agent 点名）...'
                     : '请先选择或创建聊天室'
                 }
                 disabled={!room}
@@ -441,6 +539,56 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   )}
                 </button>
 
+                {/* Message Type Selector: 非实时消息 (default) vs 实时消息 */}
+                <button
+                  type="button"
+                  onClick={() => setIsRealtimeMsg(!isRealtimeMsg)}
+                  className={`px-2.5 py-1 rounded-full text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap shrink-0 border ${
+                    isRealtimeMsg
+                      ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/35'
+                      : 'bg-[var(--bg-main)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border-[var(--border-subtle)]'
+                  }`}
+                  title={
+                    isRealtimeMsg
+                      ? '当前：实时消息（点击切换为非实时消息）。实时消息会直接注入 Agent 正在运行的思考循环中'
+                      : '当前：非实时消息（默认，点击切换为实时消息）。非实时消息会等待 Agent 当前回合结束后按序投递'
+                  }
+                >
+                  {isRealtimeMsg ? (
+                    <>
+                      <Zap className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                      <span>实时消息</span>
+                    </>
+                  ) : (
+                    <>
+                      <Clock className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+                      <span>非实时消息</span>
+                    </>
+                  )}
+                </button>
+
+                {/* Send / Newline Shortcut Configuration Selector */}
+                <div
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[var(--bg-main)] border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)] shrink-0"
+                  title="设置发送与换行快捷键模式"
+                >
+                  <Keyboard className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+                  <select
+                    value={sendShortcutMode}
+                    onChange={(e) =>
+                      onChangeSendShortcutMode(e.target.value as SendShortcutMode)
+                    }
+                    className="bg-transparent border-0 outline-none text-[11.5px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer pr-1"
+                  >
+                    <option value="enter_send">
+                      Enter 发送 / Shift+Enter 换行
+                    </option>
+                    <option value="shift_enter_send">
+                      Shift+Enter 发送 / Enter 换行
+                    </option>
+                  </select>
+                </div>
+
                 <button
                   type="button"
                   onClick={onOpenRecruitModal}
@@ -456,12 +604,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 type="button"
                 onClick={handleSend}
                 disabled={!inputText.trim() || !room}
-                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer ${
+                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer shrink-0 ${
                   inputText.trim() && room
                     ? 'bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] hover:opacity-90'
                     : 'bg-[var(--bg-surface-2)] text-[var(--text-muted)] cursor-not-allowed opacity-50'
                 }`}
-                title="发送消息 (Enter)"
+                title={
+                  sendShortcutMode === 'enter_send'
+                    ? '发送消息 (Enter)'
+                    : '发送消息 (Shift+Enter)'
+                }
               >
                 <ArrowUp className="w-4 h-4 stroke-[2.5]" />
               </button>

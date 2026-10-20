@@ -45,6 +45,12 @@ pub struct RoomCoordinator {
     direct_mentions: Arc<Mutex<HashMap<String, DirectMentionState>>>,
     room_peek_states: Arc<Mutex<HashMap<String, RoomPeekState>>>,
     room_flow_logs: Arc<Mutex<HashMap<String, VecDeque<RoomFlowLogEntry>>>>,
+    agent_token_usage: Arc<Mutex<HashMap<String, AgentTokenUsage>>>,
+    seen_usage_rvs: Arc<Mutex<HashSet<u64>>>,
+    hydrated_usage_agents: Arc<Mutex<HashSet<String>>>,
+    pending_realtime_seqs: Arc<Mutex<HashMap<String, HashSet<u64>>>>,
+    pending_normal_activations: Arc<Mutex<HashMap<String, Vec<(ActivationId, Vec<u64>)>>>>,
+    started_activation_ids: Arc<Mutex<HashSet<ActivationId>>>,
 }
 
 impl RoomCoordinator {
@@ -68,6 +74,276 @@ impl RoomCoordinator {
             direct_mentions: Arc::new(Mutex::new(HashMap::new())),
             room_peek_states: Arc::new(Mutex::new(HashMap::new())),
             room_flow_logs: Arc::new(Mutex::new(HashMap::new())),
+            agent_token_usage: Arc::new(Mutex::new(HashMap::new())),
+            seen_usage_rvs: Arc::new(Mutex::new(HashSet::new())),
+            hydrated_usage_agents: Arc::new(Mutex::new(HashSet::new())),
+            pending_realtime_seqs: Arc::new(Mutex::new(HashMap::new())),
+            pending_normal_activations: Arc::new(Mutex::new(HashMap::new())),
+            started_activation_ids: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    pub fn to_agent_public(&self, agent: RoomAgent) -> RoomAgentPublic {
+        let usage = self
+            .agent_token_usage
+            .lock()
+            .expect("agent_token_usage mutex poisoned")
+            .get(&agent.agent_id)
+            .cloned()
+            .unwrap_or_default();
+        let mut pub_agent: RoomAgentPublic = agent.into();
+        pub_agent.token_usage = usage;
+        pub_agent
+    }
+
+    pub async fn to_agent_public_hydrated(&self, agent: RoomAgent) -> RoomAgentPublic {
+        self.ensure_agent_usage_hydrated(&agent).await;
+        self.to_agent_public(agent)
+    }
+
+    pub fn record_turn_usage(
+        &self,
+        agent_id: &str,
+        is_active_session: bool,
+        rv: u64,
+        usage: &openresponses_rust::Usage,
+    ) {
+        {
+            let mut seen = self
+                .seen_usage_rvs
+                .lock()
+                .expect("seen_usage_rvs mutex poisoned");
+            if !seen.insert(rv) {
+                return;
+            }
+        }
+        let input_tokens = i64::from(usage.input_tokens);
+        let output_tokens = i64::from(usage.output_tokens);
+        let total = if usage.total_tokens > 0 {
+            i64::from(usage.total_tokens)
+        } else {
+            input_tokens + output_tokens
+        };
+        let bd = TokenUsageBreakdown {
+            input_tokens,
+            output_tokens,
+            total_tokens: total,
+            cached_tokens: i64::from(usage.input_tokens_details.cached_tokens),
+            reasoning_tokens: i64::from(usage.output_tokens_details.reasoning_tokens),
+        };
+        let mut guard = self
+            .agent_token_usage
+            .lock()
+            .expect("agent_token_usage mutex poisoned");
+        let entry = guard.entry(agent_id.to_string()).or_default();
+        if is_active_session || entry.current_context_tokens == 0 {
+            entry.current_context_tokens = bd.total_tokens;
+        }
+        entry.last_usage = Some(bd.clone());
+        entry.total_usage.input_tokens += bd.input_tokens;
+        entry.total_usage.output_tokens += bd.output_tokens;
+        entry.total_usage.total_tokens += bd.total_tokens;
+        entry.total_usage.cached_tokens += bd.cached_tokens;
+        entry.total_usage.reasoning_tokens += bd.reasoning_tokens;
+        entry.turn_count += 1;
+    }
+
+    pub async fn ensure_agent_usage_hydrated(&self, agent: &RoomAgent) {
+        let already_hydrated = {
+            let guard = self
+                .hydrated_usage_agents
+                .lock()
+                .expect("hydrated_usage_agents mutex poisoned");
+            guard.contains(&agent.agent_id)
+        };
+        if already_hydrated {
+            return;
+        }
+
+        let mut session_ids = Vec::new();
+        for entry in &agent.session_chain {
+            if let Some(ref c_sid) = entry.compaction_session_id {
+                if !session_ids.contains(c_sid) {
+                    session_ids.push(c_sid.clone());
+                }
+            }
+            if !session_ids.contains(&entry.working_session_id) {
+                session_ids.push(entry.working_session_id.clone());
+            }
+        }
+        if !session_ids.contains(&agent.active_session_id) {
+            session_ids.push(agent.active_session_id.clone());
+        }
+
+        for sid in session_ids {
+            if let Ok(events) = self.ragents_client.read_events(Some(&sid), 0).await {
+                for env in events {
+                    if let SessionEvent::TurnCompleted {
+                        usage: Some(ref u), ..
+                    } = env.event
+                    {
+                        self.record_turn_usage(
+                            &agent.agent_id,
+                            sid == agent.active_session_id,
+                            env.resource_version.value(),
+                            u,
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut guard = self
+            .hydrated_usage_agents
+            .lock()
+            .expect("hydrated_usage_agents mutex poisoned");
+        guard.insert(agent.agent_id.clone());
+    }
+
+    pub fn build_agent_message_queues(
+        &self,
+        agent: &RoomAgent,
+        events: &[SessionEventEnvelope],
+    ) -> AgentMessageQueueSnapshot {
+        let all_msgs = self
+            .store
+            .list_room_messages(&agent.room_id, 0)
+            .unwrap_or_default();
+        let is_manager = agent.name.eq_ignore_ascii_case("Manager");
+        let is_agent_idle = agent.runtime_state == AgentRuntimeState::Idle
+            && agent.active_activation_id.is_none();
+
+        let started_acts_in_events: HashSet<&ActivationId> = events
+            .iter()
+            .filter_map(|env| match env.event {
+                SessionEvent::ActivationStarted { .. }
+                | SessionEvent::TurnStarted
+                | SessionEvent::ActivationCompleted { .. } => env.activation_id.as_ref(),
+                _ => None,
+            })
+            .collect();
+
+        let pending_rt: HashSet<u64> = self
+            .pending_realtime_seqs
+            .lock()
+            .expect("pending_realtime_seqs mutex poisoned")
+            .get(&agent.agent_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let started_global = self
+            .started_activation_ids
+            .lock()
+            .expect("started_activation_ids mutex poisoned")
+            .clone();
+
+        let pending_norm: HashSet<u64> = self
+            .pending_normal_activations
+            .lock()
+            .expect("pending_normal_activations mutex poisoned")
+            .get(&agent.agent_id)
+            .map(|list| {
+                list.iter()
+                    .filter(|(act_id, _)| {
+                        !started_acts_in_events.contains(act_id)
+                            && !started_global.contains(act_id)
+                    })
+                    .flat_map(|(_, seqs)| seqs.iter().copied())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut realtime_messages = Vec::new();
+        let mut normal_messages = Vec::new();
+
+        for msg in all_msgs {
+            if msg.sender_kind == SenderKind::System || msg.sender_id == agent.agent_id {
+                continue;
+            }
+            if is_manager {
+                if !msg
+                    .mentions
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case("Manager"))
+                {
+                    continue;
+                }
+            } else {
+                let is_visible = msg.visible_to.is_empty()
+                    || msg
+                        .visible_to
+                        .iter()
+                        .any(|v| v.eq_ignore_ascii_case(&agent.name))
+                    || msg.sender_name.eq_ignore_ascii_case(&agent.name);
+                if !is_visible {
+                    continue;
+                }
+                let mentions_mgr_only = msg
+                    .mentions
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case("Manager"))
+                    && !msg
+                        .mentions
+                        .iter()
+                        .any(|m| m.eq_ignore_ascii_case(&agent.name));
+                if mentions_mgr_only {
+                    continue;
+                }
+            }
+
+            let (status, status_label) = if msg.msg_seq > agent.last_delivered_seq {
+                (
+                    QueuedMessageStatus::Queued,
+                    if msg.is_realtime {
+                        "排队中 · 待投递".to_string()
+                    } else {
+                        "排队中 · 待唤醒/窥屏投递".to_string()
+                    },
+                )
+            } else if msg.is_realtime {
+                if !is_agent_idle && pending_rt.contains(&msg.msg_seq) {
+                    (
+                        QueuedMessageStatus::Queued,
+                        "排队中 · 等待步骤间隙注入".to_string(),
+                    )
+                } else {
+                    (
+                        QueuedMessageStatus::Read,
+                        "已读取 · 已注入上下文".to_string(),
+                    )
+                }
+            } else if !is_agent_idle && pending_norm.contains(&msg.msg_seq) {
+                (
+                    QueuedMessageStatus::Queued,
+                    "排队中 · 等待当前回合结束".to_string(),
+                )
+            } else {
+                (
+                    QueuedMessageStatus::Read,
+                    "已读取 · 已进入回合".to_string(),
+                )
+            };
+
+            let entry = QueuedMessageEntry {
+                msg_seq: msg.msg_seq,
+                sender_name: msg.sender_name,
+                content: msg.content,
+                is_realtime: msg.is_realtime,
+                status,
+                status_label,
+                created_at: msg.created_at,
+            };
+
+            if msg.is_realtime {
+                realtime_messages.push(entry);
+            } else {
+                normal_messages.push(entry);
+            }
+        }
+
+        AgentMessageQueueSnapshot {
+            realtime_messages,
+            normal_messages,
         }
     }
 
@@ -158,7 +434,28 @@ impl RoomCoordinator {
     async fn handle_ragents_event(&self, env: SessionEventEnvelope) {
         match env.event {
             SessionEvent::ActivationScheduled { .. } | SessionEvent::ActivationStarted { .. } => {
+                let is_started = matches!(env.event, SessionEvent::ActivationStarted { .. });
+                if is_started {
+                    if let Some(ref act_id) = env.activation_id {
+                        self.started_activation_ids
+                            .lock()
+                            .expect("started_activation_ids mutex poisoned")
+                            .insert(act_id.clone());
+                    }
+                }
                 if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    if is_started {
+                        if let Some(ref act_id) = env.activation_id {
+                            if let Some(list) = self
+                                .pending_normal_activations
+                                .lock()
+                                .expect("pending_normal_activations mutex poisoned")
+                                .get_mut(&agent.agent_id)
+                            {
+                                list.retain(|(id, _)| id != act_id);
+                            }
+                        }
+                    }
                     if let Ok(updated) = self.store.update_agent_runtime_state(
                         &agent.agent_id,
                         AgentRuntimeState::Thinking,
@@ -166,7 +463,7 @@ impl RoomCoordinator {
                     ) {
                         self.emit_room_event(ChatroomEvent::AgentUpdated {
                             room_id: updated.room_id.clone(),
-                            agent: updated.clone().into(),
+                            agent: self.to_agent_public(updated.clone()),
                         });
                         self.emit_room_event(ChatroomEvent::AgentActivity {
                             room_id: updated.room_id,
@@ -177,11 +474,69 @@ impl RoomCoordinator {
                 }
             }
             SessionEvent::TurnStarted => {
+                if let Some(ref act_id) = env.activation_id {
+                    self.started_activation_ids
+                        .lock()
+                        .expect("started_activation_ids mutex poisoned")
+                        .insert(act_id.clone());
+                }
                 if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    if let Some(ref act_id) = env.activation_id {
+                        if let Some(list) = self
+                            .pending_normal_activations
+                            .lock()
+                            .expect("pending_normal_activations mutex poisoned")
+                            .get_mut(&agent.agent_id)
+                        {
+                            list.retain(|(id, _)| id != act_id);
+                        }
+                    }
+                    self.emit_room_event(ChatroomEvent::AgentUpdated {
+                        room_id: agent.room_id.clone(),
+                        agent: self.to_agent_public(agent.clone()),
+                    });
                     self.emit_room_event(ChatroomEvent::AgentActivity {
                         room_id: agent.room_id,
                         agent_id: agent.agent_id,
                         activity: "🧠 模型正在思考/推理中...".to_string(),
+                    });
+                }
+            }
+            SessionEvent::RealtimeMessagesDrained { count, .. } => {
+                if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    if let Some(set) = self
+                        .pending_realtime_seqs
+                        .lock()
+                        .expect("pending_realtime_seqs mutex poisoned")
+                        .get_mut(&agent.agent_id)
+                    {
+                        set.clear();
+                    }
+                    self.emit_room_event(ChatroomEvent::AgentUpdated {
+                        room_id: agent.room_id.clone(),
+                        agent: self.to_agent_public(agent.clone()),
+                    });
+                    self.emit_room_event(ChatroomEvent::AgentActivity {
+                        room_id: agent.room_id,
+                        agent_id: agent.agent_id,
+                        activity: format!("⚡ 已从实时队列读取 {count} 条消息并注入上下文"),
+                    });
+                }
+            }
+            SessionEvent::TurnCompleted { ref usage, .. } => {
+                if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    self.ensure_agent_usage_hydrated(&agent).await;
+                    if let Some(u) = usage {
+                        self.record_turn_usage(
+                            &agent.agent_id,
+                            true,
+                            env.resource_version.value(),
+                            u,
+                        );
+                    }
+                    self.emit_room_event(ChatroomEvent::AgentUpdated {
+                        room_id: agent.room_id.clone(),
+                        agent: self.to_agent_public(agent),
                     });
                 }
             }
@@ -236,7 +591,7 @@ impl RoomCoordinator {
                     ) {
                         self.emit_room_event(ChatroomEvent::AgentUpdated {
                             room_id: updated.room_id.clone(),
-                            agent: updated.clone().into(),
+                            agent: self.to_agent_public(updated.clone()),
                         });
                         self.emit_room_event(ChatroomEvent::PermissionAlert {
                             room_id: updated.room_id,
@@ -257,7 +612,7 @@ impl RoomCoordinator {
                     ) {
                         self.emit_room_event(ChatroomEvent::AgentUpdated {
                             room_id: updated.room_id.clone(),
-                            agent: updated.into(),
+                            agent: self.to_agent_public(updated),
                         });
                     }
                 }
@@ -282,7 +637,7 @@ impl RoomCoordinator {
                     ) {
                         self.emit_room_event(ChatroomEvent::AgentUpdated {
                             room_id: updated.room_id.clone(),
-                            agent: updated.into(),
+                            agent: self.to_agent_public(updated),
                         });
                     }
                 }
@@ -291,12 +646,45 @@ impl RoomCoordinator {
             | SessionEvent::ActivationFailed { .. }
             | SessionEvent::ActivationCancelled
             | SessionEvent::ActivationInterrupted { .. } => {
+                if let Some(ref act_id) = env.activation_id {
+                    self.started_activation_ids
+                        .lock()
+                        .expect("started_activation_ids mutex poisoned")
+                        .insert(act_id.clone());
+                }
                 let is_completed_ok = matches!(env.event, SessionEvent::ActivationCompleted { .. });
                 let fail_err = match &env.event {
                     SessionEvent::ActivationFailed { error } => Some(error.clone()),
                     _ => None,
                 };
                 if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    if let Some(ref act_id) = env.activation_id {
+                        if let Some(list) = self
+                            .pending_normal_activations
+                            .lock()
+                            .expect("pending_normal_activations mutex poisoned")
+                            .get_mut(&agent.agent_id)
+                        {
+                            list.retain(|(id, _)| id != act_id);
+                        }
+                    }
+                    let has_more_normal = self
+                        .pending_normal_activations
+                        .lock()
+                        .expect("pending_normal_activations mutex poisoned")
+                        .get(&agent.agent_id)
+                        .map(|l| !l.is_empty())
+                        .unwrap_or(false);
+                    if !has_more_normal {
+                        if let Some(set) = self
+                            .pending_realtime_seqs
+                            .lock()
+                            .expect("pending_realtime_seqs mutex poisoned")
+                            .get_mut(&agent.agent_id)
+                        {
+                            set.clear();
+                        }
+                    }
                     if let Ok(updated) = self.store.update_agent_runtime_state(
                         &agent.agent_id,
                         AgentRuntimeState::Idle,
@@ -304,7 +692,7 @@ impl RoomCoordinator {
                     ) {
                         self.emit_room_event(ChatroomEvent::AgentUpdated {
                             room_id: updated.room_id.clone(),
-                            agent: updated.clone().into(),
+                            agent: self.to_agent_public(updated.clone()),
                         });
                         if let Some(err_msg) = fail_err {
                             self.emit_room_event(ChatroomEvent::AgentActivity {
@@ -1519,8 +1907,21 @@ impl RoomCoordinator {
             );
         }
 
+        let unread_seqs: Vec<u64> = unread.iter().map(|m| m.msg_seq).collect();
+
         if is_realtime {
-            let resp = self
+            {
+                let mut rt_guard = self
+                    .pending_realtime_seqs
+                    .lock()
+                    .expect("pending_realtime_seqs mutex poisoned");
+                rt_guard
+                    .entry(target_agent.agent_id.clone())
+                    .or_default()
+                    .extend(unread_seqs.iter().copied());
+            }
+
+            let resp = match self
                 .ragents_client
                 .push_realtime_message(
                     &updated_agent.active_session_id,
@@ -1528,20 +1929,38 @@ impl RoomCoordinator {
                         content: vec![MessageContent::InputText { text: formatted }],
                     },
                 )
-                .await?;
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    if let Some(set) = self
+                        .pending_realtime_seqs
+                        .lock()
+                        .expect("pending_realtime_seqs mutex poisoned")
+                        .get_mut(&target_agent.agent_id)
+                    {
+                        for seq in &unread_seqs {
+                            set.remove(seq);
+                        }
+                    }
+                    return Err(e.into());
+                }
+            };
 
+            let mut final_agent = updated_agent;
             if let Some(spawned_act_id) = resp.spawned_activation_id {
                 if let Ok(thinking_agent) = self.store.update_agent_runtime_state(
                     &target_agent.agent_id,
                     AgentRuntimeState::Thinking,
                     Some(spawned_act_id),
                 ) {
-                    self.emit_room_event(ChatroomEvent::AgentUpdated {
-                        room_id: room.room_id.clone(),
-                        agent: thinking_agent.into(),
-                    });
+                    final_agent = thinking_agent;
                 }
             }
+            self.emit_room_event(ChatroomEvent::AgentUpdated {
+                room_id: room.room_id.clone(),
+                agent: self.to_agent_public(final_agent),
+            });
         } else {
             let act = self
                 .ragents_client
@@ -1559,21 +1978,37 @@ impl RoomCoordinator {
                 })
                 .await?;
 
+            let act_id = ActivationId::new(act.metadata.id);
+            let already_started = self
+                .started_activation_ids
+                .lock()
+                .expect("started_activation_ids mutex poisoned")
+                .contains(&act_id);
+            if !already_started {
+                self.pending_normal_activations
+                    .lock()
+                    .expect("pending_normal_activations mutex poisoned")
+                    .entry(target_agent.agent_id.clone())
+                    .or_default()
+                    .push((act_id.clone(), unread_seqs));
+            }
+
+            let mut final_agent = updated_agent.clone();
             if act.status.phase.is_active()
                 && updated_agent.runtime_state == AgentRuntimeState::Idle
             {
-                let act_id = ActivationId::new(act.metadata.id);
                 if let Ok(thinking_agent) = self.store.update_agent_runtime_state(
                     &target_agent.agent_id,
                     AgentRuntimeState::Thinking,
                     Some(act_id),
                 ) {
-                    self.emit_room_event(ChatroomEvent::AgentUpdated {
-                        room_id: room.room_id.clone(),
-                        agent: thinking_agent.into(),
-                    });
+                    final_agent = thinking_agent;
                 }
             }
+            self.emit_room_event(ChatroomEvent::AgentUpdated {
+                room_id: room.room_id.clone(),
+                agent: self.to_agent_public(final_agent),
+            });
         }
         Ok(())
     }
@@ -1669,8 +2104,21 @@ impl RoomCoordinator {
             );
         }
 
+        let unread_seqs: Vec<u64> = unread.iter().map(|m| m.msg_seq).collect();
+
         if trigger_msg.is_realtime {
-            let resp = self
+            {
+                let mut rt_guard = self
+                    .pending_realtime_seqs
+                    .lock()
+                    .expect("pending_realtime_seqs mutex poisoned");
+                rt_guard
+                    .entry(mgr_agent.agent_id.clone())
+                    .or_default()
+                    .extend(unread_seqs.iter().copied());
+            }
+
+            let resp = match self
                 .ragents_client
                 .push_realtime_message(
                     &updated_mgr.active_session_id,
@@ -1678,20 +2126,38 @@ impl RoomCoordinator {
                         content: vec![MessageContent::InputText { text: formatted }],
                     },
                 )
-                .await?;
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    if let Some(set) = self
+                        .pending_realtime_seqs
+                        .lock()
+                        .expect("pending_realtime_seqs mutex poisoned")
+                        .get_mut(&mgr_agent.agent_id)
+                    {
+                        for seq in &unread_seqs {
+                            set.remove(seq);
+                        }
+                    }
+                    return Err(e.into());
+                }
+            };
 
+            let mut final_mgr = updated_mgr;
             if let Some(spawned_act_id) = resp.spawned_activation_id {
                 if let Ok(thinking_mgr) = self.store.update_agent_runtime_state(
                     &mgr_agent.agent_id,
                     AgentRuntimeState::Thinking,
                     Some(spawned_act_id),
                 ) {
-                    self.emit_room_event(ChatroomEvent::AgentUpdated {
-                        room_id: room.room_id.clone(),
-                        agent: thinking_mgr.into(),
-                    });
+                    final_mgr = thinking_mgr;
                 }
             }
+            self.emit_room_event(ChatroomEvent::AgentUpdated {
+                room_id: room.room_id.clone(),
+                agent: self.to_agent_public(final_mgr),
+            });
         } else {
             let act = self
                 .ragents_client
@@ -1709,21 +2175,37 @@ impl RoomCoordinator {
                 })
                 .await?;
 
+            let act_id = ActivationId::new(act.metadata.id);
+            let already_started = self
+                .started_activation_ids
+                .lock()
+                .expect("started_activation_ids mutex poisoned")
+                .contains(&act_id);
+            if !already_started {
+                self.pending_normal_activations
+                    .lock()
+                    .expect("pending_normal_activations mutex poisoned")
+                    .entry(mgr_agent.agent_id.clone())
+                    .or_default()
+                    .push((act_id.clone(), unread_seqs));
+            }
+
+            let mut final_mgr = updated_mgr.clone();
             if act.status.phase.is_active()
                 && updated_mgr.runtime_state == AgentRuntimeState::Idle
             {
-                let act_id = ActivationId::new(act.metadata.id);
                 if let Ok(thinking_mgr) = self.store.update_agent_runtime_state(
                     &mgr_agent.agent_id,
                     AgentRuntimeState::Thinking,
                     Some(act_id),
                 ) {
-                    self.emit_room_event(ChatroomEvent::AgentUpdated {
-                        room_id: room.room_id.clone(),
-                        agent: thinking_mgr.into(),
-                    });
+                    final_mgr = thinking_mgr;
                 }
             }
+            self.emit_room_event(ChatroomEvent::AgentUpdated {
+                room_id: room.room_id.clone(),
+                agent: self.to_agent_public(final_mgr),
+            });
         }
         Ok(())
     }

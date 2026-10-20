@@ -269,13 +269,11 @@ async fn handle_list_rooms(
     let rooms = state.coordinator.store.list_rooms()?;
     let mut summaries = Vec::with_capacity(rooms.len());
     for room in rooms {
-        let agents: Vec<RoomAgentPublic> = state
-            .coordinator
-            .store
-            .list_room_agents(&room.room_id)?
-            .into_iter()
-            .map(Into::into)
-            .collect();
+        let raw_agents = state.coordinator.store.list_room_agents(&room.room_id)?;
+        let mut agents = Vec::with_capacity(raw_agents.len());
+        for a in raw_agents {
+            agents.push(state.coordinator.to_agent_public_hydrated(a).await);
+        }
         let msgs = state
             .coordinator
             .store
@@ -314,19 +312,15 @@ async fn handle_get_room(
         .store
         .get_room(&room_id)?
         .ok_or_else(|| ChatApiError::Http(StatusCode::NOT_FOUND, "room not found".into()))?;
-    let manager_agent = state
-        .coordinator
-        .ensure_room_manager_agent(&room_id)
-        .await
-        .ok()
-        .map(Into::into);
-    let agents: Vec<RoomAgentPublic> = state
-        .coordinator
-        .store
-        .list_room_agents(&room_id)?
-        .into_iter()
-        .map(Into::into)
-        .collect();
+    let manager_agent = match state.coordinator.ensure_room_manager_agent(&room_id).await {
+        Ok(m) => Some(state.coordinator.to_agent_public_hydrated(m).await),
+        Err(_) => None,
+    };
+    let raw_agents = state.coordinator.store.list_room_agents(&room_id)?;
+    let mut agents = Vec::with_capacity(raw_agents.len());
+    for a in raw_agents {
+        agents.push(state.coordinator.to_agent_public_hydrated(a).await);
+    }
     let messages = state.coordinator.store.list_room_messages(&room_id, 0)?;
     let flow_logs = state.coordinator.get_room_flow_logs(&room_id);
     Ok(Json(RoomDetailResponse {
@@ -477,7 +471,7 @@ async fn handle_patch_agent(
         .patch_agent_in_room(&room_id, &agent_id, patch)
         .await
         .map_err(|e| ChatApiError::Http(StatusCode::BAD_REQUEST, e.to_string()))?;
-    Ok(Json(updated.into()))
+    Ok(Json(state.coordinator.to_agent_public_hydrated(updated).await))
 }
 
 async fn handle_remove_agent(
@@ -552,14 +546,20 @@ async fn handle_get_inspector(
             .map(|c| c.effective_items.is_empty())
             .unwrap_or(true);
 
+    let message_queues = state
+        .coordinator
+        .build_agent_message_queues(&agent, &events);
+    let agent_pub = state.coordinator.to_agent_public_hydrated(agent).await;
+
     Ok(Json(InspectorResponse {
-        agent: agent.into(),
+        agent: agent_pub,
         selected_session_id,
         session,
         context,
         events,
         pending_permissions,
         can_edit_prompt,
+        message_queues,
     }))
 }
 

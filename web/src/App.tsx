@@ -190,7 +190,11 @@ export const App: React.FC = () => {
   }, [apiFetch]);
 
   const refreshInspectorSnapshot = useCallback(
-    async (agentId: string, sessionId: string | null = null) => {
+    async (
+      agentId: string,
+      sessionId: string | null = null,
+      resetBuffers = true
+    ) => {
       const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
       const snap = await apiFetch(`/api/v1/agents/${agentId}/inspector${q}`);
       const normalized: InspectorSnapshot = {
@@ -202,12 +206,18 @@ export const App: React.FC = () => {
           effective_items: snap.context?.effective_items || [],
         },
         events: snap.events || [],
+        message_queues: snap.message_queues || {
+          realtime_messages: [],
+          normal_messages: [],
+        },
       };
       setInspectedAgentId(snap.agent.agent_id);
-      setInspectedSessionId(snap.selected_session_id);
+      setInspectedSessionId(sessionId);
       setInspectorSnap(normalized);
-      setLiveReasoningBuffer('');
-      setLiveStreamBuffer('');
+      if (resetBuffers) {
+        setLiveReasoningBuffer('');
+        setLiveStreamBuffer('');
+      }
     },
     [apiFetch]
   );
@@ -221,6 +231,27 @@ export const App: React.FC = () => {
       const es = new EventSource(`/api/v1/agents/${agentId}/inspector/stream${q}`);
       inspectorEsRef.current = es;
 
+      const appendContextItems = (items: InspectorSnapshot['context']['effective_items']) => {
+        if (!items || items.length === 0) return;
+        setInspectorSnap((prev) => {
+          if (!prev) return prev;
+          const existing = prev.context?.effective_items || [];
+          const existingIds = new Set(
+            existing.map((it) => it.id).filter(Boolean)
+          );
+          const filtered = items.filter(
+            (it) => !it.id || !existingIds.has(it.id)
+          );
+          if (filtered.length === 0) return prev;
+          return {
+            ...prev,
+            context: {
+              effective_items: [...existing, ...filtered],
+            },
+          };
+        });
+      };
+
       es.onmessage = (e) => {
         try {
           const env = JSON.parse(e.data);
@@ -232,48 +263,43 @@ export const App: React.FC = () => {
             setLiveReasoningBuffer((prev) => prev + (ev.delta || ''));
           } else if (evType === 'model_text_delta') {
             setLiveStreamBuffer((prev) => prev + (ev.delta || ''));
+          } else if (evType === 'activation_submitted') {
+            if (ev.items && ev.items.length > 0) {
+              appendContextItems(ev.items);
+            }
+            refreshInspectorSnapshot(agentId, sessionId, false);
+          } else if (
+            evType === 'activation_started' ||
+            evType === 'realtime_messages_drained'
+          ) {
+            refreshInspectorSnapshot(agentId, sessionId, false);
           } else if (evType === 'turn_started') {
             setLiveReasoningBuffer('');
             setLiveStreamBuffer('');
+            refreshInspectorSnapshot(agentId, sessionId, false);
           } else if (evType === 'turn_completed') {
             setLiveReasoningBuffer('');
             setLiveStreamBuffer('');
             if (ev.items && ev.items.length > 0) {
-              setInspectorSnap((prev) => {
-                if (!prev) return prev;
-                return {
-                  ...prev,
-                  context: {
-                    effective_items: [
-                      ...(prev.context?.effective_items || []),
-                      ...ev.items,
-                    ],
-                  },
-                };
-              });
+              appendContextItems(ev.items);
             }
+            refreshInspectorSnapshot(agentId, sessionId, false);
           } else if (evType === 'tool_call_finished') {
             if (ev.items && ev.items.length > 0) {
-              setInspectorSnap((prev) => {
-                if (!prev) return prev;
-                return {
-                  ...prev,
-                  context: {
-                    effective_items: [
-                      ...(prev.context?.effective_items || []),
-                      ...ev.items,
-                    ],
-                  },
-                };
-              });
+              appendContextItems(ev.items);
             }
+            refreshInspectorSnapshot(agentId, sessionId, false);
           } else if (
             evType === 'session_compacted' ||
             evType === 'permission_requested' ||
             evType === 'activation_completed' ||
             evType === 'activation_failed'
           ) {
-            refreshInspectorSnapshot(agentId, sessionId);
+            refreshInspectorSnapshot(
+              agentId,
+              sessionId,
+              evType !== 'permission_requested'
+            );
           }
         } catch (err) {
           console.error(err);
@@ -312,6 +338,13 @@ export const App: React.FC = () => {
                   : item
               )
             );
+            if (inspectedAgentIdRef.current) {
+              refreshInspectorSnapshot(
+                inspectedAgentIdRef.current,
+                inspectedSessionIdRef.current,
+                false
+              );
+            }
           } else if (ev.type === 'agent_updated') {
             if (ev.agent && String(ev.agent.name).toLowerCase() === 'manager') {
               setCurrentDetail((prev) =>
@@ -346,15 +379,11 @@ export const App: React.FC = () => {
               setInspectorSnap((prev) =>
                 prev ? { ...prev, agent: ev.agent } : prev
               );
-              if (
-                ev.agent.runtime_state === 'waiting_permission' ||
-                ev.agent.runtime_state === 'idle'
-              ) {
-                refreshInspectorSnapshot(
-                  ev.agent.agent_id,
-                  inspectedSessionIdRef.current
-                );
-              }
+              refreshInspectorSnapshot(
+                ev.agent.agent_id,
+                inspectedSessionIdRef.current,
+                false
+              );
             }
           } else if (ev.type === 'agent_removed') {
             setCurrentDetail((prev) => {

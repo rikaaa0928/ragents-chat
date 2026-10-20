@@ -32,6 +32,10 @@ import {
   Eye,
   MessageSquareMore,
   Repeat,
+  Zap,
+  Clock,
+  ArrowDown,
+  CheckCircle2,
 } from 'lucide-react';
 import {
   Room,
@@ -39,7 +43,17 @@ import {
   InspectorSnapshot,
   ContextItem,
   FlowLogEntry,
+  AgentTokenUsage,
+  QueuedMessageEntry,
 } from '../types';
+
+function formatCompactTokens(n?: number | null): string {
+  const val = Number(n || 0);
+  if (val >= 1_000_000) return `${(val / 1_000_000).toFixed(2)}M`;
+  if (val >= 10_000) return `${(val / 1_000).toFixed(1)}k`;
+  if (val >= 1_000) return `${(val / 1_000).toFixed(2)}k`;
+  return String(val);
+}
 
 function extractPartArrayText(val: unknown): string {
   if (!val) return '';
@@ -140,9 +154,19 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   const [customPathOpen, setCustomPathOpen] = useState<Record<string, boolean>>({});
   const [permPaths, setPermPaths] = useState<Record<string, string>>({});
 
-  // Collapsible Session Log Blocks & Filter
-  const [collapsedBlocks, setCollapsedBlocks] = useState<Set<string>>(new Set());
+  // Message Queue Panel State (实时消息列表 & 非实时消息列表)
+  const [queuePanelOpen, setQueuePanelOpen] = useState(true);
+  const [queueTab, setQueueTab] = useState<'all' | 'realtime' | 'normal'>('all');
+
+  // 3-State Collapsible Session Log Blocks: 'default' (>10 lines collapsed, <=10 expanded) | 'collapsed' | 'expanded'
+  const [collapseMode, setCollapseMode] = useState<'default' | 'collapsed' | 'expanded'>('default');
+  const [manualCollapseOverrides, setManualCollapseOverrides] = useState<Record<string, boolean>>({});
   const [logFilter, setLogFilter] = useState<'all' | 'thought' | 'tool' | 'context'>('all');
+
+  // Sticky Bottom Auto-Follow State for Inspector Log
+  const [logPinnedToBottom, setLogPinnedToBottom] = useState(true);
+  const logPinnedToBottomRef = useRef(true);
+  const lastLogScrollTopRef = useRef(0);
 
   // Prompt Editor Local Form State
   const [roleDraft, setRoleDraft] = useState('');
@@ -152,6 +176,97 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   const flowScrollRef = useRef<HTMLDivElement | null>(null);
 
   const inspectedAgent = inspector?.agent || null;
+  const items = inspector?.context?.effective_items || [];
+  const realtimeQueue: QueuedMessageEntry[] =
+    inspector?.message_queues?.realtime_messages || [];
+  const normalQueue: QueuedMessageEntry[] =
+    inspector?.message_queues?.normal_messages || [];
+  const rtQueuedCount = realtimeQueue.filter((m) => m.status === 'queued').length;
+  const normQueuedCount = normalQueue.filter((m) => m.status === 'queued').length;
+
+  const scrollLogToBottom = () => {
+    const el = logScrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    lastLogScrollTopRef.current = el.scrollTop;
+    logPinnedToBottomRef.current = true;
+    setLogPinnedToBottom(true);
+    requestAnimationFrame(() => {
+      const cur = logScrollRef.current;
+      if (cur && logPinnedToBottomRef.current) {
+        cur.scrollTop = cur.scrollHeight;
+        lastLogScrollTopRef.current = cur.scrollTop;
+      }
+    });
+  };
+
+  const handleLogScroll = () => {
+    const el = logScrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const scrolledUp = el.scrollTop < lastLogScrollTopRef.current - 4;
+    lastLogScrollTopRef.current = el.scrollTop;
+
+    if (distanceFromBottom <= 48) {
+      if (!logPinnedToBottomRef.current) {
+        logPinnedToBottomRef.current = true;
+        setLogPinnedToBottom(true);
+      }
+    } else if (scrolledUp) {
+      if (logPinnedToBottomRef.current) {
+        logPinnedToBottomRef.current = false;
+        setLogPinnedToBottom(false);
+      }
+    }
+  };
+
+  // Reset sticky-bottom and overrides when switching agent or session
+  useEffect(() => {
+    setManualCollapseOverrides({});
+    logPinnedToBottomRef.current = true;
+    setLogPinnedToBottom(true);
+    scrollLogToBottom();
+  }, [inspectedAgent?.agent_id, inspector?.selected_session_id]);
+
+  // Keep following bottom when new items or streaming buffers arrive
+  useEffect(() => {
+    if (logPinnedToBottomRef.current) {
+      scrollLogToBottom();
+    }
+  }, [
+    items.length,
+    liveReasoningBuffer,
+    liveStreamBuffer,
+    logFilter,
+    collapseMode,
+    inspectorColumnOpen,
+  ]);
+
+  // MutationObserver + ResizeObserver to guarantee sticky bottom even when large blocks render asynchronously
+  useEffect(() => {
+    const el = logScrollRef.current;
+    if (!el) return;
+    const snapIfPinned = () => {
+      if (logPinnedToBottomRef.current && logScrollRef.current) {
+        logScrollRef.current.scrollTop = logScrollRef.current.scrollHeight;
+        lastLogScrollTopRef.current = logScrollRef.current.scrollTop;
+      }
+    };
+    const mo = new MutationObserver(snapIfPinned);
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    const ro = new ResizeObserver(snapIfPinned);
+    ro.observe(el);
+    return () => {
+      mo.disconnect();
+      ro.disconnect();
+    };
+  }, [inspectedAgent?.agent_id, inspector?.selected_session_id, inspectorColumnOpen]);
+
+  useEffect(() => {
+    if (rtQueuedCount + normQueuedCount > 0) {
+      setQueuePanelOpen(true);
+    }
+  }, [rtQueuedCount, normQueuedCount]);
 
   useEffect(() => {
     if (flowColumnOpen && flowScrollRef.current) {
@@ -172,23 +287,70 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
     }
   }, [inspector?.pending_permissions?.length]);
 
-  const toggleBlockCollapse = (id: string) => {
-    setCollapsedBlocks((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  const toggleBlockCollapse = (id: string, currentlyCollapsed: boolean) => {
+    setManualCollapseOverrides((prev) => ({
+      ...prev,
+      [id]: !currentlyCollapsed,
+    }));
   };
 
-  const items = inspector?.context?.effective_items || [];
+  const handleSelectCollapseMode = (mode: 'default' | 'collapsed' | 'expanded') => {
+    setCollapseMode(mode);
+    setManualCollapseOverrides({});
+  };
 
-  const toggleAllBlocks = () => {
-    if (collapsedBlocks.size > 0) {
-      setCollapsedBlocks(new Set());
-    } else {
-      setCollapsedBlocks(new Set(items.map((it, idx) => it.id || `item-${idx}`)));
-    }
+  const renderRosterTokenSummary = (usage?: AgentTokenUsage) => {
+    const u = usage || {
+      current_context_tokens: 0,
+      last_usage: null,
+      total_usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        cached_tokens: 0,
+        reasoning_tokens: 0,
+      },
+      turn_count: 0,
+    };
+    const last = u.last_usage;
+    const tot = u.total_usage;
+    return (
+      <div className="p-1.5 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] font-mono-code text-[10px] leading-snug space-y-0.5 text-[var(--text-secondary)]">
+        <div className="flex items-center justify-between gap-1">
+          <span>
+            当前上下文:{' '}
+            <strong className="text-[var(--text-primary)]">
+              {formatCompactTokens(u.current_context_tokens)}
+            </strong>
+          </span>
+          <span>
+            累计:{' '}
+            <strong className="text-[var(--text-primary)]">
+              {formatCompactTokens(tot.total_tokens)}
+            </strong>{' '}
+            ({u.turn_count}轮)
+          </span>
+        </div>
+        <div className="truncate text-[9.5px] text-[var(--text-muted)]" title={
+          last
+            ? `最近一次请求: ${last.input_tokens.toLocaleString()} (缓存: ${last.cached_tokens.toLocaleString()}) / 响应: ${last.output_tokens.toLocaleString()} (思考: ${last.reasoning_tokens.toLocaleString()})`
+            : '尚无最近调用记录'
+        }>
+          最近: 请求 {formatCompactTokens(last?.input_tokens)}
+          (缓{formatCompactTokens(last?.cached_tokens)}) · 响应{' '}
+          {formatCompactTokens(last?.output_tokens)}
+          (思{formatCompactTokens(last?.reasoning_tokens)})
+        </div>
+        <div className="truncate text-[9.5px] text-[var(--text-muted)]" title={
+          `总请求: ${tot.input_tokens.toLocaleString()} (总缓存: ${tot.cached_tokens.toLocaleString()}) / 总响应: ${tot.output_tokens.toLocaleString()} (总思考: ${tot.reasoning_tokens.toLocaleString()})`
+        }>
+          总计: 请求 {formatCompactTokens(tot.input_tokens)}
+          (缓{formatCompactTokens(tot.cached_tokens)}) · 响应{' '}
+          {formatCompactTokens(tot.output_tokens)}
+          (思{formatCompactTokens(tot.reasoning_tokens)})
+        </div>
+      </div>
+    );
   };
 
   const renderStatusDot = (state: RoomAgent['runtime_state']) => {
@@ -377,7 +539,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
           {managerAgent && (
             <div
               onClick={() => onSelectAgent(managerAgent.agent_id)}
-              className={`p-2.5 rounded-xl border border-dashed cursor-pointer transition-all space-y-1.5 ${
+              className={`p-2 rounded-xl border border-dashed cursor-pointer transition-all space-y-1.5 ${
                 inspectedAgent?.agent_id === managerAgent.agent_id && inspectorColumnOpen
                   ? 'border-violet-500 bg-violet-500/12 shadow-xs'
                   : 'border-violet-500/35 bg-violet-500/[0.04] hover:bg-violet-500/[0.08]'
@@ -393,25 +555,23 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                     e.stopPropagation();
                     onOpenManagerSettings();
                   }}
-                  className="px-1.5 py-0.5 rounded text-[10.5px] bg-[var(--bg-main)] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] border border-[var(--border-subtle)] flex items-center gap-1 shrink-0 cursor-pointer"
+                  className="px-1.5 py-0.5 rounded text-[10px] bg-[var(--bg-main)] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)] border border-[var(--border-subtle)] flex items-center gap-1 shrink-0 cursor-pointer"
                 >
                   <Settings className="w-2.5 h-2.5" />
-                  <span>默认设置</span>
+                  <span>设置</span>
                 </button>
               </div>
-              <div className="text-[11px] text-[var(--text-muted)] truncate">
-                {managerAgent.role_title}
-              </div>
-              <div className="text-[10.5px] text-[var(--text-muted)] font-mono-code flex items-center justify-between">
-                <span>{managerAgent.model}</span>
-                <span>
-                  已读 #{managerAgent.last_delivered_seq}/#{roomLastSeq}
+              <div className="text-[10.5px] text-[var(--text-muted)] font-mono-code flex items-center justify-between gap-1">
+                <span className="truncate">{managerAgent.model}</span>
+                <span className="shrink-0">
+                  #{managerAgent.last_delivered_seq}/#{roomLastSeq}
                 </span>
               </div>
+              {renderRosterTokenSummary(managerAgent.token_usage)}
             </div>
           )}
 
-          {/* Working Agent Cards */}
+          {/* Working Agent Cards (Simplified + Token Usage) */}
           {agents.map((a, idx) => {
             const isSelected =
               inspectedAgent?.agent_id === a.agent_id && inspectorColumnOpen;
@@ -421,7 +581,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
               <div
                 key={a.agent_id}
                 onClick={() => onSelectAgent(a.agent_id)}
-                className={`p-2.5 rounded-xl border cursor-pointer transition-all space-y-1.5 ${
+                className={`p-2 rounded-xl border cursor-pointer transition-all space-y-1.5 ${
                   isSelected
                     ? 'bg-[var(--bg-active)] border-[var(--text-secondary)] shadow-xs'
                     : 'bg-[var(--bg-main)] border-[var(--border-subtle)] hover:bg-[var(--bg-hover)]'
@@ -434,7 +594,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                       {a.avatar} @{a.name}
                     </span>
                     {idx === 0 && agents.length > 1 && (
-                      <span className="px-1.5 py-0.2 rounded bg-blue-500/12 text-blue-600 dark:text-blue-400 text-[10px] font-medium inline-flex items-center gap-0.5 shrink-0">
+                      <span className="px-1.5 py-0.2 rounded bg-blue-500/12 text-blue-600 dark:text-blue-400 text-[9.5px] font-medium inline-flex items-center gap-0.5 shrink-0">
                         <Crown className="w-2.5 h-2.5" />
                         主导
                       </span>
@@ -453,54 +613,25 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                   </button>
                 </div>
 
-                <div className="text-[11px] text-[var(--text-secondary)] truncate">
-                  {a.role_title}
-                </div>
-
-                <div className="flex flex-wrap items-center gap-1 text-[10.5px] text-[var(--text-muted)]">
-                  <span
-                    className={
-                      a.runtime_state === 'waiting_permission'
-                        ? 'text-amber-600 dark:text-amber-400 font-medium'
-                        : a.runtime_state === 'thinking'
-                        ? 'text-blue-500 font-medium'
-                        : ''
-                    }
-                  >
+                <div className="flex items-center justify-between gap-1.5 text-[10.5px] text-[var(--text-muted)]">
+                  <span className="truncate font-mono-code text-[var(--text-secondary)]">
+                    {a.model}
+                  </span>
+                  <span className="shrink-0 font-mono-code">
                     {a.runtime_state === 'thinking'
-                      ? '🔵 思考中'
+                      ? '🔵思考'
                       : a.runtime_state === 'waiting_permission'
-                      ? '🟠 待审批'
-                      : '🟢 空闲'}
-                  </span>
-                  <span>·</span>
-                  <span>{a.allow_speak_in_turn ? '🔊 可发言' : '🔇 窥屏禁言'}</span>
-                  <span>·</span>
-                  <span>
-                    #{a.last_delivered_seq}/#{roomLastSeq}
-                    {unread > 0 ? ` (未读${unread})` : ''}
+                      ? '🟠待批'
+                      : '🟢空闲'}{' '}
+                    · #{a.last_delivered_seq}/#{roomLastSeq}
+                    {unread > 0 ? `(+${unread})` : ''}
                   </span>
                 </div>
 
-                <div className="flex items-center justify-between text-[10.5px] text-[var(--text-muted)] font-mono-code pt-0.5 border-t border-[var(--border-subtle)]">
-                  <span className="truncate">{a.model}</span>
-                  <span className="text-[10px] text-emerald-600 dark:text-emerald-400 flex items-center gap-0.5 shrink-0">
-                    <Microscope className="w-2.5 h-2.5" />
-                    点击透视
-                  </span>
-                </div>
-
-                {a.scheduling?.mode === 'pinned' && (
-                  <div className="text-[10px] text-[var(--text-muted)] font-mono-code truncate">
-                    🖥️ {a.scheduling.node_id || 'Pinned'}{' '}
-                    {a.scheduling.workspace_path
-                      ? `· ${a.scheduling.workspace_path}`
-                      : ''}
-                  </div>
-                )}
+                {renderRosterTokenSummary(a.token_usage)}
 
                 {activity && (
-                  <div className="text-[11px] text-blue-500 font-medium truncate">
+                  <div className="text-[10.5px] text-blue-500 font-medium truncate">
                     {activity}
                   </div>
                 )}
@@ -987,10 +1118,231 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
               )}
 
             {/* ===============================================================
+                TOKEN USAGE & MESSAGE QUEUES BAR IN INSPECTOR
+                =============================================================== */}
+            {(() => {
+              const u = inspectedAgent.token_usage || {
+                current_context_tokens: 0,
+                last_usage: null,
+                total_usage: {
+                  input_tokens: 0,
+                  output_tokens: 0,
+                  total_tokens: 0,
+                  cached_tokens: 0,
+                  reasoning_tokens: 0,
+                },
+                turn_count: 0,
+              };
+              const last = u.last_usage;
+              const tot = u.total_usage;
+              const filteredQueueEntries =
+                queueTab === 'realtime'
+                  ? realtimeQueue
+                  : queueTab === 'normal'
+                  ? normalQueue
+                  : [...realtimeQueue, ...normalQueue].sort(
+                      (a, b) => a.msg_seq - b.msg_seq
+                    );
+
+              return (
+                <div className="px-3.5 py-2 border-b border-[var(--border-subtle)] bg-[var(--bg-sidebar)] space-y-2 shrink-0 text-[11px]">
+                  {/* Token Usage Detailed Breakdown */}
+                  <div className="p-2 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] font-mono-code space-y-1 text-[10.5px]">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[var(--text-secondary)]">
+                        当前上下文 Token:{' '}
+                        <strong className="text-emerald-600 dark:text-emerald-400 text-[11.5px]">
+                          {(u.current_context_tokens || 0).toLocaleString()}
+                        </strong>
+                      </span>
+                      <span className="text-[var(--text-muted)]">
+                        已完成调用: <strong className="text-[var(--text-primary)]">{u.turn_count}</strong> 轮 · 累计总计:{' '}
+                        <strong className="text-[var(--text-primary)]">
+                          {(tot.total_tokens || 0).toLocaleString()}
+                        </strong>
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-0.5 pt-1 border-t border-[var(--border-subtle)] text-[10px]">
+                      <div className="flex flex-wrap items-center justify-between gap-1">
+                        <span className="text-[var(--text-muted)]">最近单次:</span>
+                        {last ? (
+                          <span className="text-[var(--text-secondary)]">
+                            请求 <strong className="text-[var(--text-primary)]">{last.input_tokens.toLocaleString()}</strong>
+                            <span className="text-cyan-600 dark:text-cyan-400"> (缓存 {last.cached_tokens.toLocaleString()})</span>
+                            {' · '}响应 <strong className="text-[var(--text-primary)]">{last.output_tokens.toLocaleString()}</strong>
+                            <span className="text-violet-600 dark:text-violet-400"> (思考 {last.reasoning_tokens.toLocaleString()})</span>
+                            {' · '}合 <strong className="text-[var(--text-primary)]">{last.total_tokens.toLocaleString()}</strong>
+                          </span>
+                        ) : (
+                          <span className="text-[var(--text-muted)]">暂无记录</span>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-1">
+                        <span className="text-[var(--text-muted)]">累计总计:</span>
+                        <span className="text-[var(--text-secondary)]">
+                          请求 <strong className="text-[var(--text-primary)]">{tot.input_tokens.toLocaleString()}</strong>
+                          <span className="text-cyan-600 dark:text-cyan-400"> (缓存 {tot.cached_tokens.toLocaleString()})</span>
+                          {' · '}响应 <strong className="text-[var(--text-primary)]">{tot.output_tokens.toLocaleString()}</strong>
+                          <span className="text-violet-600 dark:text-violet-400"> (思考 {tot.reasoning_tokens.toLocaleString()})</span>
+                          {' · '}总 <strong className="text-[var(--text-primary)]">{tot.total_tokens.toLocaleString()}</strong>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Realtime & Non-Realtime Message Queue Status Section */}
+                  <div className="rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] overflow-hidden">
+                    <div
+                      onClick={() => setQueuePanelOpen(!queuePanelOpen)}
+                      className="px-2.5 py-1.5 flex items-center justify-between gap-1.5 cursor-pointer hover:bg-[var(--bg-hover)]"
+                    >
+                      <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                        <span className="font-semibold text-[var(--text-primary)] text-[11px]">
+                          消息队列状态
+                        </span>
+                        <span
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setQueueTab('realtime');
+                            setQueuePanelOpen(true);
+                          }}
+                          className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[10px] font-medium cursor-pointer border ${
+                            rtQueuedCount > 0
+                              ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/40 animate-pulse'
+                              : queueTab === 'realtime'
+                              ? 'bg-[var(--bg-active)] text-[var(--text-primary)] border-[var(--border-default)]'
+                              : 'bg-[var(--bg-surface)] text-[var(--text-secondary)] border-[var(--border-subtle)]'
+                          }`}
+                        >
+                          <Zap className="w-2.5 h-2.5 text-amber-500" />
+                          <span>
+                            实时: 排队 {rtQueuedCount} / 已读{' '}
+                            {realtimeQueue.length - rtQueuedCount}
+                          </span>
+                        </span>
+                        <span
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setQueueTab('normal');
+                            setQueuePanelOpen(true);
+                          }}
+                          className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[10px] font-medium cursor-pointer border ${
+                            normQueuedCount > 0
+                              ? 'bg-blue-500/15 text-blue-600 dark:text-blue-400 border-blue-500/40 animate-pulse'
+                              : queueTab === 'normal'
+                              ? 'bg-[var(--bg-active)] text-[var(--text-primary)] border-[var(--border-default)]'
+                              : 'bg-[var(--bg-surface)] text-[var(--text-secondary)] border-[var(--border-subtle)]'
+                          }`}
+                        >
+                          <Clock className="w-2.5 h-2.5 text-blue-500" />
+                          <span>
+                            非实时: 排队 {normQueuedCount} / 已读{' '}
+                            {normalQueue.length - normQueuedCount}
+                          </span>
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-1 shrink-0">
+                        {queuePanelOpen && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setQueueTab('all');
+                            }}
+                            className={`px-1.5 py-0.2 rounded text-[10px] cursor-pointer ${
+                              queueTab === 'all'
+                                ? 'bg-[var(--bg-active)] text-[var(--text-primary)] font-semibold'
+                                : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                            }`}
+                          >
+                            全部
+                          </button>
+                        )}
+                        {queuePanelOpen ? (
+                          <ChevronUp className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                        ) : (
+                          <ChevronDown className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                        )}
+                      </div>
+                    </div>
+
+                    {queuePanelOpen && (
+                      <div className="px-2.5 pb-2 pt-1 border-t border-[var(--border-subtle)] max-h-[150px] overflow-y-auto space-y-1">
+                        {filteredQueueEntries.length === 0 ? (
+                          <div className="py-2 text-center text-[10.5px] text-[var(--text-muted)]">
+                            暂无{queueTab === 'realtime' ? '实时' : queueTab === 'normal' ? '非实时' : ''}消息记录
+                          </div>
+                        ) : (
+                          filteredQueueEntries.map((entry) => {
+                            const isQueued = entry.status === 'queued';
+                            return (
+                              <div
+                                key={`${entry.is_realtime ? 'rt' : 'norm'}-${entry.msg_seq}`}
+                                className={`p-1.5 rounded-lg border text-[10.5px] space-y-0.5 ${
+                                  isQueued
+                                    ? 'bg-amber-500/10 border-amber-500/40'
+                                    : 'bg-[var(--bg-surface)] border-[var(--border-subtle)] opacity-85'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-1.5">
+                                  <div className="flex items-center gap-1 min-w-0">
+                                    <span className="font-mono-code font-semibold text-[var(--text-primary)]">
+                                      #{entry.msg_seq}
+                                    </span>
+                                    <span className="font-medium text-[var(--text-secondary)] truncate">
+                                      @{entry.sender_name}
+                                    </span>
+                                    {entry.is_realtime ? (
+                                      <span className="inline-flex items-center gap-0.5 px-1 py-0.1 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[9.5px] font-medium">
+                                        <Zap className="w-2.5 h-2.5" />
+                                        实时
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-0.5 px-1 py-0.1 rounded bg-[var(--bg-main)] text-[var(--text-muted)] text-[9.5px] font-medium">
+                                        <Clock className="w-2.5 h-2.5" />
+                                        非实时
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <span
+                                    className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[9.5px] font-semibold shrink-0 ${
+                                      isQueued
+                                        ? 'bg-amber-500 text-black'
+                                        : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                                    }`}
+                                  >
+                                    {isQueued ? (
+                                      <span className="w-1.5 h-1.5 rounded-full bg-black animate-ping" />
+                                    ) : (
+                                      <CheckCircle2 className="w-2.5 h-2.5" />
+                                    )}
+                                    <span>{entry.status_label}</span>
+                                  </span>
+                                </div>
+
+                                <div className="text-[11px] text-[var(--text-primary)] break-words line-clamp-2 font-sans">
+                                  {entry.content}
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* ===============================================================
                 SESSION CONTENT STREAM FILTER BAR + FULL-HEIGHT SCROLLABLE LOG
                 =============================================================== */}
             <div className="px-3.5 py-2 border-b border-[var(--border-subtle)] flex items-center justify-between gap-2 text-[11px] shrink-0 bg-[var(--bg-sidebar)]">
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1 overflow-x-auto">
                 {[
                   { key: 'all', label: `全部 (${items.length})` },
                   { key: 'thought', label: '💭 思考' },
@@ -1000,7 +1352,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                   <button
                     key={tab.key}
                     onClick={() => setLogFilter(tab.key as typeof logFilter)}
-                    className={`px-2 py-0.5 rounded-md font-medium cursor-pointer transition-colors ${
+                    className={`px-2 py-0.5 rounded-md font-medium cursor-pointer transition-colors whitespace-nowrap ${
                       logFilter === tab.key
                         ? 'bg-[var(--bg-active)] text-[var(--text-primary)]'
                         : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]'
@@ -1011,170 +1363,223 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                 ))}
               </div>
 
-              <button
-                onClick={toggleAllBlocks}
-                className="px-2 py-0.5 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] flex items-center gap-1 cursor-pointer"
-                title="一键展开或折叠所有条目"
+              {/* 3-State Collapse Mode Selector: 默认 (>10行折叠) | 全部折叠 | 全部展开 */}
+              <div
+                className="flex items-center gap-0.5 p-0.5 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] shrink-0"
+                title="折叠模式：默认（内容超过10行折叠，≤10行展开） / 全部折叠 / 全部展开"
               >
-                <ChevronsUpDown className="w-3 h-3" />
-                <span>{collapsedBlocks.size > 0 ? '全部展开' : '全部折叠'}</span>
-              </button>
+                <ChevronsUpDown className="w-3 h-3 text-[var(--text-muted)] ml-1 shrink-0" />
+                {[
+                  { key: 'default', label: '默认', tip: '超过 10 行折叠，≤10 行展开' },
+                  { key: 'collapsed', label: '全折', tip: '全部折叠' },
+                  { key: 'expanded', label: '全展', tip: '全部展开' },
+                ].map((m) => (
+                  <button
+                    key={m.key}
+                    onClick={() =>
+                      handleSelectCollapseMode(
+                        m.key as 'default' | 'collapsed' | 'expanded'
+                      )
+                    }
+                    title={m.tip}
+                    className={`px-1.5 py-0.5 rounded text-[10.5px] font-medium cursor-pointer transition-colors whitespace-nowrap ${
+                      collapseMode === m.key &&
+                      Object.keys(manualCollapseOverrides).length === 0
+                        ? 'bg-[var(--bg-main)] text-[var(--text-primary)] shadow-2xs'
+                        : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Full-Height Scrollable Session Content Preview */}
-            <div
-              ref={logScrollRef}
-              className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2 font-mono-code text-xs"
-            >
-              {items.length === 0 && !liveReasoningBuffer && !liveStreamBuffer ? (
-                <div className="py-16 text-center text-[var(--text-muted)] font-sans text-xs space-y-1">
-                  <div>该 Session 尚未产生思考或工具调用记录</div>
-                  {inspector?.can_edit_prompt && (
-                    <div className="text-[11px] text-emerald-500">
-                      提示：点击右上角「透视配置 ➔ System Prompt」可在首次运行前修改该 Agent 的人设提示词
-                    </div>
-                  )}
-                </div>
-              ) : (
-                items.map((item: ContextItem, idx: number) => {
-                  const blockId = item.id || `item-${idx}`;
-                  const isCollapsed = collapsedBlocks.has(blockId);
-
-                  const rawContentText = extractPartArrayText(item.content);
-                  const rawSummaryText = extractPartArrayText(item.summary);
-                  const rawText = [rawSummaryText, rawContentText]
-                    .filter(Boolean)
-                    .join('\n\n');
-                  const isCompaction = rawText.startsWith('[Compaction Summary]');
-
-                  if (logFilter === 'thought' && item.type !== 'reasoning') return null;
-                  if (
-                    logFilter === 'tool' &&
-                    item.type !== 'function_call' &&
-                    item.type !== 'function_call_output'
-                  )
-                    return null;
-                  if (logFilter === 'context' && item.type !== 'message') return null;
-
-                  let icon = <Inbox className="w-3.5 h-3.5 text-emerald-500 shrink-0" />;
-                  let title = 'Context';
-                  let preview = rawText.replace(/\s+/g, ' ').slice(0, 68);
-                  let bodyContent = rawText;
-                  let badgeColor = 'text-emerald-600 dark:text-emerald-400';
-
-                  if (isCompaction) {
-                    icon = <Package className="w-3.5 h-3.5 text-amber-500 shrink-0" />;
-                    title = 'Compaction Summary';
-                    badgeColor = 'text-amber-600 dark:text-amber-400';
-                  } else if (item.type === 'reasoning') {
-                    icon = <Brain className="w-3.5 h-3.5 text-violet-500 shrink-0" />;
-                    const firstLine =
-                      rawText
-                        .split('\n')
-                        .map((l) => l.replace(/^\*\*|\*\*$/g, '').trim())
-                        .find(Boolean) || 'Thought / 内部推理链';
-                    title = `Thought: ${firstLine.slice(0, 42)}`;
-                    bodyContent = rawText || '(已完成内部推理)';
-                    preview = bodyContent.replace(/\s+/g, ' ').slice(0, 60);
-                    badgeColor = 'text-violet-600 dark:text-violet-400';
-                  } else if (item.type === 'function_call') {
-                    icon = <Wrench className="w-3.5 h-3.5 text-blue-500 shrink-0" />;
-                    title = `ToolCall: ${String(item.name || 'tool')}${
-                      item.duration_ms ? ` (${item.duration_ms}ms)` : ''
-                    }`;
-                    let formattedArgs =
-                      typeof item.arguments === 'string'
-                        ? item.arguments
-                        : JSON.stringify(item.arguments || {}, null, 2);
-                    try {
-                      formattedArgs = JSON.stringify(
-                        JSON.parse(formattedArgs),
-                        null,
-                        2
-                      );
-                    } catch (_) {}
-                    bodyContent = formattedArgs;
-                    preview = bodyContent.replace(/\s+/g, ' ').slice(0, 60);
-                    badgeColor = 'text-blue-600 dark:text-blue-400';
-                  } else if (item.type === 'function_call_output') {
-                    icon = <Terminal className="w-3.5 h-3.5 text-cyan-500 shrink-0" />;
-                    title = `ToolResult${item.name ? `: ${String(item.name)}` : ''}`;
-                    bodyContent =
-                      typeof item.output === 'string'
-                        ? item.output
-                        : JSON.stringify(item.output ?? '', null, 2);
-                    preview = bodyContent.replace(/\s+/g, ' ').slice(0, 60);
-                    badgeColor = 'text-cyan-600 dark:text-cyan-400';
-                  } else if (item.type === 'message') {
-                    const role = String(item.role || 'user');
-                    title =
-                      role === 'user'
-                        ? 'Context:user (聊天室上下文载荷)'
-                        : `Context:${role} (内部草稿)`;
-                  }
-
-                  return (
-                    <div
-                      key={blockId}
-                      className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-code)] overflow-hidden"
-                    >
-                      <div
-                        onClick={() => toggleBlockCollapse(blockId)}
-                        className="px-3 py-2 flex items-center justify-between gap-2 cursor-pointer hover:bg-[var(--bg-hover)] select-none"
-                      >
-                        <div className="flex items-center gap-2 min-w-0 flex-1">
-                          {isCollapsed ? (
-                            <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
-                          ) : (
-                            <ChevronDown className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
-                          )}
-                          {icon}
-                          <span className={`font-semibold text-[11.5px] shrink-0 ${badgeColor}`}>
-                            {title}
-                          </span>
-                          {isCollapsed && (
-                            <span className="text-[11px] text-[var(--text-muted)] truncate">
-                              {preview}
-                            </span>
-                          )}
-                        </div>
+            <div className="flex-1 min-h-0 relative flex flex-col overflow-hidden">
+              <div
+                ref={logScrollRef}
+                onScroll={handleLogScroll}
+                className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2 font-mono-code text-xs"
+              >
+                {items.length === 0 && !liveReasoningBuffer && !liveStreamBuffer ? (
+                  <div className="py-16 text-center text-[var(--text-muted)] font-sans text-xs space-y-1">
+                    <div>该 Session 尚未产生思考或工具调用记录</div>
+                    {inspector?.can_edit_prompt && (
+                      <div className="text-[11px] text-emerald-500">
+                        提示：点击右上角「透视配置 ➔ System Prompt」可在首次运行前修改该 Agent 的人设提示词
                       </div>
+                    )}
+                  </div>
+                ) : (
+                  items.map((item: ContextItem, idx: number) => {
+                    const blockId = item.id || `item-${idx}`;
 
-                      {!isCollapsed && (
-                        <div className="px-3 pb-2.5 pt-1 border-t border-[var(--border-subtle)] text-[11.5px] leading-relaxed text-[var(--text-secondary)] whitespace-pre-wrap break-words">
-                          {bodyContent}
+                    const rawContentText = extractPartArrayText(item.content);
+                    const rawSummaryText = extractPartArrayText(item.summary);
+                    const rawText = [rawSummaryText, rawContentText]
+                      .filter(Boolean)
+                      .join('\n\n');
+                    const isCompaction = rawText.startsWith('[Compaction Summary]');
+
+                    if (logFilter === 'thought' && item.type !== 'reasoning') return null;
+                    if (
+                      logFilter === 'tool' &&
+                      item.type !== 'function_call' &&
+                      item.type !== 'function_call_output'
+                    )
+                      return null;
+                    if (logFilter === 'context' && item.type !== 'message') return null;
+
+                    let icon = <Inbox className="w-3.5 h-3.5 text-emerald-500 shrink-0" />;
+                    let title = 'Context';
+                    let preview = rawText.replace(/\s+/g, ' ').slice(0, 68);
+                    let bodyContent = rawText;
+                    let badgeColor = 'text-emerald-600 dark:text-emerald-400';
+
+                    if (isCompaction) {
+                      icon = <Package className="w-3.5 h-3.5 text-amber-500 shrink-0" />;
+                      title = 'Compaction Summary';
+                      badgeColor = 'text-amber-600 dark:text-amber-400';
+                    } else if (item.type === 'reasoning') {
+                      icon = <Brain className="w-3.5 h-3.5 text-violet-500 shrink-0" />;
+                      const firstLine =
+                        rawText
+                          .split('\n')
+                          .map((l) => l.replace(/^\*\*|\*\*$/g, '').trim())
+                          .find(Boolean) || 'Thought / 内部推理链';
+                      title = `Thought: ${firstLine.slice(0, 42)}`;
+                      bodyContent = rawText || '(已完成内部推理)';
+                      preview = bodyContent.replace(/\s+/g, ' ').slice(0, 60);
+                      badgeColor = 'text-violet-600 dark:text-violet-400';
+                    } else if (item.type === 'function_call') {
+                      icon = <Wrench className="w-3.5 h-3.5 text-blue-500 shrink-0" />;
+                      title = `ToolCall: ${String(item.name || 'tool')}${
+                        item.duration_ms ? ` (${item.duration_ms}ms)` : ''
+                      }`;
+                      let formattedArgs =
+                        typeof item.arguments === 'string'
+                          ? item.arguments
+                          : JSON.stringify(item.arguments || {}, null, 2);
+                      try {
+                        formattedArgs = JSON.stringify(
+                          JSON.parse(formattedArgs),
+                          null,
+                          2
+                        );
+                      } catch (_) {}
+                      bodyContent = formattedArgs;
+                      preview = bodyContent.replace(/\s+/g, ' ').slice(0, 60);
+                      badgeColor = 'text-blue-600 dark:text-blue-400';
+                    } else if (item.type === 'function_call_output') {
+                      icon = <Terminal className="w-3.5 h-3.5 text-cyan-500 shrink-0" />;
+                      title = `ToolResult${item.name ? `: ${String(item.name)}` : ''}`;
+                      bodyContent =
+                        typeof item.output === 'string'
+                          ? item.output
+                          : JSON.stringify(item.output ?? '', null, 2);
+                      preview = bodyContent.replace(/\s+/g, ' ').slice(0, 60);
+                      badgeColor = 'text-cyan-600 dark:text-cyan-400';
+                    } else if (item.type === 'message') {
+                      const role = String(item.role || 'user');
+                      title =
+                        role === 'user'
+                          ? 'Context:user (聊天室上下文载荷)'
+                          : `Context:${role} (内部草稿)`;
+                    }
+
+                    const lineCount = bodyContent
+                      ? bodyContent.split(/\r?\n/).length
+                      : 0;
+                    const defaultCollapsed = lineCount > 10;
+                    const isCollapsed =
+                      blockId in manualCollapseOverrides
+                        ? manualCollapseOverrides[blockId]
+                        : collapseMode === 'collapsed'
+                        ? true
+                        : collapseMode === 'expanded'
+                        ? false
+                        : defaultCollapsed;
+
+                    return (
+                      <div
+                        key={blockId}
+                        className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-code)] overflow-hidden"
+                      >
+                        <div
+                          onClick={() => toggleBlockCollapse(blockId, isCollapsed)}
+                          className="px-3 py-2 flex items-center justify-between gap-2 cursor-pointer hover:bg-[var(--bg-hover)] select-none"
+                        >
+                          <div className="flex items-center gap-2 min-w-0 flex-1">
+                            {isCollapsed ? (
+                              <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+                            ) : (
+                              <ChevronDown className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+                            )}
+                            {icon}
+                            <span className={`font-semibold text-[11.5px] shrink-0 ${badgeColor}`}>
+                              {title}
+                            </span>
+                            {isCollapsed && (
+                              <span className="text-[11px] text-[var(--text-muted)] truncate">
+                                {preview}
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[10px] text-[var(--text-muted)] shrink-0">
+                            {lineCount}行
+                          </span>
                         </div>
-                      )}
+
+                        {!isCollapsed && (
+                          <div className="px-3 pb-2.5 pt-1 border-t border-[var(--border-subtle)] text-[11.5px] leading-relaxed text-[var(--text-secondary)] whitespace-pre-wrap break-words">
+                            {bodyContent}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+
+                {/* Live Streaming Reasoning Slot */}
+                {liveReasoningBuffer && (
+                  <div className="rounded-xl border border-violet-500/40 bg-violet-500/[0.06] p-3 space-y-1">
+                    <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-violet-500">
+                      <Brain className="w-3.5 h-3.5 animate-spin" />
+                      <span>💭 实时思考流 (Reasoning Delta)</span>
                     </div>
-                  );
-                })
-              )}
+                    <div className="text-[11.5px] leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap">
+                      {liveReasoningBuffer}
+                      <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-violet-500 animate-pulse align-middle" />
+                    </div>
+                  </div>
+                )}
 
-              {/* Live Streaming Reasoning Slot */}
-              {liveReasoningBuffer && (
-                <div className="rounded-xl border border-violet-500/40 bg-violet-500/[0.06] p-3 space-y-1">
-                  <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-violet-500">
-                    <Brain className="w-3.5 h-3.5 animate-spin" />
-                    <span>💭 实时思考流 (Reasoning Delta)</span>
+                {/* Live Streaming Output Slot */}
+                {liveStreamBuffer && (
+                  <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/[0.06] p-3 space-y-1">
+                    <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-emerald-500">
+                      <Terminal className="w-3.5 h-3.5" />
+                      <span>✍️ 实时输出流 (Output Delta)</span>
+                    </div>
+                    <div className="text-[11.5px] leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap">
+                      {liveStreamBuffer}
+                      <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-emerald-500 animate-pulse align-middle" />
+                    </div>
                   </div>
-                  <div className="text-[11.5px] leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap">
-                    {liveReasoningBuffer}
-                    <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-violet-500 animate-pulse align-middle" />
-                  </div>
-                </div>
-              )}
+                )}
+              </div>
 
-              {/* Live Streaming Output Slot */}
-              {liveStreamBuffer && (
-                <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/[0.06] p-3 space-y-1">
-                  <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-emerald-500">
-                    <Terminal className="w-3.5 h-3.5" />
-                    <span>✍️ 实时输出流 (Output Delta)</span>
-                  </div>
-                  <div className="text-[11.5px] leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap">
-                    {liveStreamBuffer}
-                    <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-emerald-500 animate-pulse align-middle" />
-                  </div>
+              {/* Floating Jump-to-Bottom Pill in Inspector */}
+              {!logPinnedToBottom && (
+                <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10">
+                  <button
+                    onClick={scrollLogToBottom}
+                    className="px-3 py-1 rounded-full bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] shadow-md text-[11px] font-medium flex items-center gap-1 cursor-pointer hover:bg-[var(--bg-surface)]"
+                  >
+                    <ArrowDown className="w-3 h-3" />
+                    <span>回到最新底部</span>
+                  </button>
                 </div>
               )}
             </div>

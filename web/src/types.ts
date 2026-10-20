@@ -37,6 +37,36 @@ export interface AgentScheduling {
   node_selector?: Record<string, string>;
 }
 
+export interface TokenUsageBreakdown {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cached_tokens: number;
+  reasoning_tokens: number;
+}
+
+export interface AgentTokenUsage {
+  current_context_tokens: number;
+  last_usage?: TokenUsageBreakdown | null;
+  total_usage: TokenUsageBreakdown;
+  turn_count: number;
+}
+
+export interface QueuedMessageEntry {
+  msg_seq: number;
+  sender_name: string;
+  content: string;
+  is_realtime: boolean;
+  status: 'queued' | 'read';
+  status_label: string;
+  created_at: string;
+}
+
+export interface AgentMessageQueueSnapshot {
+  realtime_messages: QueuedMessageEntry[];
+  normal_messages: QueuedMessageEntry[];
+}
+
 export interface RoomAgent {
   agent_id: string;
   room_id: string;
@@ -54,7 +84,10 @@ export interface RoomAgent {
   active_session_id: string;
   active_activation_id?: string | null;
   session_chain: SessionChainEntry[];
+  token_usage?: AgentTokenUsage;
 }
+
+export type SendShortcutMode = 'enter_send' | 'shift_enter_send';
 
 export interface ChatMessage {
   msg_seq: number;
@@ -66,6 +99,7 @@ export interface ChatMessage {
   mentions: string[];
   visible_to?: string[];
   reply_to_seq?: number | null;
+  is_realtime?: boolean;
   created_at: string;
 }
 
@@ -133,6 +167,7 @@ export interface InspectorSnapshot {
     effective_items: ContextItem[];
   };
   events: InspectorEventEnvelope[];
+  message_queues?: AgentMessageQueueSnapshot;
 }
 
 export interface ClusterNode {
