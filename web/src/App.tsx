@@ -7,6 +7,7 @@ import {
   ManagerSettings,
   ClusterNode,
   CreateRoomPreset,
+  SendShortcutMode,
 } from './types';
 import { Sidebar } from './components/Sidebar';
 import { TopHeader } from './components/TopHeader';
@@ -31,6 +32,16 @@ export const App: React.FC = () => {
     const saved = localStorage.getItem('ragents_chat_theme');
     return saved === 'dark' ? 'dark' : 'light';
   });
+
+  // Send Shortcut Mode ('enter_send': Enter发送/Shift+Enter换行 | 'shift_enter_send': Shift+Enter发送/Enter换行)
+  const [sendShortcutMode, setSendShortcutMode] = useState<SendShortcutMode>(() => {
+    const saved = localStorage.getItem('ragents_chat_send_shortcut');
+    return saved === 'shift_enter_send' ? 'shift_enter_send' : 'enter_send';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('ragents_chat_send_shortcut', sendShortcutMode);
+  }, [sendShortcutMode]);
 
   useEffect(() => {
     if (theme === 'dark') {
@@ -72,6 +83,34 @@ export const App: React.FC = () => {
   const [managerSettings, setManagerSettings] = useState<ManagerSettings>(
     DEFAULT_MANAGER_SETTINGS
   );
+  const [apiErrors, setApiErrors] = useState<
+    Array<{
+      id: string;
+      method: string;
+      path: string;
+      status: number | string;
+      message: string;
+      time: string;
+    }>
+  >([]);
+
+  const pushApiError = useCallback(
+    (method: string, path: string, status: number | string, message: string) => {
+      const now = new Date().toLocaleTimeString();
+      setApiErrors((prev) => [
+        {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          method,
+          path,
+          status,
+          message,
+          time: now,
+        },
+        ...prev.filter((e) => !(e.path === path && e.message === message)).slice(0, 4),
+      ]);
+    },
+    []
+  );
 
   const roomEsRef = useRef<EventSource | null>(null);
   const inspectorEsRef = useRef<EventSource | null>(null);
@@ -88,6 +127,7 @@ export const App: React.FC = () => {
 
   const apiFetch = useCallback(
     async (path: string, options: RequestInit = {}) => {
+      const method = (options.method || 'GET').toUpperCase();
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         ...((options.headers as Record<string, string>) || {}),
@@ -95,18 +135,35 @@ export const App: React.FC = () => {
       if (authToken) {
         headers['Authorization'] = `Bearer ${authToken}`;
       }
-      const res = await fetch(path, { ...options, headers });
+      let res: Response;
+      try {
+        res = await fetch(path, { ...options, headers });
+      } catch (netErr: unknown) {
+        const msg = netErr instanceof Error ? netErr.message : String(netErr);
+        pushApiError(method, path, 'NETWORK_ERR', msg);
+        throw netErr;
+      }
       if (res.status === 401) {
         setActiveModal('auth');
         throw new Error('Unauthorized');
       }
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: res.statusText }));
-        throw new Error(err.error || res.statusText);
+        const rawText = await res.text().catch(() => '');
+        let errMessage = res.statusText || `HTTP ${res.status}`;
+        if (rawText) {
+          try {
+            const parsed = JSON.parse(rawText);
+            errMessage = parsed.error || parsed.message || rawText;
+          } catch {
+            errMessage = rawText;
+          }
+        }
+        pushApiError(method, path, res.status, errMessage);
+        throw new Error(errMessage);
       }
       return res.json();
     },
-    [authToken]
+    [authToken, pushApiError]
   );
 
   const refreshAvailableModels = useCallback(async () => {
@@ -397,14 +454,20 @@ export const App: React.FC = () => {
   useEffect(() => {
     (async () => {
       try {
-        const st = await fetch('/api/v1/auth/status').then((r) => r.json());
+        const res = await fetch('/api/v1/auth/status');
+        if (!res.ok) {
+          const text = await res.text().catch(() => res.statusText);
+          pushApiError('GET', '/api/v1/auth/status', res.status, text);
+          return;
+        }
+        const st = await res.json();
         if (st.auth_required && !st.authenticated) {
           setActiveModal('auth');
           return;
         }
         await refreshAvailableModels();
         await refreshRooms();
-      } catch (e) {
+      } catch (e: unknown) {
         console.error(e);
       }
     })();
@@ -441,7 +504,7 @@ export const App: React.FC = () => {
     });
   };
 
-  const handleSendMessage = async (content: string) => {
+  const handleSendMessage = async (content: string, isRealtime: boolean) => {
     if (!currentDetail || !currentRoomId) return;
     const mentions =
       singleChatAutoPreselected && content.startsWith('@')
@@ -450,7 +513,12 @@ export const App: React.FC = () => {
 
     await apiFetch(`/api/v1/rooms/${currentRoomId}/messages`, {
       method: 'POST',
-      body: JSON.stringify({ sender_name: 'Human', content, mentions }),
+      body: JSON.stringify({
+        sender_name: 'Human',
+        content,
+        mentions,
+        is_realtime: isRealtime,
+      }),
     });
     if (currentDetail.agents.length === 1) {
       setSelectedMentions(new Set([currentDetail.agents[0].name]));
@@ -540,11 +608,61 @@ export const App: React.FC = () => {
           }}
         />
 
+        {apiErrors.length > 0 && (
+          <div className="shrink-0 border-b border-red-500/30 bg-red-500/10 px-4 py-2.5 space-y-2 max-h-48 overflow-y-auto">
+            {apiErrors.map((err) => (
+              <div
+                key={err.id}
+                className="flex items-start justify-between gap-3 text-xs text-red-700 dark:text-red-300"
+              >
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <div className="flex items-center gap-2 font-semibold">
+                    <span className="px-1.5 py-0.5 rounded bg-red-500/20 text-red-700 dark:text-red-200 font-mono text-[11px]">
+                      HTTP {err.status}
+                    </span>
+                    <span className="font-mono text-[11px] opacity-90">
+                      {err.method} {err.path}
+                    </span>
+                    <span className="text-[10.5px] opacity-60 font-normal">
+                      {err.time}
+                    </span>
+                  </div>
+                  <pre className="whitespace-pre-wrap break-words font-mono text-[11.5px] leading-relaxed select-text opacity-95">
+                    {err.message}
+                  </pre>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    onClick={async () => {
+                      setApiErrors([]);
+                      await refreshAvailableModels();
+                      await refreshRooms();
+                    }}
+                    className="px-2 py-1 rounded bg-red-500/20 hover:bg-red-500/30 text-red-800 dark:text-red-200 font-medium cursor-pointer"
+                  >
+                    重试
+                  </button>
+                  <button
+                    onClick={() =>
+                      setApiErrors((prev) => prev.filter((x) => x.id !== err.id))
+                    }
+                    className="px-2 py-1 rounded hover:bg-red-500/20 text-red-700 dark:text-red-300 cursor-pointer"
+                  >
+                    关闭
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         <ChatArea
           room={currentDetail?.room || null}
           agents={currentDetail?.agents || []}
           messages={currentDetail?.messages || []}
           selectedMentions={selectedMentions}
+          sendShortcutMode={sendShortcutMode}
+          onChangeSendShortcutMode={setSendShortcutMode}
           onToggleMention={handleToggleMention}
           onSendMessage={handleSendMessage}
           onInspectAgent={(id) => handleInspectAgent(id, undefined, true)}
@@ -641,6 +759,8 @@ export const App: React.FC = () => {
         clusterNodes={clusterNodes}
         defaultAgentModel={managerSettings.default_agent_model}
         managerSettings={managerSettings}
+        sendShortcutMode={sendShortcutMode}
+        onChangeSendShortcutMode={setSendShortcutMode}
         createRoomPreset={createRoomPreset}
         onSubmitAuth={async (tok) => {
           try {
