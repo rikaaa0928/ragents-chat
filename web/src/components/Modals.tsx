@@ -9,7 +9,7 @@ import {
   ChevronRight,
   MessageSquarePlus,
 } from 'lucide-react';
-import { ManagerSettings, ClusterNode } from '../types';
+import { ManagerSettings, ClusterNode, CreateRoomPreset } from '../types';
 
 export type ActiveModalType =
   | null
@@ -26,6 +26,7 @@ interface ModalsProps {
   clusterNodes: ClusterNode[];
   defaultAgentModel: string;
   managerSettings: ManagerSettings;
+  createRoomPreset?: CreateRoomPreset | null;
   onSubmitAuth: (token: string) => void;
   onSubmitCreateRoom: (payload: {
     name: string;
@@ -59,6 +60,7 @@ export const Modals: React.FC<ModalsProps> = ({
   clusterNodes,
   defaultAgentModel,
   managerSettings,
+  createRoomPreset,
   onSubmitAuth,
   onSubmitCreateRoom,
   onSubmitRecruit,
@@ -102,7 +104,16 @@ export const Modals: React.FC<ModalsProps> = ({
 
   useEffect(() => {
     setMgrDraft(managerSettings);
-  }, [managerSettings, activeModal]);
+    if (activeModal === 'createRoom') {
+      if (createRoomPreset) {
+        setInitNodeId(createRoomPreset.nodeId);
+        setInitWorkdir(createRoomPreset.workspacePath);
+      } else {
+        setInitNodeId('');
+        setInitWorkdir('');
+      }
+    }
+  }, [managerSettings, activeModal, createRoomPreset]);
 
   if (!activeModal) return null;
 

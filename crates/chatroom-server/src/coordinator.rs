@@ -732,8 +732,11 @@ impl RoomCoordinator {
             let target_node = nodes.iter().find(|n| n.metadata.id == target_node_id);
             let abs_w = match effective_workspace_path {
                 Some(w) => {
-                    let p = Path::new(&w);
-                    if p.is_absolute() {
+                    let trimmed = w.trim_end_matches('/');
+                    let p = Path::new(if trimmed.is_empty() { "/" } else { trimmed });
+                    if p == Path::new("/tmp") || p == Path::new("/private/tmp") {
+                        p.join(format!("chatroom-{room_id}"))
+                    } else if p.is_absolute() {
                         p.to_path_buf()
                     } else {
                         std::env::current_dir()?.join(p)

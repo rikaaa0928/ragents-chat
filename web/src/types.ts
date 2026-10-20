@@ -14,6 +14,12 @@ export interface Room {
   roster_version: number;
   last_msg_seq: number;
   created_at?: string;
+  updated_at?: string;
+}
+
+export interface CreateRoomPreset {
+  nodeId: string;
+  workspacePath: string;
 }
 
 export interface SessionChainEntry {

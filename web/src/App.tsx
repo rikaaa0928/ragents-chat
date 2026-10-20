@@ -6,6 +6,7 @@ import {
   InspectorSnapshot,
   ManagerSettings,
   ClusterNode,
+  CreateRoomPreset,
 } from './types';
 import { Sidebar } from './components/Sidebar';
 import { TopHeader } from './components/TopHeader';
@@ -46,6 +47,7 @@ export const App: React.FC = () => {
   const [rosterColumnOpen, setRosterColumnOpen] = useState(false);
   const [inspectorColumnOpen, setInspectorColumnOpen] = useState(false);
   const [activeModal, setActiveModal] = useState<ActiveModalType>(null);
+  const [createRoomPreset, setCreateRoomPreset] = useState<CreateRoomPreset | null>(null);
 
   // Core State
   const [authToken, setAuthToken] = useState(
@@ -480,9 +482,11 @@ export const App: React.FC = () => {
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
         rooms={roomsList}
+        clusterNodes={clusterNodes}
         currentRoomId={currentRoomId}
         onSelectRoom={(id) => handleSelectRoom(id)}
-        onOpenCreateRoom={async () => {
+        onOpenCreateRoom={async (preset) => {
+          setCreateRoomPreset(preset || null);
           await refreshAvailableModels();
           setActiveModal('createRoom');
         }}
@@ -500,6 +504,7 @@ export const App: React.FC = () => {
           sidebarCollapsed={sidebarCollapsed}
           onToggleSidebar={() => setSidebarCollapsed(false)}
           onOpenCreateRoom={async () => {
+            setCreateRoomPreset(null);
             await refreshAvailableModels();
             setActiveModal('createRoom');
           }}
@@ -628,11 +633,15 @@ export const App: React.FC = () => {
       {/* 4. Modals */}
       <Modals
         activeModal={activeModal}
-        onClose={() => setActiveModal(null)}
+        onClose={() => {
+          setActiveModal(null);
+          setCreateRoomPreset(null);
+        }}
         availableModels={availableModels}
         clusterNodes={clusterNodes}
         defaultAgentModel={managerSettings.default_agent_model}
         managerSettings={managerSettings}
+        createRoomPreset={createRoomPreset}
         onSubmitAuth={async (tok) => {
           try {
             const res = await fetch('/api/v1/auth/login', {
