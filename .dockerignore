@@ -1,4 +1,6 @@
-target
+target/*
+!target/linux-bin
+!target/linux-bin/*
 extensions/*/target
 .git
 .ragents-chat
