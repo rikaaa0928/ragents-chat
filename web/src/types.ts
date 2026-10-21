@@ -76,6 +76,7 @@ export interface RoomAgent {
   persona_prompt: string;
   reasoning_effort?: string | null;
   reasoning_summary?: string | null;
+  web_search?: boolean;
   scheduling?: AgentScheduling;
   runtime_state: RuntimeState;
   allow_speak_in_turn: boolean;
@@ -131,12 +132,20 @@ export interface PendingPermission {
 
 export interface ContextItem {
   id?: string;
-  type: 'message' | 'reasoning' | 'function_call' | 'function_call_output';
+  type:
+    | 'message'
+    | 'reasoning'
+    | 'function_call'
+    | 'function_call_output'
+    | 'web_search_call'
+    | string;
   role?: 'user' | 'assistant' | 'system';
   content?: Array<{ type?: string; text?: string }> | string;
   name?: string;
   arguments?: string;
   output?: unknown;
+  status?: string;
+  action?: Record<string, unknown>;
   duration_ms?: number;
   summary?: Array<{ type?: string; text?: string }> | string;
 }
@@ -202,6 +211,7 @@ export interface ManagerSettings {
   default_agent_model: string;
   default_reasoning_effort?: string | null;
   default_reasoning_summary?: string | null;
+  default_web_search?: boolean;
   default_node_id?: string | null;
   default_workspace_root?: string | null;
   max_agent_relay_depth: number;

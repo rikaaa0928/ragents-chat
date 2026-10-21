@@ -383,6 +383,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             default_agent_model: Some("gpt-4.1-mini".to_string()),
             reasoning_effort: Some("high".to_string()),
             reasoning_summary: Some("concise".to_string()),
+            web_search: Some(true),
             node_id: None,
             workspace_path: None,
         })
@@ -764,6 +765,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             model: Some("gpt-4.1-mini".to_string()),
             reasoning_effort: None,
             reasoning_summary: None,
+            web_search: None,
             node_id: None,
             workspace_path: Some("/var/forbidden_ws_dir".to_string()),
         })
@@ -783,6 +785,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             model: Some("gpt-4.1-mini".to_string()),
             reasoning_effort: None,
             reasoning_summary: None,
+            web_search: None,
             node_id: None,
             workspace_path: Some("/tmp/allowed_tmp_ws_e2e_test".to_string()),
         })
@@ -899,6 +902,7 @@ async fn test_live_multi_agent_chatroom_when_env_present() {
             default_agent_model: Some(model_name.clone()),
             reasoning_effort: Some("high".to_string()),
             reasoning_summary: Some("concise".to_string()),
+            web_search: Some(true),
             node_id: None,
             workspace_path: None,
         })

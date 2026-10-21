@@ -102,6 +102,7 @@ interface RightInspectorPaneProps {
       model?: string | null;
       reasoning_effort?: string | null;
       reasoning_summary?: string | null;
+      web_search?: boolean;
       role_title?: string | null;
       persona_prompt?: string | null;
     }
@@ -859,6 +860,22 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                         </select>
                       </div>
                     </div>
+
+                    <label className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] cursor-pointer select-none">
+                      <span className="text-[11px] font-medium text-[var(--text-primary)]">
+                        🌐 内置联网搜索 (web_search)
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(inspectedAgent.web_search)}
+                        onChange={(e) =>
+                          onUpdateAgentConfig(inspectedAgent.agent_id, {
+                            web_search: e.target.checked,
+                          })
+                        }
+                        className="w-3.5 h-3.5 accent-emerald-500 cursor-pointer"
+                      />
+                    </label>
                   </div>
                 )}
 
@@ -1456,7 +1473,8 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                     if (
                       logFilter === 'tool' &&
                       item.type !== 'function_call' &&
-                      item.type !== 'function_call_output'
+                      item.type !== 'function_call_output' &&
+                      item.type !== 'web_search_call'
                     )
                       return null;
                     if (logFilter === 'context' && item.type !== 'message') return null;
@@ -1510,6 +1528,26 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                           : JSON.stringify(item.output ?? '', null, 2);
                       preview = bodyContent.replace(/\s+/g, ' ').slice(0, 60);
                       badgeColor = 'text-cyan-600 dark:text-cyan-400';
+                    } else if (item.type === 'web_search_call') {
+                      icon = <Compass className="w-3.5 h-3.5 text-sky-500 shrink-0" />;
+                      const action = item.action || {};
+                      const query =
+                        typeof action.query === 'string'
+                          ? action.query
+                          : Array.isArray(action.queries)
+                          ? action.queries.join(' | ')
+                          : '';
+                      title = `WebSearch${query ? `: ${query.slice(0, 38)}` : ''}`;
+                      bodyContent = JSON.stringify(
+                        {
+                          status: item.status || 'completed',
+                          action,
+                        },
+                        null,
+                        2
+                      );
+                      preview = query || bodyContent.replace(/\s+/g, ' ').slice(0, 60);
+                      badgeColor = 'text-sky-600 dark:text-sky-400';
                     } else if (item.type === 'message') {
                       const role = String(item.role || 'user');
                       title =

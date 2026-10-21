@@ -104,6 +104,7 @@ async fn main() -> anyhow::Result<()> {
         default_agent_model: Some(default_model),
         default_reasoning_effort: None,
         default_reasoning_summary: None,
+        default_web_search: None,
         default_extensions: if default_extensions.is_empty() {
             None
         } else {

@@ -44,6 +44,7 @@ interface ModalsProps {
     default_agent_model: string | null;
     reasoning_effort: string | null;
     reasoning_summary: string | null;
+    web_search: boolean | null;
     node_id: string | null;
     workspace_path: string | null;
   }) => void;
@@ -56,6 +57,7 @@ interface ModalsProps {
     model: string | null;
     reasoning_effort: string | null;
     reasoning_summary: string | null;
+    web_search: boolean | null;
   }) => void;
   onSaveManagerSettings: (settings: ManagerSettings) => void;
 }
@@ -91,6 +93,9 @@ export const Modals: React.FC<ModalsProps> = ({
   );
   const [initEffort, setInitEffort] = useState('');
   const [initSummary, setInitSummary] = useState('');
+  const [initWebSearch, setInitWebSearch] = useState<'default' | 'on' | 'off'>(
+    'default'
+  );
   const [initNodeId, setInitNodeId] = useState('');
   const [initWorkdir, setInitWorkdir] = useState('');
 
@@ -106,6 +111,9 @@ export const Modals: React.FC<ModalsProps> = ({
   const [manualAdvancedOpen, setManualAdvancedOpen] = useState(false);
   const [manualEffort, setManualEffort] = useState('');
   const [manualSummary, setManualSummary] = useState('');
+  const [manualWebSearch, setManualWebSearch] = useState<
+    'default' | 'on' | 'off'
+  >('default');
 
   // Manager Settings State + Collapsible Prompt Section
   const [mgrDraft, setMgrDraft] = useState<ManagerSettings>(managerSettings);
@@ -384,6 +392,28 @@ export const Modals: React.FC<ModalsProps> = ({
 
                     <div>
                       <label className="block text-[11px] text-[var(--text-muted)] mb-1">
+                        内置联网搜索 (Web Search)
+                      </label>
+                      <select
+                        value={initWebSearch}
+                        onChange={(e) =>
+                          setInitWebSearch(
+                            e.target.value as 'default' | 'on' | 'off'
+                          )
+                        }
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-main)] border border-[var(--border-subtle)]"
+                      >
+                        <option value="default">
+                          跟随全局默认 (
+                          {managerSettings.default_web_search ? '开启' : '关闭'})
+                        </option>
+                        <option value="on">🌐 开启联网搜索 (web_search)</option>
+                        <option value="off">关闭</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] text-[var(--text-muted)] mb-1">
                         初始人设提示词 (System Prompt)
                       </label>
                       <textarea
@@ -416,6 +446,12 @@ export const Modals: React.FC<ModalsProps> = ({
                     default_agent_model: initAgentModel.trim() || null,
                     reasoning_effort: initEffort || null,
                     reasoning_summary: initSummary || null,
+                    web_search:
+                      initWebSearch === 'on'
+                        ? true
+                        : initWebSearch === 'off'
+                        ? false
+                        : null,
                     node_id: initNodeId || null,
                     workspace_path:
                       initNodeId === '__floating__'
@@ -627,6 +663,28 @@ export const Modals: React.FC<ModalsProps> = ({
                         </select>
                       </div>
                     </div>
+
+                    <div>
+                      <label className="block text-[11px] text-[var(--text-muted)] mb-1">
+                        内置联网搜索 (Web Search)
+                      </label>
+                      <select
+                        value={manualWebSearch}
+                        onChange={(e) =>
+                          setManualWebSearch(
+                            e.target.value as 'default' | 'on' | 'off'
+                          )
+                        }
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-main)] border border-[var(--border-subtle)]"
+                      >
+                        <option value="default">
+                          跟随全局默认 (
+                          {managerSettings.default_web_search ? '开启' : '关闭'})
+                        </option>
+                        <option value="on">🌐 开启联网搜索 (web_search)</option>
+                        <option value="off">关闭</option>
+                      </select>
+                    </div>
                   </div>
                 )}
               </div>
@@ -652,6 +710,12 @@ export const Modals: React.FC<ModalsProps> = ({
                     model: manualModel.trim() || null,
                     reasoning_effort: manualEffort || null,
                     reasoning_summary: manualSummary || null,
+                    web_search:
+                      manualWebSearch === 'on'
+                        ? true
+                        : manualWebSearch === 'off'
+                        ? false
+                        : null,
                   });
                   setManualName('');
                   setManualRole('');
@@ -793,6 +857,28 @@ export const Modals: React.FC<ModalsProps> = ({
                   />
                 </div>
               </div>
+
+              <label className="flex items-center justify-between px-3 py-2 rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] cursor-pointer select-none">
+                <div className="space-y-0.5">
+                  <div className="font-medium text-[var(--text-primary)]">
+                    🌐 默认开启内置联网搜索 (web_search)
+                  </div>
+                  <div className="text-[10.5px] text-[var(--text-muted)]">
+                    向模型下发 OpenResponses 原生内置搜索工具声明
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={Boolean(mgrDraft.default_web_search)}
+                  onChange={(e) =>
+                    setMgrDraft({
+                      ...mgrDraft,
+                      default_web_search: e.target.checked,
+                    })
+                  }
+                  className="w-4 h-4 accent-emerald-500 cursor-pointer"
+                />
+              </label>
 
               <div>
                 <label className="block text-[11px] text-[var(--text-muted)] mb-1">

@@ -995,6 +995,7 @@ impl RoomCoordinator {
                     model: req.default_agent_model.or(Some(mgr.default_agent_model)),
                     reasoning_effort: req.reasoning_effort.or(mgr.default_reasoning_effort),
                     reasoning_summary: req.reasoning_summary.or(mgr.default_reasoning_summary),
+                    web_search: req.web_search.or(Some(mgr.default_web_search)),
                     node_id: req.node_id.or(mgr.default_node_id),
                     workspace_path: req.workspace_path.or(mgr.default_workspace_root),
                 },
@@ -1101,6 +1102,7 @@ impl RoomCoordinator {
                         temperature: None,
                         max_output_tokens: None,
                         reasoning: reasoning_cfg,
+                        built_in_tools: build_built_in_tools(mgr.default_web_search),
                     }),
                     extensions,
                     permissions,
@@ -1121,6 +1123,7 @@ impl RoomCoordinator {
             model: model_name,
             reasoning_effort,
             reasoning_summary,
+            web_search: mgr.default_web_search,
             scheduling,
             root_session_id: sess_id.clone(),
             active_session_id: sess_id.clone(),
@@ -1186,6 +1189,7 @@ impl RoomCoordinator {
             reasoning_effort.as_deref(),
             reasoning_summary.as_deref(),
         );
+        let web_search = req.web_search.unwrap_or(mgr.default_web_search);
 
         let force_floating = req.node_id.as_deref() == Some("__floating__");
         let existing_room_pinned = if !force_floating {
@@ -1335,6 +1339,7 @@ impl RoomCoordinator {
                         temperature: None,
                         max_output_tokens: None,
                         reasoning: reasoning_cfg,
+                        built_in_tools: build_built_in_tools(web_search),
                     }),
                     extensions,
                     permissions,
@@ -1359,6 +1364,7 @@ impl RoomCoordinator {
             model: model_name,
             reasoning_effort,
             reasoning_summary,
+            web_search,
             scheduling,
             root_session_id: sess_id.clone(),
             active_session_id: sess_id.clone(),
@@ -1434,6 +1440,7 @@ impl RoomCoordinator {
                         temperature: None,
                         max_output_tokens: None,
                         reasoning: reasoning_cfg,
+                        built_in_tools: build_built_in_tools(updated.web_search),
                     }),
                     extensions: None,
                     permissions: None,
@@ -1622,6 +1629,7 @@ impl RoomCoordinator {
                     model: model_to_use,
                     reasoning_effort: mgr_settings.default_reasoning_effort,
                     reasoning_summary: mgr_settings.default_reasoning_summary,
+                    web_search: Some(mgr_settings.default_web_search),
                     node_id: None,
                     workspace_path: None,
                 },
