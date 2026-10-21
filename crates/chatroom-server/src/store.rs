@@ -679,9 +679,7 @@ You manage the room's specialist agent roster using your tools:\n\
             }
         }
         if let Some(pp) = patch.persona_prompt {
-            if !pp.trim().is_empty() {
-                agent.persona_prompt = pp.trim().to_string();
-            }
+            agent.persona_prompt = pp.trim().to_string();
         }
         if let Some(m) = patch.model {
             if !m.trim().is_empty() {

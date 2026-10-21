@@ -977,11 +977,8 @@ impl RoomCoordinator {
             .unwrap_or_else(|| "全能 AI 研发助手".to_string());
         let default_persona = req
             .default_agent_persona
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| {
-                "You are a helpful, pragmatic software engineering and research assistant."
-                    .to_string()
-            });
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
 
         let manager_agent = self.ensure_room_manager_agent(&room.room_id).await?;
         let agent = self

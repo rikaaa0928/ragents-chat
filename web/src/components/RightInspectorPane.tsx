@@ -915,7 +915,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                         onClick={() =>
                           onUpdateAgentConfig(inspectedAgent.agent_id, {
                             role_title: roleDraft.trim() || null,
-                            persona_prompt: promptDraft.trim() || null,
+                            persona_prompt: promptDraft.trim(),
                           })
                         }
                         className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] flex items-center gap-1 cursor-pointer"

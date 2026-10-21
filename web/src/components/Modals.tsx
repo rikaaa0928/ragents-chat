@@ -88,9 +88,7 @@ export const Modals: React.FC<ModalsProps> = ({
   const [initAgentName, setInitAgentName] = useState('Assistant');
   const [initAgentRole, setInitAgentRole] = useState('全能 AI 研发助手');
   const [initAgentModel, setInitAgentModel] = useState('');
-  const [initAgentPersona, setInitAgentPersona] = useState(
-    'You are a helpful, pragmatic software engineering and research assistant.'
-  );
+  const [initAgentPersona, setInitAgentPersona] = useState('');
   const [initEffort, setInitEffort] = useState('');
   const [initSummary, setInitSummary] = useState('');
   const [initWebSearch, setInitWebSearch] = useState<'default' | 'on' | 'off'>(
@@ -704,9 +702,7 @@ export const Modals: React.FC<ModalsProps> = ({
                     name: manualName.trim(),
                     role_title: manualRole.trim() || 'AI 专家',
                     avatar: manualAvatar.trim() || '🛠️',
-                    persona_prompt:
-                      manualPrompt.trim() ||
-                      `You are @${manualName.trim()}, a specialist AI agent.`,
+                    persona_prompt: manualPrompt.trim(),
                     model: manualModel.trim() || null,
                     reasoning_effort: manualEffort || null,
                     reasoning_summary: manualSummary || null,
