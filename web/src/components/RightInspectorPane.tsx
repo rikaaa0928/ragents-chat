@@ -35,7 +35,6 @@ import {
   Zap,
   Clock,
   ArrowDown,
-  CheckCircle2,
 } from 'lucide-react';
 import {
   Room,
@@ -181,8 +180,8 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
     inspector?.message_queues?.realtime_messages || [];
   const normalQueue: QueuedMessageEntry[] =
     inspector?.message_queues?.normal_messages || [];
-  const rtQueuedCount = realtimeQueue.filter((m) => m.status === 'queued').length;
-  const normQueuedCount = normalQueue.filter((m) => m.status === 'queued').length;
+  const rtQueuedCount = realtimeQueue.length;
+  const normQueuedCount = normalQueue.length;
 
   const scrollLogToBottom = () => {
     const el = logScrollRef.current;
@@ -1253,10 +1252,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                           }`}
                         >
                           <Zap className="w-2.5 h-2.5 text-amber-500" />
-                          <span>
-                            实时: 排队 {rtQueuedCount} / 已读{' '}
-                            {realtimeQueue.length - rtQueuedCount}
-                          </span>
+                          <span>实时排队: {rtQueuedCount}</span>
                         </span>
                         <span
                           onClick={(e) => {
@@ -1273,10 +1269,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                           }`}
                         >
                           <Clock className="w-2.5 h-2.5 text-blue-500" />
-                          <span>
-                            非实时: 排队 {normQueuedCount} / 已读{' '}
-                            {normalQueue.length - normQueuedCount}
-                          </span>
+                          <span>非实时排队: {normQueuedCount}</span>
                         </span>
                       </div>
 
@@ -1309,63 +1302,46 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                       <div className="px-2.5 pb-2 pt-1 border-t border-[var(--border-subtle)] max-h-[150px] overflow-y-auto space-y-1">
                         {filteredQueueEntries.length === 0 ? (
                           <div className="py-2 text-center text-[10.5px] text-[var(--text-muted)]">
-                            暂无{queueTab === 'realtime' ? '实时' : queueTab === 'normal' ? '非实时' : ''}消息记录
+                            当前无{queueTab === 'realtime' ? '实时' : queueTab === 'normal' ? '非实时' : ''}排队消息
                           </div>
                         ) : (
-                          filteredQueueEntries.map((entry) => {
-                            const isQueued = entry.status === 'queued';
-                            return (
-                              <div
-                                key={`${entry.is_realtime ? 'rt' : 'norm'}-${entry.msg_seq}`}
-                                className={`p-1.5 rounded-lg border text-[10.5px] space-y-0.5 ${
-                                  isQueued
-                                    ? 'bg-amber-500/10 border-amber-500/40'
-                                    : 'bg-[var(--bg-surface)] border-[var(--border-subtle)] opacity-85'
-                                }`}
-                              >
-                                <div className="flex items-center justify-between gap-1.5">
-                                  <div className="flex items-center gap-1 min-w-0">
-                                    <span className="font-mono-code font-semibold text-[var(--text-primary)]">
-                                      #{entry.msg_seq}
-                                    </span>
-                                    <span className="font-medium text-[var(--text-secondary)] truncate">
-                                      @{entry.sender_name}
-                                    </span>
-                                    {entry.is_realtime ? (
-                                      <span className="inline-flex items-center gap-0.5 px-1 py-0.1 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[9.5px] font-medium">
-                                        <Zap className="w-2.5 h-2.5" />
-                                        实时
-                                      </span>
-                                    ) : (
-                                      <span className="inline-flex items-center gap-0.5 px-1 py-0.1 rounded bg-[var(--bg-main)] text-[var(--text-muted)] text-[9.5px] font-medium">
-                                        <Clock className="w-2.5 h-2.5" />
-                                        非实时
-                                      </span>
-                                    )}
-                                  </div>
-
-                                  <span
-                                    className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[9.5px] font-semibold shrink-0 ${
-                                      isQueued
-                                        ? 'bg-amber-500 text-black'
-                                        : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
-                                    }`}
-                                  >
-                                    {isQueued ? (
-                                      <span className="w-1.5 h-1.5 rounded-full bg-black animate-ping" />
-                                    ) : (
-                                      <CheckCircle2 className="w-2.5 h-2.5" />
-                                    )}
-                                    <span>{entry.status_label}</span>
+                          filteredQueueEntries.map((entry) => (
+                            <div
+                              key={`${entry.is_realtime ? 'rt' : 'norm'}-${entry.msg_seq}`}
+                              className="p-1.5 rounded-lg border text-[10.5px] space-y-0.5 bg-amber-500/10 border-amber-500/40"
+                            >
+                              <div className="flex items-center justify-between gap-1.5">
+                                <div className="flex items-center gap-1 min-w-0">
+                                  <span className="font-mono-code font-semibold text-[var(--text-primary)]">
+                                    #{entry.msg_seq}
                                   </span>
+                                  <span className="font-medium text-[var(--text-secondary)] truncate">
+                                    @{entry.sender_name}
+                                  </span>
+                                  {entry.is_realtime ? (
+                                    <span className="inline-flex items-center gap-0.5 px-1 py-0.1 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[9.5px] font-medium">
+                                      <Zap className="w-2.5 h-2.5" />
+                                      实时
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-0.5 px-1 py-0.1 rounded bg-[var(--bg-main)] text-[var(--text-muted)] text-[9.5px] font-medium">
+                                      <Clock className="w-2.5 h-2.5" />
+                                      非实时
+                                    </span>
+                                  )}
                                 </div>
 
-                                <div className="text-[11px] text-[var(--text-primary)] break-words line-clamp-2 font-sans">
-                                  {entry.content}
-                                </div>
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[9.5px] font-semibold shrink-0 bg-amber-500 text-black">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-black animate-ping" />
+                                  <span>{entry.status_label}</span>
+                                </span>
                               </div>
-                            );
-                          })
+
+                              <div className="text-[11px] text-[var(--text-primary)] break-words line-clamp-2 font-sans">
+                                {entry.content}
+                              </div>
+                            </div>
+                          ))
                         )}
                       </div>
                     )}

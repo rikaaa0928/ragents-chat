@@ -291,37 +291,22 @@ impl RoomCoordinator {
                 }
             }
 
-            let (status, status_label) = if msg.msg_seq > agent.last_delivered_seq {
-                (
-                    QueuedMessageStatus::Queued,
-                    if msg.is_realtime {
-                        "排队中 · 待投递".to_string()
-                    } else {
-                        "排队中 · 待唤醒/窥屏投递".to_string()
-                    },
-                )
+            let status_label = if msg.msg_seq > agent.last_delivered_seq {
+                if msg.is_realtime {
+                    "排队中 · 待投递".to_string()
+                } else {
+                    "排队中 · 待唤醒/窥屏投递".to_string()
+                }
             } else if msg.is_realtime {
                 if !is_agent_idle && pending_rt.contains(&msg.msg_seq) {
-                    (
-                        QueuedMessageStatus::Queued,
-                        "排队中 · 等待步骤间隙注入".to_string(),
-                    )
+                    "排队中 · 等待步骤间隙注入".to_string()
                 } else {
-                    (
-                        QueuedMessageStatus::Read,
-                        "已读取 · 已注入上下文".to_string(),
-                    )
+                    continue;
                 }
             } else if !is_agent_idle && pending_norm.contains(&msg.msg_seq) {
-                (
-                    QueuedMessageStatus::Queued,
-                    "排队中 · 等待当前回合结束".to_string(),
-                )
+                "排队中 · 等待当前回合结束".to_string()
             } else {
-                (
-                    QueuedMessageStatus::Read,
-                    "已读取 · 已进入回合".to_string(),
-                )
+                continue;
             };
 
             let entry = QueuedMessageEntry {
@@ -329,7 +314,6 @@ impl RoomCoordinator {
                 sender_name: msg.sender_name,
                 content: msg.content,
                 is_realtime: msg.is_realtime,
-                status,
                 status_label,
                 created_at: msg.created_at,
             };
@@ -2565,7 +2549,6 @@ fn format_delivery_payload(
                 "=== [Chatroom Direct Mention (@{}) | Action Required] ===\n",
                 target_agent.name
             ));
-            out.push_str("[Chatroom Speak Permission: ALLOWED]\n");
             out.push_str(&format_single_room_message(last_msg));
             if last_msg.sender_kind == SenderKind::Human {
                 out.push_str(
@@ -2582,7 +2565,6 @@ fn format_delivery_payload(
                 "=== [Chatroom Unread Peek | Room: {} | Roll: {}] ===\n",
                 room.name, roll
             ));
-            out.push_str("[Chatroom Speak Permission: ALLOWED]\n");
             for m in unread_messages {
                 out.push_str(&format_single_room_message(m));
                 out.push('\n');
@@ -2598,13 +2580,12 @@ fn format_delivery_payload(
                 "=== [Chatroom Unread Peek | Room: {} | Roll: {} (Muted)] ===\n",
                 room.name, roll
             ));
-            out.push_str("[Chatroom Speak Permission: MUTED]\n");
             for m in unread_messages {
                 out.push_str(&format_single_room_message(m));
                 out.push('\n');
             }
             out.push_str(
-                "\n(System Note: You are in read-only observation mode for this peek turn (`[Chatroom Speak Permission: MUTED]`). \
+                "\n(System Note: You are in read-only observation mode for this peek turn (`chatroom_speak` tool is disabled). \
                  Absorb the context into your memory and finish your turn immediately with `Observed.`.)",
             );
         }

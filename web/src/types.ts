@@ -57,7 +57,6 @@ export interface QueuedMessageEntry {
   sender_name: string;
   content: string;
   is_realtime: boolean;
-  status: 'queued' | 'read';
   status_label: string;
   created_at: string;
 }

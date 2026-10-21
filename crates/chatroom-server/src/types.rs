@@ -243,20 +243,12 @@ pub struct AgentTokenUsage {
     pub turn_count: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QueuedMessageStatus {
-    Queued,
-    Read,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedMessageEntry {
     pub msg_seq: u64,
     pub sender_name: String,
     pub content: String,
     pub is_realtime: bool,
-    pub status: QueuedMessageStatus,
     pub status_label: String,
     pub created_at: DateTime<Utc>,
 }
