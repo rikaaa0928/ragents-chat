@@ -290,6 +290,9 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   }, [inspector?.pending_permissions?.length]);
 
   const toggleBlockCollapse = (id: string, currentlyCollapsed: boolean) => {
+    if (typeof window !== 'undefined' && window.getSelection()?.toString()) {
+      return;
+    }
     setManualCollapseOverrides((prev) => ({
       ...prev,
       [id]: !currentlyCollapsed,
@@ -369,7 +372,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   const latestFlow = flowLogs.length > 0 ? flowLogs[flowLogs.length - 1] : null;
 
   return (
-    <div className="flex h-full shrink-0 select-none">
+    <div className="flex h-full shrink-0 select-text">
       {/* =====================================================================
           VERTICAL COLUMN 0: 流程轨迹竖列 (Flow Trace Column - Closed by default!)
           ===================================================================== */}
@@ -1128,8 +1131,13 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
               inspector.pending_permissions.length > 0 && (
                 <div className="mx-3 mt-2.5 rounded-xl border border-amber-500/50 bg-amber-500/10 overflow-hidden shrink-0">
                   <div
-                    onClick={() => setPermExpanded(!permExpanded)}
-                    className="px-3 py-2 flex items-center justify-between cursor-pointer select-none"
+                    onClick={() => {
+                      if (typeof window !== 'undefined' && window.getSelection()?.toString()) {
+                        return;
+                      }
+                      setPermExpanded(!permExpanded);
+                    }}
+                    className="px-3 py-2 flex items-center justify-between cursor-pointer"
                   >
                     <div className="flex items-center gap-1.5 text-xs font-semibold text-amber-600 dark:text-amber-400">
                       <ShieldAlert className="w-4 h-4 animate-bounce" />
@@ -1652,7 +1660,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                       >
                         <div
                           onClick={() => toggleBlockCollapse(blockId, isCollapsed)}
-                          className="px-3 py-2 flex items-center justify-between gap-2 cursor-pointer hover:bg-[var(--bg-hover)] select-none"
+                          className="px-3 py-2 flex items-center justify-between gap-2 cursor-pointer hover:bg-[var(--bg-hover)]"
                         >
                           <div className="flex items-center gap-2 min-w-0 flex-1">
                             {isCollapsed ? (
