@@ -65,7 +65,9 @@ export const App: React.FC = () => {
     () => localStorage.getItem('ragents_chat_token') || ''
   );
   const [roomsList, setRoomsList] = useState<RoomListItem[]>([]);
-  const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
+  const [currentRoomId, setCurrentRoomId] = useState<string | null>(
+    () => localStorage.getItem('ragents_chat_room_id') || null
+  );
   const [currentDetail, setCurrentDetail] = useState<RoomDetailResponse | null>(null);
   const [selectedMentions, setSelectedMentions] = useState<Set<string>>(new Set());
   const [singleChatAutoPreselected, setSingleChatAutoPreselected] = useState(false);
@@ -118,8 +120,16 @@ export const App: React.FC = () => {
 
   const roomEsRef = useRef<EventSource | null>(null);
   const inspectorEsRef = useRef<EventSource | null>(null);
+  const currentRoomIdRef = useRef<string | null>(currentRoomId);
   const inspectedAgentIdRef = useRef<string | null>(null);
   const inspectedSessionIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    currentRoomIdRef.current = currentRoomId;
+    if (currentRoomId) {
+      localStorage.setItem('ragents_chat_room_id', currentRoomId);
+    }
+  }, [currentRoomId]);
 
   useEffect(() => {
     inspectedAgentIdRef.current = inspectedAgentId;
@@ -201,6 +211,14 @@ export const App: React.FC = () => {
     ) => {
       const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
       const snap = await apiFetch(`/api/v1/agents/${agentId}/inspector${q}`);
+      // Guard against stale out-of-order responses from another room after room switch
+      if (
+        currentRoomIdRef.current &&
+        snap?.agent?.room_id &&
+        snap.agent.room_id !== currentRoomIdRef.current
+      ) {
+        return;
+      }
       const normalized: InspectorSnapshot = {
         agent: snap.agent,
         selected_session_id: snap.selected_session_id,
@@ -216,6 +234,8 @@ export const App: React.FC = () => {
           normal_messages: [],
         },
       };
+      inspectedAgentIdRef.current = snap.agent.agent_id;
+      inspectedSessionIdRef.current = sessionId;
       setInspectedAgentId(snap.agent.agent_id);
       setInspectedSessionId(sessionId);
       setInspectorSnap(normalized);
@@ -461,8 +481,17 @@ export const App: React.FC = () => {
 
   const handleSelectRoom = useCallback(
     async (roomId: string) => {
+      currentRoomIdRef.current = roomId;
       setCurrentRoomId(roomId);
+      if (inspectorEsRef.current) {
+        inspectorEsRef.current.close();
+        inspectorEsRef.current = null;
+      }
+      inspectedAgentIdRef.current = null;
+      setInspectedAgentId(null);
+      setInspectorSnap(null);
       const detail: RoomDetailResponse = await apiFetch(`/api/v1/rooms/${roomId}`);
+      if (currentRoomIdRef.current !== roomId) return;
       setCurrentDetail(detail);
       if (detail.agents.length === 1) {
         setSelectedMentions(new Set([detail.agents[0].name]));
@@ -748,15 +777,23 @@ export const App: React.FC = () => {
           setActiveModal('managerSettings');
         }}
         onRemoveAgent={async (agentId) => {
-          if (!currentRoomId) return;
-          await apiFetch(`/api/v1/rooms/${currentRoomId}/agents/${agentId}`, {
+          const targetRoomId =
+            (inspectorSnap?.agent.agent_id === agentId
+              ? inspectorSnap.agent.room_id
+              : null) || currentRoomId;
+          if (!targetRoomId) return;
+          await apiFetch(`/api/v1/rooms/${targetRoomId}/agents/${agentId}`, {
             method: 'DELETE',
           });
         }}
         onUpdateAgentConfig={async (agentId, patch) => {
-          if (!currentRoomId) return;
+          const targetRoomId =
+            (inspectorSnap?.agent.agent_id === agentId
+              ? inspectorSnap.agent.room_id
+              : null) || currentRoomId;
+          if (!targetRoomId) return;
           const updated = await apiFetch(
-            `/api/v1/rooms/${currentRoomId}/agents/${agentId}`,
+            `/api/v1/rooms/${targetRoomId}/agents/${agentId}`,
             {
               method: 'PATCH',
               body: JSON.stringify(patch),

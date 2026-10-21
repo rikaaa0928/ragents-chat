@@ -1975,7 +1975,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "ragents-apiserver"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#c52807e444ee969d51b347abdfe9e2d059c96118"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#dc33a87f8522bf6b5c8e6e462ccd7d1165e0df3b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1998,7 +1998,7 @@ dependencies = [
 [[package]]
 name = "ragents-client"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#c52807e444ee969d51b347abdfe9e2d059c96118"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#dc33a87f8522bf6b5c8e6e462ccd7d1165e0df3b"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2021,7 +2021,7 @@ dependencies = [
 [[package]]
 name = "ragents-core"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#c52807e444ee969d51b347abdfe9e2d059c96118"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#dc33a87f8522bf6b5c8e6e462ccd7d1165e0df3b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2048,7 +2048,7 @@ dependencies = [
 [[package]]
 name = "ragents-daemon"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#c52807e444ee969d51b347abdfe9e2d059c96118"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#dc33a87f8522bf6b5c8e6e462ccd7d1165e0df3b"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2072,7 +2072,7 @@ dependencies = [
 [[package]]
 name = "ragents-protocol"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#c52807e444ee969d51b347abdfe9e2d059c96118"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#dc33a87f8522bf6b5c8e6e462ccd7d1165e0df3b"
 dependencies = [
  "chrono",
  "openresponses-rust",
