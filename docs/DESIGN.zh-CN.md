@@ -221,14 +221,15 @@ CREATE TABLE IF NOT EXISTS room_messages (
    }
    ```
 
-### 3.3 Hook 2：`model.request.prepare` & `tools.call`（禁言动态剥夺工具 + WASI 0.2 HTTP 回传）
-1. **被禁言时的工具级硬隔离 (`model.request.prepare`)**：
-   - 当某次唤醒属于“被禁言的只读窥屏”（输入中包含 `[Chatroom Speak Permission: MUTED]`）时，`chatroom.wasm` 在 `model.request.prepare` Hook 中**直接从发往大模型的 `CreateResponseBody.tools` 列表中移除 `chatroom_speak` 工具**；
+### 3.3 Hook 2：`tools.call`（WASI 0.2 HTTP 公开发言回传与激活级 `disabled_tools` 禁言隔离）
+1. **被禁言时的激活级工具硬隔离（`ActivationSpec.disabled_tools`）**：
+   - 当某次唤醒属于“被禁言的只读窥屏”（`allow_speak == false`）时，`chatroom-server` 在调用 `client.push_realtime_message` 时直接传入 `disabled_tools: vec!["chatroom_speak"]`；
+   - `ragents-apiserver` 与 `agent-core` 在激活准备阶段直接根据 `ActivationSpec.disabled_tools` 将 `chatroom_speak` 从本轮 `effective_tools` 中剔除（并回写至 `ConfigRevision.effective_tools` 与 `SessionStatus.effective_tools`），无需在 `chatroom.wasm` 中扫描消息文本暗号或挂载 `model.request.prepare` 钩子；
    - 同时若模型仍尝试调用 `chatroom_speak`，`chatroom-server` 校验 `allow_speak_in_turn == 0` 也会直接返回无权限错误，实现双重硬隔离。
 2. **公开发言回调 (`tools.call`)**：
    - 当获准发言的 Agent 调用 `chatroom_speak` 时，`chatroom.wasm` 通过 WASI 0.2 `wasi:http/outgoing-handler` 向 `chatroom-server` 发送 `POST /api/v1/internal/agent-speak`；
    - 请求头携带 `Authorization: Bearer <agent_token>`；
-   - 请求体包含 `{ room_id, agent_id, content, mentions, reply_to_seq }`；
+   - 请求体包含 `{ room_id, agent_id, content, mentions, visible_to, reply_to_seq }`；
    - `chatroom-server` 校验通过后写入 `room_messages`，分配新的 `msg_seq`，向前端实时推送该群消息，并返回 `{ "ok": true, "msg_seq": 42 }` 给 `chatroom.wasm`。
 
 ---
@@ -262,13 +263,13 @@ CREATE TABLE IF NOT EXISTS room_messages (
 
 ```text
 === [Chatroom Unread Peek | Room: 核心架构重构群] ===
-[Chatroom Speak Permission: ALLOWED] (或当被禁言时为 [Chatroom Speak Permission: MUTED])
 [#13 | 14:22:10 | Coder (Rust 核心开发工程师) -> @Human]: @Human 我已经把速率限制器写好了，代码在 src/ratelimit.rs。
 
 (System Note: You were NOT @mentioned. You are peeking at unread chatroom messages while idle.
  - If you have valuable input, corrections, or follow-up points, call `chatroom_speak` to chime in.
  - If no response is needed, do NOT call `chatroom_speak` and finish your turn to observe silently.)
 ```
+*(注：当处于禁言只读态 `allow_speak == false` 时，`chatroom-server` 同时下发 `disabled_tools: ["chatroom_speak"]` 并在尾注提示本轮处于 Muted Observation Mode，无需调用 `chatroom_speak`。)*
 
 ### 4.2 房间级实时可调参数与“掷骰排序 · 轮流插嘴 · 发言即重排”算法
 
@@ -391,9 +392,14 @@ CREATE TABLE IF NOT EXISTS room_messages (
 1. **单聊自动显式 `@` 与群聊 `@` 补全**：
    - 当当前房间 `agents.len() == 1` 时，输入框上方/左侧默认显式固定 `@<唯一Agent名>` 标签（用户可直接输入内容回车发送，也可手动切换为 `@Manager` 招募第 2 个 Agent 升级为群聊）。
    - 当 `agents.len() >= 2` 时，输入 `@` 弹出成员与 `@Manager` 选择菜单，支持在一条消息中同时 `@` 多个 Agent。
-2. **内部 Session 实时透视面板（只读 + 权限审批 + 紧急中止）**：
+2. **内部 Session 实时透视面板（只读对话 + 四段式 System Prompt 透视 + 随时修改人设 + 权限审批 + 紧急中止）**：
+   - **右侧三列独立可折叠面板**：右侧提供 **流程轨迹（Flow Trace）**、**群成员（Roster）**、**具体 Agent 透视（Session Inspector）** 三个默认收起、可独立展开/隐藏的垂直列。
    - **严格只读限制**：透视面板仅展示该 Agent 底层 `ragents` Session 的内部事件流（`ModelReasoningDelta` 思考过程、`ModelTextDelta` 内部草稿、`ToolCallStarted/Finished` 工具调用参数与输出、`SessionCompacted` 压缩记录），**绝不提供私聊输入框**，确保所有交流全部回归聊天室。
-   - **压缩血缘回溯器**：顶部展示该 Agent 经历过的压缩代数标签（如 `Gen 0 (已压缩)` $\rightarrow$ `Compact #1 (摘要会话)` $\rightarrow$ `Gen 1 (当前活跃)`），点击任意节点即可查看当时的完整原始上下文或压缩摘要。
+   - **四段式 System Prompt (`PromptParts`) 快照与随时修改 `Client Prompt`**：
+     - 透视配置区默认收起，展开后支持在「配置修改」、「System Prompt (四段式)」、「压缩血缘」三个标签页间切换；
+     - 支持在任意时刻修改并保存 Agent 的 `Client Prompt`（角色人设提示词，通过 `PUT /api/v1/rooms/{room_id}/agents/{agent_id}/prompt` 同步更新 `chatroom.sqlite` 与 `ragents-apiserver` 的 `SessionSpec.system_prompt`，下一轮 Activation 立即生效）；
+     - 「System Prompt (四段式)」标签页实时展示 `api-server` 回写的 `1. system_prompt`（集群级）、`2. node_prompt`（节点级）、`3. client_prompt`（角色级）、`4. extension_prompts`（`agents_md`、`skills`、`chatroom` 等扩展级）及当前生效工具列表（`effective_tools`）。
+   - **压缩血缘回溯器**：展示该 Agent 经历过的压缩代数标签（如 `Gen 0 (已压缩)` $\rightarrow$ `Compact #1 (摘要会话)` $\rightarrow$ `Gen 1 (当前活跃)`），点击任意节点即可查看当时的完整原始上下文或压缩摘要。
    - **交互式权限审批卡片**：
      - 当底层 Session 触发 `PermissionRequested` 时，不仅右侧透视面板弹出审批卡片，聊天室中该 Agent 的状态徽章也会高亮显示 `🟠 等待权限审批`（点击直接定位到审批卡片）；
      - 支持查看 `original_path`、修改 `suggested_path`（自定义授权路径/域名通配符），并支持选择 5 级生效范围（`allow-once` / `allow-activation` / `allow-session` / `allow-workspace` / `allow-node`）或 `deny`；
@@ -412,6 +418,8 @@ CREATE TABLE IF NOT EXISTS room_messages (
 | | `GET /api/v1/rooms/{room_id}/stream` (SSE) | 实时订阅房间内的群消息、成员状态变化、权限待审批提醒 |
 | **群内 Agent 管理** | `POST /api/v1/rooms/{room_id}/agents` | 手动添加新 Agent 到聊天室（自动创建绑定 `ragents` Session） |
 | | `POST /api/v1/rooms/{room_id}/recruit` | 直接请求 `@Manager` 根据自然语言描述生成并招募新 Agent |
+| | `PUT /api/v1/rooms/{room_id}/agents/{agent_id}/prompt` | 随时更新指定 Agent 的角色人设提示词（`persona_prompt` / `SessionSpec.system_prompt`） |
+| | `PUT /api/v1/rooms/{room_id}/agents/{agent_id}/model` | 实时切换指定 Agent 的模型、思考强度（`reasoning_effort`）与思考摘要（`reasoning_summary`） |
 | | `DELETE /api/v1/rooms/{room_id}/agents/{agent_id}` | 将某 Agent 移出聊天室（联动关闭其底层 `ragents` Session） |
 | **内部透视与审批** | `GET /api/v1/agents/{agent_id}/inspector` | 获取该 Agent 当前及历史压缩链的 Session 上下文与事件历史 |
 | | `GET /api/v1/agents/{agent_id}/inspector/stream` (SSE) | 实时透视该 Agent 内部 Session 的流式思考、工具调用与权限事件 |
@@ -518,8 +526,13 @@ ragents-chat/
 │           ├── manager.rs            # @Manager 管家服务：调用 ragents-apiserver 生成并招募新 Agent
 │           ├── http.rs               # REST API + 房间 SSE 流 + Agent 内部透视 SSE 流 + 权限审批/取消代理
 │           └── web_assets.rs         # 内嵌单页 Web 前端资源
-└── web/
-    └── index.html                    # 现代化响应式 Web 客户端 (支持聊天室、@ 补全、Manager 配置、只读透视与权限审批)
+└── web/                              # React 19 + TypeScript + Tailwind CSS v4 + Vite 单文件打包前端
+    ├── index.html
+    ├── src/
+    │   ├── App.tsx                   # 主应用状态、SSE 订阅、顶部 API 错误横幅与三栏可折叠布局
+    │   ├── types.ts                  # 前后端强类型契约 (含 PromptParts、AgentInspectorView 等)
+    │   └── components/               # Sidebar、TopHeader、ChatArea、RightInspectorPane、Modals
+    └── dist/index.html               # vite-plugin-singlefile 构建产物（由 web_assets.rs 静态内嵌）
 ```
 
 ---

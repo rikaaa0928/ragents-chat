@@ -18,11 +18,13 @@
 4. **可实时调节的空闲窥屏与轮流概率插嘴（Sequential Roll & Interjection）**：
    - 房间顶部支持实时调节：**窥屏开关**、**静默触发秒数**、**消息轮次间隔**、**插嘴开关** 与 **禁言概率（`0~100%`）**。
    - 触发窥屏时，协调器为每个有未读消息的空闲 Agent 生成 `0~100` 随机数：
-     - 低于禁言概率的 Agent 本轮进入只读禁言模式（`chatroom.wasm` 自动在 `model.request.prepare` 钩子中剥离 `chatroom_speak` 工具）。
+     - 低于禁言概率的 Agent 本轮进入只读禁言模式（`chatroom-server` 在调用 `push_realtime_message` 时原生传入 `disabled_tools: ["chatroom_speak"]`，由 `api-server` 与 `agent-core` 在激活级剥离发言工具）。
      - 高于等于禁言概率的 Agent 按随机数**从高到低依次轮流唤醒**；一旦首个 Agent 调用 `chatroom_speak` 插嘴发言，立即中断旧队列并基于新上下文开启下一轮判定，直至无人插嘴自然收敛。
-5. **内部 Session 实时只读透视面板（Session Inspector）**：
-   - 点击右侧任意群内 Agent 即可实时透视其底层 `ragents` Session 的思维流、工具调用、压缩血缘切换（`Gen 0 -> Compact #1 -> Gen 1`）。
-   - 支持 **5 级权限交互式审批**（`AllowOnce` / `AllowActivation` / `AllowSession` / `AllowWorkspace` / `AllowNode` / `Deny` 及自定义 `--path` 覆盖）与 **紧急中止执行**。
+5. **内部 Session 实时只读透视面板（Session Inspector）与三列可折叠布局**：
+   - 右侧提供三个默认收起、可独立展开的垂直分栏：**流程轨迹（Flow Trace）**、**群成员（Roster）** 与 **具体 Agent 透视（Session Inspector）**。
+   - 点击任意群内 Agent 即可实时透视其底层 `ragents` Session 的思维流、工具调用、压缩血缘切换（`Gen 0 -> Compact #1 -> Gen 1`）。
+   - 支持**随时编辑并保存 `Client Prompt`（角色人设提示词，下一轮 Activation 立即生效）**，并可按段落折叠查看实时 **四段式 System Prompt (`PromptParts`) 快照**（`1. system_prompt` 集群级、`2. node_prompt` 节点级、`3. client_prompt` 角色级、`4. extension_prompts` 扩展级）及当前生效工具列表（`effective_tools`）。
+   - 支持 **5 级权限交互式审批**（`AllowOnce` / `AllowActivation` / `AllowSession` / `AllowWorkspace` / `AllowNode` / `Deny` 及自定义 `--path` 覆盖，审批结果直接持久化至 `api-server`）与 **紧急中止执行**。
    - 严格只读：禁止在透视面板内私聊，所有对话统一在聊天室主窗口进行。
 6. **三层远程部署鉴权（3-Tier Authn）**：
    - 浏览器 $\leftrightarrow$ `chatroom-server`：支持 `--auth-token` / `RAGENTS_CHAT_AUTH_TOKEN`（Bearer Header + `HttpOnly` Cookie）。

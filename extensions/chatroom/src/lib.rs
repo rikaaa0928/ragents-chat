@@ -312,7 +312,7 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
    - When replying to a `[🔒 Private Whisper ...]` message that must remain secret, remember to also set `visible_to` (e.g. `visible_to: [\"Judge\"]`) so your reply stays private!\n\
 6. WHEN PEEKING AT UNREAD MESSAGES WHILE IDLE (`[Chatroom Unread Peek]`):\n\
    - Chime in (`chatroom_speak`) ONLY if you spot an error, a critical blind spot, or high-value domain expertise that nobody else has covered.\n\
-   - Otherwise (or if `[Chatroom Speak Permission: MUTED]` is active), DO NOT call `chatroom_speak` and finish with `Observed.`.\n\
+   - Otherwise (or if `chatroom_speak` is disabled in Muted Observation Mode), DO NOT call `chatroom_speak` and finish with `Observed.`.\n\
 </chatroom_protocol>"
                     )
                 };

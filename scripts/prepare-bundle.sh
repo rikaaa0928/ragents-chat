@@ -12,7 +12,7 @@ cp "${ROOT_DIR}/extensions/chatroom/target/wasm32-wasip2/release/ragent_chatroom
 # 2. Copy standard ragents WASM extensions if available in sibling ../ragents or RAGENTS_SRC_DIR
 RAGENTS_DIR="${RAGENTS_SRC_DIR:-${ROOT_DIR}/../ragents}"
 if [ -d "${RAGENTS_DIR}/extensions" ]; then
-  for ext in authn shell file_editor image_viewer skills compaction; do
+  for ext in authn shell file_editor image_viewer agents_md skills compaction; do
     wasm_file="${RAGENTS_DIR}/extensions/${ext}/target/wasm32-wasip2/release/ragent_${ext}_extension.wasm"
     if [ -f "${wasm_file}" ]; then
       cp "${wasm_file}" "${BUNDLE_WASM_DIR}/"
