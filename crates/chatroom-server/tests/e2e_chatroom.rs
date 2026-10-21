@@ -324,6 +324,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         default_system_prompt: "You are a helpful agent.".to_string(),
         default_model: Some("gpt-4.1-mini".to_string()),
         temp_root_dir: tmp.path().join("daemon_tmp"),
+        extensions_dir: chatroom_wasm_path().parent().unwrap().to_path_buf(),
         allowed_workspace_dirs: parse_workspace_dirs_csv("/a/b/c,/a/b/d"),
         labels: BTreeMap::new(),
         auto_discover_models: false,
@@ -349,8 +350,6 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         chat_store.clone(),
         ragents_client.clone(),
         callback_base_url.clone(),
-        chatroom_wasm_path(),
-        None,
     );
     let chat_state = ChatServerState {
         coordinator: coordinator.clone(),
@@ -848,6 +847,7 @@ async fn test_live_multi_agent_chatroom_when_env_present() {
         default_system_prompt: "You are a helpful AI agent.".to_string(),
         default_model: Some(model_name.clone()),
         temp_root_dir: tmp.path().join("daemon_tmp"),
+        extensions_dir: chatroom_wasm_path().parent().unwrap().to_path_buf(),
         allowed_workspace_dirs: default_allowed_workspace_dirs(),
         labels: BTreeMap::new(),
         auto_discover_models: true,
@@ -873,8 +873,6 @@ async fn test_live_multi_agent_chatroom_when_env_present() {
         chat_store.clone(),
         ragents_client.clone(),
         callback_base_url.clone(),
-        chatroom_wasm_path(),
-        None,
     );
     let chat_state = ChatServerState {
         coordinator: coordinator.clone(),

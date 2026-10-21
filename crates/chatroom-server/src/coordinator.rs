@@ -7,7 +7,7 @@ use ragents_client::RagentsClient;
 use ragents_protocol::*;
 use rand::Rng;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -38,8 +38,6 @@ pub struct RoomCoordinator {
     pub store: ChatroomStore,
     pub ragents_client: RagentsClient,
     pub callback_base_url: String,
-    pub chatroom_wasm_path: PathBuf,
-    pub compaction_wasm_path: Option<PathBuf>,
     pub room_event_tx: broadcast::Sender<ChatroomEvent>,
     pub inspector_event_tx: broadcast::Sender<SessionEventEnvelope>,
     direct_mentions: Arc<Mutex<HashMap<String, DirectMentionState>>>,
@@ -58,8 +56,6 @@ impl RoomCoordinator {
         store: ChatroomStore,
         ragents_client: RagentsClient,
         callback_base_url: String,
-        chatroom_wasm_path: PathBuf,
-        compaction_wasm_path: Option<PathBuf>,
     ) -> Self {
         let (room_event_tx, _) = broadcast::channel(1024);
         let (inspector_event_tx, _) = broadcast::channel(2048);
@@ -67,8 +63,6 @@ impl RoomCoordinator {
             store,
             ragents_client,
             callback_base_url,
-            chatroom_wasm_path,
-            compaction_wasm_path,
             room_event_tx,
             inspector_event_tx,
             direct_mentions: Arc::new(Mutex::new(HashMap::new())),
@@ -1031,20 +1025,14 @@ impl RoomCoordinator {
         );
 
         let mut extensions = Vec::new();
-        if let Some(ref compact_wasm) = self.compaction_wasm_path {
-            if compact_wasm.exists() {
-                extensions.push(ExtensionSpec {
-                    name: "compaction".to_string(),
-                    path: compact_wasm.to_string_lossy().to_string(),
-                    enabled: true,
-                    config: serde_json::json!({
-                        "enabled": true,
-                        "trigger_tokens": 400000,
-                        "keep_recent_tokens": 64000
-                    }),
-                    allowed_dirs: vec![],
-                });
-            }
+        if let Some(compact_ext) = mgr
+            .default_extensions
+            .iter()
+            .find(|e| e.name == "compaction" && e.enabled)
+        {
+            let mut ext = compact_ext.clone();
+            ext.path = String::new();
+            extensions.push(ext);
         }
 
         let base = self.callback_base_url.trim_end_matches('/');
@@ -1054,7 +1042,7 @@ impl RoomCoordinator {
 
         extensions.push(ExtensionSpec {
             name: "chatroom".to_string(),
-            path: self.chatroom_wasm_path.to_string_lossy().to_string(),
+            path: String::new(),
             enabled: true,
             config: serde_json::json!({
                 "is_manager": true,
@@ -1276,21 +1264,8 @@ impl RoomCoordinator {
 
         let mut extensions = mgr.default_extensions;
         extensions.retain(|e| e.name != "chatroom");
-
-        if let Some(ref compact_wasm) = self.compaction_wasm_path {
-            if compact_wasm.exists() && !extensions.iter().any(|e| e.name == "compaction") {
-                extensions.push(ExtensionSpec {
-                    name: "compaction".to_string(),
-                    path: compact_wasm.to_string_lossy().to_string(),
-                    enabled: true,
-                    config: serde_json::json!({
-                        "enabled": true,
-                        "trigger_tokens": 400000,
-                        "keep_recent_tokens": 64000
-                    }),
-                    allowed_dirs: vec![],
-                });
-            }
+        for ext in &mut extensions {
+            ext.path = String::new();
         }
 
         let callback_url = format!(
@@ -1299,7 +1274,7 @@ impl RoomCoordinator {
         );
         extensions.push(ExtensionSpec {
             name: "chatroom".to_string(),
-            path: self.chatroom_wasm_path.to_string_lossy().to_string(),
+            path: String::new(),
             enabled: true,
             config: serde_json::json!({
                 "chatroom_callback_url": callback_url,

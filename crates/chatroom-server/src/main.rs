@@ -39,18 +39,6 @@ struct Cli {
     /// Default LLM model for Manager and newly created Agents
     #[arg(long, env = "RAGENTS_MODEL")]
     default_model: Option<String>,
-
-    /// Path to compiled `ragent_chatroom_extension.wasm`
-    #[arg(long)]
-    chatroom_wasm: Option<PathBuf>,
-
-    /// Path to compiled `ragent_compaction_extension.wasm`
-    #[arg(long)]
-    compaction_wasm: Option<PathBuf>,
-
-    /// Directory containing standard `ragents` WASM extensions (`shell`, `file_editor`, etc.)
-    #[arg(long)]
-    extensions_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -67,35 +55,54 @@ async fn main() -> anyhow::Result<()> {
         .default_model
         .unwrap_or_else(|| "gpt-4.1-mini".to_string());
 
-    let mut default_extensions = Vec::new();
-    if let Some(ref ext_dir) = cli.extensions_dir {
-        for (name, filename) in [
-            ("agents_md", "ragent_agents_md_extension.wasm"),
-            ("skills", "ragent_skills_extension.wasm"),
-            ("shell", "ragent_shell_extension.wasm"),
-            ("file_editor", "ragent_file_editor_extension.wasm"),
-            ("image_viewer", "ragent_image_viewer_extension.wasm"),
-        ] {
-            let flat = ext_dir.join(filename);
-            let nested = ext_dir.join(format!("{name}/target/wasm32-wasip2/release/{filename}"));
-            let found = if flat.exists() {
-                Some(flat)
-            } else if nested.exists() {
-                Some(nested)
-            } else {
-                None
-            };
-            if let Some(wasm_path) = found {
-                default_extensions.push(ExtensionSpec {
-                    name: name.to_string(),
-                    path: wasm_path.to_string_lossy().to_string(),
-                    enabled: true,
-                    config: serde_json::json!({}),
-                    allowed_dirs: vec![],
-                });
-            }
-        }
-    }
+    let default_extensions = vec![
+        ExtensionSpec {
+            name: "agents_md".to_string(),
+            path: String::new(),
+            enabled: true,
+            config: serde_json::json!({}),
+            allowed_dirs: vec![],
+        },
+        ExtensionSpec {
+            name: "skills".to_string(),
+            path: String::new(),
+            enabled: true,
+            config: serde_json::json!({}),
+            allowed_dirs: vec![],
+        },
+        ExtensionSpec {
+            name: "shell".to_string(),
+            path: String::new(),
+            enabled: true,
+            config: serde_json::json!({}),
+            allowed_dirs: vec![],
+        },
+        ExtensionSpec {
+            name: "file_editor".to_string(),
+            path: String::new(),
+            enabled: true,
+            config: serde_json::json!({}),
+            allowed_dirs: vec![],
+        },
+        ExtensionSpec {
+            name: "image_viewer".to_string(),
+            path: String::new(),
+            enabled: true,
+            config: serde_json::json!({}),
+            allowed_dirs: vec![],
+        },
+        ExtensionSpec {
+            name: "compaction".to_string(),
+            path: String::new(),
+            enabled: true,
+            config: serde_json::json!({
+                "enabled": true,
+                "trigger_tokens": 400000,
+                "keep_recent_tokens": 64000
+            }),
+            allowed_dirs: vec![],
+        },
+    ];
 
     let store = ChatroomStore::open(&cli.db, &default_model, default_extensions.clone())?;
     store.update_manager_settings(UpdateManagerSettingsRequest {
@@ -105,33 +112,12 @@ async fn main() -> anyhow::Result<()> {
         default_reasoning_effort: None,
         default_reasoning_summary: None,
         default_web_search: None,
-        default_extensions: if default_extensions.is_empty() {
-            None
-        } else {
-            Some(default_extensions)
-        },
+        default_extensions: Some(default_extensions),
         default_node_id: None,
         default_workspace_root: None,
         idle_peek_debounce_ms: None,
         max_agent_relay_depth: None,
     })?;
-
-    let chatroom_wasm = cli.chatroom_wasm.unwrap_or_else(|| {
-        PathBuf::from("extensions/chatroom/target/wasm32-wasip2/release/ragent_chatroom_extension.wasm")
-            .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from("extensions/chatroom/target/wasm32-wasip2/release/ragent_chatroom_extension.wasm"))
-    });
-
-    let compaction_wasm = cli.compaction_wasm.or_else(|| {
-        cli.extensions_dir.as_ref().and_then(|dir| {
-            let flat = dir.join("ragent_compaction_extension.wasm");
-            if flat.exists() {
-                Some(flat)
-            } else {
-                None
-            }
-        })
-    });
 
     let listener = TcpListener::bind(&cli.listen).await?;
     let local_addr = listener.local_addr()?;
@@ -142,13 +128,7 @@ async fn main() -> anyhow::Result<()> {
     let ragents_client =
         RagentsClient::new(cli.ragents_url.clone()).with_auth_token(cli.ragents_token.clone());
 
-    let coordinator = RoomCoordinator::new(
-        store,
-        ragents_client,
-        callback_base_url.clone(),
-        chatroom_wasm,
-        compaction_wasm,
-    );
+    let coordinator = RoomCoordinator::new(store, ragents_client, callback_base_url.clone());
 
     let state = ChatServerState {
         coordinator,

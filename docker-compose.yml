@@ -70,18 +70,10 @@ services:
       - /var/lib/ragents-chat/chatroom.sqlite
       - --ragents-url
       - http://ragents-apiserver:8080
-      - --chatroom-wasm
-      - /etc/ragents/wasm/ragent_chatroom_extension.wasm
-      - --compaction-wasm
-      - /etc/ragents/wasm/ragent_compaction_extension.wasm
-      - --extensions-dir
-      - /etc/ragents/wasm
     environment:
       - RAGENTS_AUTH_TOKEN=${RAGENTS_AUTH_TOKEN:-ragents-dev-cluster-token}
       - RAGENTS_CHAT_AUTH_TOKEN=${RAGENTS_CHAT_AUTH_TOKEN:-}
       - RAGENTS_MODEL=${RAGENTS_MODEL:-gemini-3.8-flash}
-    volumes:
-      - ./bundle:/etc/ragents:ro
     ports:
       - "8090:8090"
     restart: unless-stopped
