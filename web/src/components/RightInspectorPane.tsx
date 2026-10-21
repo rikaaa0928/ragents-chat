@@ -35,6 +35,8 @@ import {
   Zap,
   Clock,
   ArrowDown,
+  Copy,
+  Check,
 } from 'lucide-react';
 import {
   Room,
@@ -173,6 +175,101 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   // Prompt Editor Local Form State
   const [roleDraft, setRoleDraft] = useState('');
   const [promptDraft, setPromptDraft] = useState('');
+  const [copiedBlockId, setCopiedBlockId] = useState<string | null>(null);
+
+  const formatValueAsYaml = (val: unknown, indent = 0): string => {
+    const pad = '  '.repeat(indent);
+    if (val === null || val === undefined) return 'null';
+    if (typeof val === 'boolean' || typeof val === 'number') return String(val);
+    if (typeof val === 'string') {
+      if (val === '') return '""';
+      const normalized = val.replace(/\r\n/g, '\n');
+      if (normalized.includes('\n')) {
+        const childPad = '  '.repeat(indent + 1);
+        return (
+          '|\n' +
+          normalized
+            .split('\n')
+            .map((line) => `${childPad}${line}`)
+            .join('\n')
+        );
+      }
+      return normalized;
+    }
+    if (Array.isArray(val)) {
+      if (val.length === 0) return '[]';
+      return val
+        .map((entry) => {
+          if (
+            entry === null ||
+            entry === undefined ||
+            typeof entry === 'boolean' ||
+            typeof entry === 'number'
+          ) {
+            return `${pad}- ${String(entry)}`;
+          }
+          if (typeof entry === 'string') {
+            const norm = entry.replace(/\r\n/g, '\n');
+            if (!norm.includes('\n')) {
+              return `${pad}- ${norm === '' ? '""' : norm}`;
+            }
+            const childPad = '  '.repeat(indent + 1);
+            return (
+              `${pad}- |\n` +
+              norm
+                .split('\n')
+                .map((l) => `${childPad}${l}`)
+                .join('\n')
+            );
+          }
+          const nested = formatValueAsYaml(entry, indent + 1);
+          return `${pad}-\n${nested}`;
+        })
+        .join('\n');
+    }
+    if (typeof val === 'object') {
+      const entries = Object.entries(val as Record<string, unknown>);
+      if (entries.length === 0) return '{}';
+      return entries
+        .map(([k, v]) => {
+          if (
+            v === null ||
+            v === undefined ||
+            typeof v === 'boolean' ||
+            typeof v === 'number'
+          ) {
+            return `${pad}${k}: ${String(v)}`;
+          }
+          if (typeof v === 'string') {
+            const norm = v.replace(/\r\n/g, '\n');
+            if (!norm.includes('\n')) {
+              return `${pad}${k}: ${norm === '' ? '""' : norm}`;
+            }
+            const childPad = '  '.repeat(indent + 1);
+            return (
+              `${pad}${k}: |\n` +
+              norm
+                .split('\n')
+                .map((l) => `${childPad}${l}`)
+                .join('\n')
+            );
+          }
+          if (Array.isArray(v) && v.length === 0) {
+            return `${pad}${k}: []`;
+          }
+          if (
+            typeof v === 'object' &&
+            !Array.isArray(v) &&
+            Object.keys(v as Record<string, unknown>).length === 0
+          ) {
+            return `${pad}${k}: {}`;
+          }
+          return `${pad}${k}:\n${formatValueAsYaml(v, indent + 1)}`;
+        })
+        .join('\n');
+    }
+    return String(val);
+  };
 
   const logScrollRef = useRef<HTMLDivElement | null>(null);
   const flowScrollRef = useRef<HTMLDivElement | null>(null);
@@ -1567,6 +1664,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                     let title = 'Context';
                     let preview = rawText.replace(/\s+/g, ' ').slice(0, 68);
                     let bodyContent = rawText;
+                    let rawJsonForCopy: string | null = null;
                     let badgeColor = 'text-emerald-600 dark:text-emerald-400';
 
                     if (isCompaction) {
@@ -1589,27 +1687,46 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                       title = `ToolCall: ${String(item.name || 'tool')}${
                         item.duration_ms ? ` (${item.duration_ms}ms)` : ''
                       }`;
-                      let formattedArgs =
-                        typeof item.arguments === 'string'
-                          ? item.arguments
-                          : JSON.stringify(item.arguments || {}, null, 2);
-                      try {
-                        formattedArgs = JSON.stringify(
-                          JSON.parse(formattedArgs),
-                          null,
-                          2
-                        );
-                      } catch (_) {}
-                      bodyContent = formattedArgs;
+                      let parsedArgs: unknown = item.arguments ?? {};
+                      if (typeof item.arguments === 'string') {
+                        try {
+                          parsedArgs = JSON.parse(item.arguments);
+                        } catch (_) {
+                          parsedArgs = item.arguments;
+                        }
+                      }
+                      rawJsonForCopy =
+                        typeof parsedArgs === 'string'
+                          ? parsedArgs
+                          : JSON.stringify(parsedArgs, null, 2);
+                      bodyContent = formatValueAsYaml(parsedArgs);
                       preview = bodyContent.replace(/\s+/g, ' ').slice(0, 60);
                       badgeColor = 'text-blue-600 dark:text-blue-400';
                     } else if (item.type === 'function_call_output') {
                       icon = <Terminal className="w-3.5 h-3.5 text-cyan-500 shrink-0" />;
                       title = `ToolResult${item.name ? `: ${String(item.name)}` : ''}`;
+                      let parsedOut: unknown = item.output ?? '';
+                      if (typeof item.output === 'string') {
+                        const trimmedOut = item.output.trim();
+                        if (
+                          (trimmedOut.startsWith('{') && trimmedOut.endsWith('}')) ||
+                          (trimmedOut.startsWith('[') && trimmedOut.endsWith(']'))
+                        ) {
+                          try {
+                            parsedOut = JSON.parse(trimmedOut);
+                          } catch (_) {
+                            parsedOut = item.output;
+                          }
+                        }
+                      }
+                      rawJsonForCopy =
+                        typeof parsedOut === 'string'
+                          ? JSON.stringify({ output: parsedOut }, null, 2)
+                          : JSON.stringify(parsedOut, null, 2);
                       bodyContent =
-                        typeof item.output === 'string'
-                          ? item.output
-                          : JSON.stringify(item.output ?? '', null, 2);
+                        typeof parsedOut === 'string'
+                          ? parsedOut
+                          : formatValueAsYaml(parsedOut);
                       preview = bodyContent.replace(/\s+/g, ' ').slice(0, 60);
                       badgeColor = 'text-cyan-600 dark:text-cyan-400';
                     } else if (item.type === 'web_search_call') {
@@ -1622,14 +1739,12 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                           ? action.queries.join(' | ')
                           : '';
                       title = `WebSearch${query ? `: ${query.slice(0, 38)}` : ''}`;
-                      bodyContent = JSON.stringify(
-                        {
-                          status: item.status || 'completed',
-                          action,
-                        },
-                        null,
-                        2
-                      );
+                      const wsPayload = {
+                        status: item.status || 'completed',
+                        action,
+                      };
+                      rawJsonForCopy = JSON.stringify(wsPayload, null, 2);
+                      bodyContent = formatValueAsYaml(wsPayload);
                       preview = query || bodyContent.replace(/\s+/g, ' ').slice(0, 60);
                       badgeColor = 'text-sky-600 dark:text-sky-400';
                     } else if (item.type === 'message') {
@@ -1678,9 +1793,46 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                               </span>
                             )}
                           </div>
-                          <span className="text-[10px] text-[var(--text-muted)] shrink-0">
-                            {lineCount}行
-                          </span>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {rawJsonForCopy !== null && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  navigator.clipboard
+                                    .writeText(rawJsonForCopy!)
+                                    .then(() => {
+                                      setCopiedBlockId(blockId);
+                                      setTimeout(() => {
+                                        setCopiedBlockId((cur) =>
+                                          cur === blockId ? null : cur
+                                        );
+                                      }, 1500);
+                                    })
+                                    .catch(() => {});
+                                }}
+                                className="px-1.5 py-0.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] text-[10px] font-mono-code text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1 cursor-pointer transition-colors"
+                                title="以标准 JSON 格式复制原始载荷"
+                              >
+                                {copiedBlockId === blockId ? (
+                                  <>
+                                    <Check className="w-2.5 h-2.5 text-emerald-500" />
+                                    <span className="text-emerald-600 dark:text-emerald-400">
+                                      JSON
+                                    </span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="w-2.5 h-2.5" />
+                                    <span>JSON</span>
+                                  </>
+                                )}
+                              </button>
+                            )}
+                            <span className="text-[10px] text-[var(--text-muted)]">
+                              {lineCount}行
+                            </span>
+                          </div>
                         </div>
 
                         {!isCollapsed && (
