@@ -77,6 +77,10 @@ export const App: React.FC = () => {
   const [peekStatusBanner, setPeekStatusBanner] = useState('');
   const [liveReasoningBuffer, setLiveReasoningBuffer] = useState('');
   const [liveStreamBuffer, setLiveStreamBuffer] = useState('');
+  const [restoredDraft, setRestoredDraft] = useState<{
+    text: string;
+    seq: number;
+  } | null>(null);
 
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [clusterNodes, setClusterNodes] = useState<ClusterNode[]>([]);
@@ -338,6 +342,21 @@ export const App: React.FC = () => {
                   : item
               )
             );
+            if (inspectedAgentIdRef.current) {
+              refreshInspectorSnapshot(
+                inspectedAgentIdRef.current,
+                inspectedSessionIdRef.current,
+                false
+              );
+            }
+          } else if (ev.type === 'message_withdrawn') {
+            setCurrentDetail((prev) => {
+              if (!prev || prev.room.room_id !== roomId) return prev;
+              return {
+                ...prev,
+                messages: prev.messages.filter((m) => m.msg_seq !== ev.msg_seq),
+              };
+            });
             if (inspectedAgentIdRef.current) {
               refreshInspectorSnapshot(
                 inspectedAgentIdRef.current,
@@ -696,6 +715,7 @@ export const App: React.FC = () => {
           onSendMessage={handleSendMessage}
           onInspectAgent={(id) => handleInspectAgent(id, undefined, true)}
           onOpenRecruitModal={() => setActiveModal('recruit')}
+          restoredDraft={restoredDraft}
         />
       </main>
 
@@ -774,6 +794,36 @@ export const App: React.FC = () => {
         }}
         onCancelAgent={async (agentId) => {
           await apiFetch(`/api/v1/agents/${agentId}/cancel`, { method: 'POST' });
+        }}
+        onWithdrawQueuedMessage={async (agentId, msgSeq) => {
+          const res = await apiFetch(
+            `/api/v1/agents/${agentId}/queue/${msgSeq}/withdraw`,
+            { method: 'POST' }
+          );
+          if (res?.message_queues) {
+            setInspectorSnap((prev) =>
+              prev && prev.agent.agent_id === agentId
+                ? { ...prev, message_queues: res.message_queues }
+                : prev
+            );
+          }
+          setCurrentDetail((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  messages: prev.messages.filter((m) => m.msg_seq !== msgSeq),
+                }
+              : prev
+          );
+          if (
+            res?.withdrawn_message?.sender_kind === 'human' &&
+            res?.withdrawn_message?.content
+          ) {
+            setRestoredDraft({
+              text: String(res.withdrawn_message.content),
+              seq: Date.now(),
+            });
+          }
         }}
       />
 

@@ -958,6 +958,73 @@ You manage the room's specialist agent roster using your tools:\n\
             })
             .collect())
     }
+
+    pub fn set_agent_last_delivered_seq(
+        &self,
+        agent_id: &str,
+        delivered_seq: u64,
+    ) -> Result<RoomAgent, ChatStoreError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "UPDATE room_agents SET last_delivered_seq = ?1 WHERE agent_id = ?2",
+            params![delivered_seq as i64, agent_id],
+        )?;
+        drop(conn);
+        self.get_agent(agent_id)?
+            .ok_or_else(|| ChatStoreError::NotFound(format!("agent {agent_id}")))
+    }
+
+    pub fn get_room_message(
+        &self,
+        room_id: &str,
+        msg_seq: u64,
+    ) -> Result<Option<RoomMessage>, ChatStoreError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.query_row(
+            "SELECT room_id, msg_seq, message_id, sender_kind, sender_id, sender_name,
+                    content, mentions_json, visible_to_json, reply_to_seq, is_realtime, source_session_id, source_activation_id, created_at
+             FROM room_messages WHERE room_id = ?1 AND msg_seq = ?2",
+            params![room_id, msg_seq as i64],
+            |r| {
+                let mentions_str: String = r.get(7)?;
+                let visible_str: String = r.get(8)?;
+                Ok(RoomMessage {
+                    room_id: r.get(0)?,
+                    msg_seq: r.get::<_, i64>(1)? as u64,
+                    message_id: r.get(2)?,
+                    sender_kind: SenderKind::from_str(&r.get::<_, String>(3)?),
+                    sender_id: r.get(4)?,
+                    sender_name: r.get(5)?,
+                    content: r.get(6)?,
+                    mentions: serde_json::from_str(&mentions_str).unwrap_or_default(),
+                    visible_to: serde_json::from_str(&visible_str).unwrap_or_default(),
+                    reply_to_seq: r.get::<_, Option<i64>>(9)?.map(|s| s as u64),
+                    is_realtime: r.get::<_, i64>(10).unwrap_or(0) != 0,
+                    source_session_id: r.get::<_, Option<String>>(11)?.map(SessionId::new),
+                    source_activation_id: r.get::<_, Option<String>>(12)?.map(ActivationId::new),
+                    created_at: parse_dt(&r.get::<_, String>(13)?),
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn delete_room_message(
+        &self,
+        room_id: &str,
+        msg_seq: u64,
+    ) -> Result<Option<RoomMessage>, ChatStoreError> {
+        let existing = self.get_room_message(room_id, msg_seq)?;
+        if existing.is_some() {
+            let conn = self.conn.lock().expect("store mutex poisoned");
+            conn.execute(
+                "DELETE FROM room_messages WHERE room_id = ?1 AND msg_seq = ?2",
+                params![room_id, msg_seq as i64],
+            )?;
+        }
+        Ok(existing)
+    }
 }
 
 fn parse_dt(s: &str) -> DateTime<Utc> {

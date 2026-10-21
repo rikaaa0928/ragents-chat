@@ -465,6 +465,11 @@ pub enum ChatroomEvent {
         room_id: String,
         message: RoomMessage,
     },
+    MessageWithdrawn {
+        room_id: String,
+        msg_seq: u64,
+        withdrawn_message: RoomMessage,
+    },
     AgentUpdated {
         room_id: String,
         agent: RoomAgentPublic,
@@ -516,4 +521,10 @@ pub struct ApproveAgentPermissionRequest {
     pub decision: PermissionDecision,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub override_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WithdrawQueuedMessageResponse {
+    pub withdrawn_message: RoomMessage,
+    pub message_queues: AgentMessageQueueSnapshot,
 }

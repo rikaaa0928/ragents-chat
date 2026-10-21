@@ -48,7 +48,7 @@ pub struct RoomCoordinator {
     agent_token_usage: Arc<Mutex<HashMap<String, AgentTokenUsage>>>,
     seen_usage_rvs: Arc<Mutex<HashSet<u64>>>,
     hydrated_usage_agents: Arc<Mutex<HashSet<String>>>,
-    pending_realtime_seqs: Arc<Mutex<HashMap<String, HashSet<u64>>>>,
+    pending_realtime_seqs: Arc<Mutex<HashMap<String, Vec<(Vec<i64>, Vec<u64>)>>>>,
     pending_normal_activations: Arc<Mutex<HashMap<String, Vec<(ActivationId, Vec<u64>)>>>>,
     started_activation_ids: Arc<Mutex<HashSet<ActivationId>>>,
 }
@@ -228,7 +228,11 @@ impl RoomCoordinator {
             .lock()
             .expect("pending_realtime_seqs mutex poisoned")
             .get(&agent.agent_id)
-            .cloned()
+            .map(|list| {
+                list.iter()
+                    .flat_map(|(_, seqs)| seqs.iter().copied())
+                    .collect()
+            })
             .unwrap_or_default();
 
         let started_global = self
@@ -329,6 +333,145 @@ impl RoomCoordinator {
             realtime_messages,
             normal_messages,
         }
+    }
+
+    pub async fn withdraw_agent_queued_message(
+        &self,
+        agent_id: &str,
+        msg_seq: u64,
+    ) -> anyhow::Result<WithdrawQueuedMessageResponse> {
+        let agent = self
+            .store
+            .get_agent(agent_id)?
+            .ok_or_else(|| anyhow::anyhow!("Agent {agent_id} 不存在"))?;
+        let msg = self
+            .store
+            .get_room_message(&agent.room_id, msg_seq)?
+            .ok_or_else(|| anyhow::anyhow!("消息 #{msg_seq} 不存在或已被撤回"))?;
+
+        let normal_match = self
+            .pending_normal_activations
+            .lock()
+            .expect("pending_normal_activations mutex poisoned")
+            .get(&agent.agent_id)
+            .and_then(|list| {
+                list.iter()
+                    .find(|(_, seqs)| seqs.contains(&msg_seq))
+                    .cloned()
+            });
+
+        let realtime_match = self
+            .pending_realtime_seqs
+            .lock()
+            .expect("pending_realtime_seqs mutex poisoned")
+            .get(&agent.agent_id)
+            .and_then(|list| {
+                list.iter()
+                    .find(|(_, seqs)| seqs.contains(&msg_seq))
+                    .cloned()
+            });
+
+        if let Some((act_id, seqs)) = normal_match {
+            if self
+                .ragents_client
+                .withdraw_queued_activation(&act_id)
+                .await
+                .is_err()
+            {
+                if let Some(list) = self
+                    .pending_normal_activations
+                    .lock()
+                    .expect("pending_normal_activations mutex poisoned")
+                    .get_mut(&agent.agent_id)
+                {
+                    list.retain(|(id, _)| id != &act_id);
+                }
+                anyhow::bail!("该排队消息已进入执行阶段，无法撤回");
+            }
+            if let Some(list) = self
+                .pending_normal_activations
+                .lock()
+                .expect("pending_normal_activations mutex poisoned")
+                .get_mut(&agent.agent_id)
+            {
+                list.retain(|(id, _)| id != &act_id);
+            }
+            if seqs.iter().any(|&s| s < msg_seq) {
+                let rollback_seq = seqs.iter().copied().min().unwrap_or(msg_seq).saturating_sub(1);
+                let _ = self
+                    .store
+                    .set_agent_last_delivered_seq(&agent.agent_id, rollback_seq);
+            } else if agent.last_delivered_seq == msg_seq {
+                let _ = self
+                    .store
+                    .set_agent_last_delivered_seq(&agent.agent_id, msg_seq.saturating_sub(1));
+            }
+        } else if let Some((rt_ids, seqs)) = realtime_match {
+            let withdraw_res = self
+                .ragents_client
+                .withdraw_realtime_messages(
+                    &agent.active_session_id,
+                    WithdrawRealtimeMessageRequest {
+                        message_ids: rt_ids.clone(),
+                    },
+                )
+                .await;
+            let removed = withdraw_res.map(|r| r.removed_count).unwrap_or(0);
+            if let Some(list) = self
+                .pending_realtime_seqs
+                .lock()
+                .expect("pending_realtime_seqs mutex poisoned")
+                .get_mut(&agent.agent_id)
+            {
+                list.retain(|(_, s)| !s.contains(&msg_seq));
+            }
+            if removed == 0 {
+                anyhow::bail!("该实时排队消息已被 Agent 读取，无法撤回");
+            }
+            if seqs.iter().any(|&s| s < msg_seq) {
+                let rollback_seq = seqs.iter().copied().min().unwrap_or(msg_seq).saturating_sub(1);
+                let _ = self
+                    .store
+                    .set_agent_last_delivered_seq(&agent.agent_id, rollback_seq);
+            } else if agent.last_delivered_seq == msg_seq {
+                let _ = self
+                    .store
+                    .set_agent_last_delivered_seq(&agent.agent_id, msg_seq.saturating_sub(1));
+            }
+        } else if msg_seq <= agent.last_delivered_seq {
+            anyhow::bail!("该消息已被 Agent 读取或不在排队队列中，无法撤回");
+        }
+
+        let _ = self.store.delete_room_message(&agent.room_id, msg_seq)?;
+        let updated_agent = self.store.get_agent(agent_id)?.unwrap_or(agent);
+        let events = self
+            .ragents_client
+            .read_events(Some(&updated_agent.active_session_id), 0)
+            .await
+            .unwrap_or_default();
+        let message_queues = self.build_agent_message_queues(&updated_agent, &events);
+
+        self.emit_room_event(ChatroomEvent::MessageWithdrawn {
+            room_id: updated_agent.room_id.clone(),
+            msg_seq,
+            withdrawn_message: msg.clone(),
+        });
+        self.emit_room_event(ChatroomEvent::AgentUpdated {
+            room_id: updated_agent.room_id.clone(),
+            agent: self.to_agent_public(updated_agent.clone()),
+        });
+        self.emit_flow_status(
+            &updated_agent.room_id,
+            format!(
+                "[↩️ 消息撤回] 已从 @{} 的未读排队队列撤回消息 #{}",
+                updated_agent.name, msg_seq
+            ),
+        );
+
+        Ok(WithdrawQueuedMessageResponse {
+            withdrawn_message: msg,
+            message_queues,
+        })
     }
 
     pub fn emit_flow_status(&self, room_id: &str, status: impl Into<String>) {
@@ -1886,7 +2029,7 @@ impl RoomCoordinator {
                 rt_guard
                     .entry(target_agent.agent_id.clone())
                     .or_default()
-                    .extend(unread_seqs.iter().copied());
+                    .push((Vec::new(), unread_seqs.clone()));
             }
 
             let resp = match self
@@ -1900,16 +2043,32 @@ impl RoomCoordinator {
                 )
                 .await
             {
-                Ok(r) => r,
-                Err(e) => {
-                    if let Some(set) = self
+                Ok(r) => {
+                    if let Some(list) = self
                         .pending_realtime_seqs
                         .lock()
                         .expect("pending_realtime_seqs mutex poisoned")
                         .get_mut(&target_agent.agent_id)
                     {
-                        for seq in &unread_seqs {
-                            set.remove(seq);
+                        if let Some(entry) = list
+                            .iter_mut()
+                            .rev()
+                            .find(|(ids, seqs)| ids.is_empty() && *seqs == unread_seqs)
+                        {
+                            entry.0 = r.inserted_ids.clone();
+                        }
+                    }
+                    r
+                }
+                Err(e) => {
+                    if let Some(list) = self
+                        .pending_realtime_seqs
+                        .lock()
+                        .expect("pending_realtime_seqs mutex poisoned")
+                        .get_mut(&target_agent.agent_id)
+                    {
+                        if let Some(pos) = list.iter().rposition(|(_, seqs)| *seqs == unread_seqs) {
+                            list.remove(pos);
                         }
                     }
                     return Err(e.into());
@@ -2085,7 +2244,7 @@ impl RoomCoordinator {
                 rt_guard
                     .entry(mgr_agent.agent_id.clone())
                     .or_default()
-                    .extend(unread_seqs.iter().copied());
+                    .push((Vec::new(), unread_seqs.clone()));
             }
 
             let resp = match self
@@ -2099,16 +2258,32 @@ impl RoomCoordinator {
                 )
                 .await
             {
-                Ok(r) => r,
-                Err(e) => {
-                    if let Some(set) = self
+                Ok(r) => {
+                    if let Some(list) = self
                         .pending_realtime_seqs
                         .lock()
                         .expect("pending_realtime_seqs mutex poisoned")
                         .get_mut(&mgr_agent.agent_id)
                     {
-                        for seq in &unread_seqs {
-                            set.remove(seq);
+                        if let Some(entry) = list
+                            .iter_mut()
+                            .rev()
+                            .find(|(ids, seqs)| ids.is_empty() && *seqs == unread_seqs)
+                        {
+                            entry.0 = r.inserted_ids.clone();
+                        }
+                    }
+                    r
+                }
+                Err(e) => {
+                    if let Some(list) = self
+                        .pending_realtime_seqs
+                        .lock()
+                        .expect("pending_realtime_seqs mutex poisoned")
+                        .get_mut(&mgr_agent.agent_id)
+                    {
+                        if let Some(pos) = list.iter().rposition(|(_, seqs)| *seqs == unread_seqs) {
+                            list.remove(pos);
                         }
                     }
                     return Err(e.into());

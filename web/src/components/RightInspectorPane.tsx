@@ -113,6 +113,7 @@ interface RightInspectorPaneProps {
     overridePath: string | null
   ) => void;
   onCancelAgent: (agentId: string) => void;
+  onWithdrawQueuedMessage: (agentId: string, msgSeq: number) => void;
 }
 
 export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
@@ -139,6 +140,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   onUpdateAgentConfig,
   onResolvePermission,
   onCancelAgent,
+  onWithdrawQueuedMessage,
 }) => {
   // Inspector Column Width Mode: standard (430px) or wide (580px)
   const [wideMode, setWideMode] = useState(false);
@@ -1331,10 +1333,26 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                                   )}
                                 </div>
 
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[9.5px] font-semibold shrink-0 bg-amber-500 text-black">
-                                  <span className="w-1.5 h-1.5 rounded-full bg-black animate-ping" />
-                                  <span>{entry.status_label}</span>
-                                </span>
+                                <div className="flex items-center gap-1 shrink-0">
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[9.5px] font-semibold bg-amber-500 text-black">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-black animate-ping" />
+                                    <span>{entry.status_label}</span>
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onWithdrawQueuedMessage(
+                                        inspectedAgent.agent_id,
+                                        entry.msg_seq
+                                      );
+                                    }}
+                                    title="从排队队列中撤回此未读消息"
+                                    className="px-1.5 py-0.2 rounded text-[9.5px] font-semibold bg-red-600/90 hover:bg-red-500 text-white cursor-pointer transition-colors"
+                                  >
+                                    撤回
+                                  </button>
+                                </div>
                               </div>
 
                               <div className="text-[11px] text-[var(--text-primary)] break-words line-clamp-2 font-sans">

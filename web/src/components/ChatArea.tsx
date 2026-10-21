@@ -28,6 +28,7 @@ interface ChatAreaProps {
   onSendMessage: (content: string, isRealtime: boolean) => void;
   onInspectAgent: (agentId: string) => void;
   onOpenRecruitModal: () => void;
+  restoredDraft?: { text: string; seq: number } | null;
 }
 
 function stripLeadingRedundantMentions(content: string, mentions: string[]): string {
@@ -58,6 +59,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onSendMessage,
   onInspectAgent,
   onOpenRecruitModal,
+  restoredDraft,
 }) => {
   const [inputText, setInputText] = useState('');
   const [isRealtimeMsg, setIsRealtimeMsg] = useState(false); // 默认为非实时消息
@@ -94,6 +96,16 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     pinnedToBottomRef.current = true;
     scrollToBottom();
   }, [room?.room_id]);
+
+  useEffect(() => {
+    if (!restoredDraft || !restoredDraft.text) return;
+    setInputText((prev) =>
+      prev.trim() ? `${prev}\n${restoredDraft.text}` : restoredDraft.text
+    );
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
+  }, [restoredDraft?.seq]);
 
   useEffect(() => {
     if (pinnedToBottomRef.current || pinnedToBottom) {

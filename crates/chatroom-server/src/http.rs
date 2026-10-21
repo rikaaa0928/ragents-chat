@@ -87,6 +87,10 @@ pub fn build_chat_router(state: ChatServerState) -> Router {
             post(handle_cancel_agent_activation),
         )
         .route(
+            "/api/v1/agents/{agent_id}/queue/{msg_seq}/withdraw",
+            post(handle_withdraw_queued_message),
+        )
+        .route(
             "/api/v1/internal/agent-speak",
             post(handle_internal_agent_speak),
         )
@@ -407,6 +411,7 @@ async fn handle_room_stream(
         while let Ok(ev) = rx.recv().await {
             let ev_room_id = match &ev {
                 ChatroomEvent::MessagePosted { room_id, .. }
+                | ChatroomEvent::MessageWithdrawn { room_id, .. }
                 | ChatroomEvent::AgentUpdated { room_id, .. }
                 | ChatroomEvent::AgentRemoved { room_id, .. }
                 | ChatroomEvent::RoomUpdated { room_id, .. }
@@ -650,6 +655,20 @@ async fn handle_cancel_agent_activation(
             .await;
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+async fn handle_withdraw_queued_message(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Path((agent_id, msg_seq)): Path<(String, u64)>,
+) -> Result<Json<WithdrawQueuedMessageResponse>, ChatApiError> {
+    verify_user_auth(&state, &headers)?;
+    let resp = state
+        .coordinator
+        .withdraw_agent_queued_message(&agent_id, msg_seq)
+        .await
+        .map_err(|e| ChatApiError::Http(StatusCode::CONFLICT, e.to_string()))?;
+    Ok(Json(resp))
 }
 
 async fn handle_internal_agent_speak(
