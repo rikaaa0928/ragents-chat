@@ -925,57 +925,133 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                       </button>
                     </div>
 
-                    {inspector?.session?.status?.latest_prompt_parts && (
-                      <div className="pt-2 border-t border-[var(--border-subtle)] space-y-1.5 text-[11px]">
-                        <div className="font-semibold text-[var(--text-secondary)]">
-                          四段式 System Prompt 实时快照 (api-server SSOT)
-                        </div>
-                        {inspector.session.status.latest_prompt_parts.system_prompt && (
+                    {(() => {
+                      const parts = inspector?.session?.status?.latest_prompt_parts;
+                      const sysPrompt = parts?.system_prompt?.trim() || '';
+                      const nodePrompt = parts?.node_prompt?.trim() || '';
+                      const clientPrompt =
+                        parts?.client_prompt?.trim() ||
+                        inspectedAgent.persona_prompt?.trim() ||
+                        '';
+                      const extEntries = Object.entries(parts?.extension_prompts || {});
+                      const assembledSections = [
+                        sysPrompt,
+                        nodePrompt,
+                        clientPrompt,
+                        ...extEntries.map(([, v]) => v?.trim() || '').filter(Boolean),
+                      ].filter(Boolean);
+                      const assembledFull = assembledSections.join('\n\n');
+
+                      return (
+                        <div className="pt-2 border-t border-[var(--border-subtle)] space-y-1.5 text-[11px]">
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-[var(--text-secondary)]">
+                              四段式 System Prompt 各段配置查看 (SSOT)
+                            </span>
+                            <span className="text-[10px] text-[var(--text-muted)] font-mono-code">
+                              共 {assembledFull.length.toLocaleString()} 字符
+                            </span>
+                          </div>
+
+                          {/* 1. system_prompt */}
                           <details className="rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] p-2">
-                            <summary className="cursor-pointer font-medium text-[var(--text-primary)]">
-                              [1. system_prompt] 集群系统级指令
-                            </summary>
-                            <pre className="mt-1.5 whitespace-pre-wrap break-words font-mono-code text-[10.5px] text-[var(--text-secondary)]">
-                              {inspector.session.status.latest_prompt_parts.system_prompt}
-                            </pre>
-                          </details>
-                        )}
-                        {inspector.session.status.latest_prompt_parts.node_prompt && (
-                          <details className="rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] p-2">
-                            <summary className="cursor-pointer font-medium text-[var(--text-primary)]">
-                              [2. node_prompt] 节点环境指令
-                            </summary>
-                            <pre className="mt-1.5 whitespace-pre-wrap break-words font-mono-code text-[10.5px] text-[var(--text-secondary)]">
-                              {inspector.session.status.latest_prompt_parts.node_prompt}
-                            </pre>
-                          </details>
-                        )}
-                        {Object.entries(
-                          inspector.session.status.latest_prompt_parts.extension_prompts || {}
-                        ).map(([extId, extPrompt]) => (
-                          <details
-                            key={extId}
-                            className="rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] p-2"
-                          >
-                            <summary className="cursor-pointer font-medium text-[var(--text-primary)]">
-                              [4. extension_prompts.{extId}] 插件追加指令
+                            <summary className="cursor-pointer font-medium text-[var(--text-primary)] flex items-center justify-between gap-2">
+                              <span>[1. system_prompt] 集群全局级指令</span>
+                              <span className="text-[10px] font-mono-code text-[var(--text-muted)]">
+                                {sysPrompt ? `${sysPrompt.length} chars` : '未配置 (空)'}
+                              </span>
                             </summary>
                             <pre className="mt-1.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words font-mono-code text-[10.5px] text-[var(--text-secondary)]">
-                              {extPrompt}
+                              {sysPrompt || '(当前集群未配置全局 system_prompt)'}
                             </pre>
                           </details>
-                        ))}
-                        {inspector.session.status.effective_tools &&
-                          inspector.session.status.effective_tools.length > 0 && (
-                            <div className="text-[10.5px] text-[var(--text-muted)] pt-0.5">
-                              当前生效工具 ({inspector.session.status.effective_tools.length}):{' '}
-                              <span className="font-mono-code text-[var(--text-secondary)]">
-                                {inspector.session.status.effective_tools.join(', ')}
+
+                          {/* 2. node_prompt */}
+                          <details
+                            open={Boolean(nodePrompt)}
+                            className="rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] p-2"
+                          >
+                            <summary className="cursor-pointer font-medium text-[var(--text-primary)] flex items-center justify-between gap-2">
+                              <span>[2. node_prompt] 节点环境级指令</span>
+                              <span className="text-[10px] font-mono-code text-[var(--text-muted)]">
+                                {nodePrompt ? `${nodePrompt.length} chars` : '未配置 (空)'}
                               </span>
-                            </div>
+                            </summary>
+                            <pre className="mt-1.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words font-mono-code text-[10.5px] text-[var(--text-secondary)]">
+                              {nodePrompt || '(当前绑定节点未配置 node_prompt)'}
+                            </pre>
+                          </details>
+
+                          {/* 3. client_prompt */}
+                          <details className="rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] p-2">
+                            <summary className="cursor-pointer font-medium text-[var(--text-primary)] flex items-center justify-between gap-2">
+                              <span>[3. client_prompt] 会话/角色人设指令</span>
+                              <span className="text-[10px] font-mono-code text-[var(--text-muted)]">
+                                {clientPrompt ? `${clientPrompt.length} chars` : '未配置 (空)'}
+                              </span>
+                            </summary>
+                            <pre className="mt-1.5 max-h-40 overflow-y-auto whitespace-pre-wrap break-words font-mono-code text-[10.5px] text-[var(--text-secondary)]">
+                              {clientPrompt || '(未设置角色人设 client_prompt)'}
+                            </pre>
+                          </details>
+
+                          {/* 4. extension_prompts */}
+                          {extEntries.length > 0 ? (
+                            extEntries.map(([extId, extPrompt]) => (
+                              <details
+                                key={extId}
+                                className="rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] p-2"
+                              >
+                                <summary className="cursor-pointer font-medium text-[var(--text-primary)] flex items-center justify-between gap-2">
+                                  <span>[4. extension_prompts.{extId}] 扩展指令</span>
+                                  <span className="text-[10px] font-mono-code text-[var(--text-muted)]">
+                                    {(extPrompt || '').length} chars
+                                  </span>
+                                </summary>
+                                <pre className="mt-1.5 max-h-44 overflow-y-auto whitespace-pre-wrap break-words font-mono-code text-[10.5px] text-[var(--text-secondary)]">
+                                  {extPrompt}
+                                </pre>
+                              </details>
+                            ))
+                          ) : (
+                            <details className="rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] p-2">
+                              <summary className="cursor-pointer font-medium text-[var(--text-primary)] flex items-center justify-between gap-2">
+                                <span>[4. extension_prompts] 扩展插件追加指令</span>
+                                <span className="text-[10px] font-mono-code text-[var(--text-muted)]">
+                                  待首次运行生成
+                                </span>
+                              </summary>
+                              <pre className="mt-1.5 whitespace-pre-wrap break-words font-mono-code text-[10.5px] text-[var(--text-muted)]">
+                                (尚未触发首次 Activation 执行 agent.prepare，运行一轮后将自动回写 agents_md / skills / chatroom 等扩展指令)
+                              </pre>
+                            </details>
                           )}
-                      </div>
-                    )}
+
+                          {/* Full assembled prompt preview */}
+                          <details className="rounded-lg bg-[var(--bg-surface)] border border-emerald-500/30 p-2">
+                            <summary className="cursor-pointer font-medium text-emerald-600 dark:text-emerald-400 flex items-center justify-between gap-2">
+                              <span>[完整拼接预览] 最终发往模型的 Instructions</span>
+                              <span className="text-[10px] font-mono-code">
+                                {assembledFull.length} chars
+                              </span>
+                            </summary>
+                            <pre className="mt-1.5 max-h-52 overflow-y-auto whitespace-pre-wrap break-words font-mono-code text-[10.5px] text-[var(--text-secondary)]">
+                              {assembledFull || '(空)'}
+                            </pre>
+                          </details>
+
+                          {inspector?.session?.status?.effective_tools &&
+                            inspector.session.status.effective_tools.length > 0 && (
+                              <div className="text-[10.5px] text-[var(--text-muted)] pt-0.5">
+                                当前生效工具 ({inspector.session.status.effective_tools.length}):{' '}
+                                <span className="font-mono-code text-[var(--text-secondary)]">
+                                  {inspector.session.status.effective_tools.join(', ')}
+                                </span>
+                              </div>
+                            )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
 

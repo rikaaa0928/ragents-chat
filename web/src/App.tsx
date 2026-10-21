@@ -204,6 +204,7 @@ export const App: React.FC = () => {
       const normalized: InspectorSnapshot = {
         agent: snap.agent,
         selected_session_id: snap.selected_session_id,
+        session: snap.session || null,
         can_edit_prompt: Boolean(snap.can_edit_prompt),
         pending_permissions: snap.pending_permissions || [],
         context: {
@@ -778,6 +779,9 @@ export const App: React.FC = () => {
               ),
             };
           });
+          if (inspectedAgentId === agentId) {
+            await refreshInspectorSnapshot(agentId, inspectedSessionId, false);
+          }
         }}
         onResolvePermission={async (actId, reqId, decision, overridePath) => {
           if (!inspectedAgentId) return;
