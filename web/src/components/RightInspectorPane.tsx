@@ -1567,6 +1567,80 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
             })()}
 
             {/* ===============================================================
+                LATEST TASK INTERRUPTED / FAILED BANNER IN INSPECTOR
+                =============================================================== */}
+            {(() => {
+              const allEvents = inspector?.events || [];
+              const terminalEvents = allEvents.filter((env) => {
+                const t = env.event?.type || env.event?.kind;
+                return (
+                  t === 'activation_completed' ||
+                  t === 'activation_interrupted' ||
+                  t === 'activation_failed' ||
+                  t === 'activation_cancelled'
+                );
+              });
+              const latestTerminal =
+                terminalEvents.length > 0
+                  ? terminalEvents[terminalEvents.length - 1]
+                  : null;
+              const latestType =
+                latestTerminal?.event?.type || latestTerminal?.event?.kind;
+              const isInterrupted = latestType === 'activation_interrupted';
+              const isFailed = latestType === 'activation_failed';
+              const reason = isInterrupted
+                ? String(
+                    latestTerminal?.event?.reason ||
+                      inspector?.session?.status?.last_error ||
+                      '任务执行中断'
+                  )
+                : isFailed
+                ? String(
+                    latestTerminal?.event?.error ||
+                      inspector?.session?.status?.last_error ||
+                      '任务执行报错'
+                  )
+                : '';
+
+              if (
+                inspectedAgent.runtime_state === 'idle' &&
+                (isInterrupted || isFailed)
+              ) {
+                return (
+                  <div
+                    className={`px-3.5 py-2 border-b text-[11px] flex items-start gap-2 shrink-0 ${
+                      isInterrupted
+                        ? 'bg-amber-500/12 border-amber-500/35 text-amber-700 dark:text-amber-300'
+                        : 'bg-rose-500/12 border-rose-500/35 text-rose-700 dark:text-rose-300'
+                    }`}
+                  >
+                    <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
+                    <div className="min-w-0 flex-1 space-y-0.5">
+                      <div className="flex items-center justify-between gap-2 font-semibold">
+                        <span>
+                          {isInterrupted
+                            ? '⚠️ 最近一次任务被中断 (Interrupted)'
+                            : '❌ 最近一次任务执行失败 (Failed)'}
+                        </span>
+                        {latestTerminal?.created_at && (
+                          <span className="font-mono-code text-[10px] opacity-80">
+                            {new Date(
+                              latestTerminal.created_at
+                            ).toLocaleTimeString()}
+                          </span>
+                        )}
+                      </div>
+                      <div className="font-mono-code text-[10.5px] break-words opacity-95">
+                        {reason}
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+              return null;
+            })()}
+
+            {/* ===============================================================
                 SESSION CONTENT STREAM FILTER BAR + FULL-HEIGHT SCROLLABLE LOG
                 =============================================================== */}
             <div className="px-3.5 py-2 border-b border-[var(--border-subtle)] flex items-center justify-between gap-2 text-[11px] shrink-0 bg-[var(--bg-sidebar)]">
@@ -1844,6 +1918,53 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                     );
                   })
                 )}
+
+                {/* Interrupted / Failed Event Cards in Timeline */}
+                {(inspector?.events || [])
+                  .filter((env) => {
+                    const t = env.event?.type || env.event?.kind;
+                    return (
+                      t === 'activation_interrupted' || t === 'activation_failed'
+                    );
+                  })
+                  .slice(-3)
+                  .map((env, eIdx) => {
+                    const t = env.event?.type || env.event?.kind;
+                    const isInt = t === 'activation_interrupted';
+                    const detail = String(
+                      (isInt ? env.event?.reason : env.event?.error) || ''
+                    );
+                    const timeStr = env.created_at
+                      ? new Date(env.created_at).toLocaleString()
+                      : '';
+                    return (
+                      <div
+                        key={`term-ev-${env.event_seq || eIdx}`}
+                        className={`rounded-xl border p-2.5 space-y-1 text-[11px] ${
+                          isInt
+                            ? 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+                            : 'border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-300'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2 font-semibold">
+                          <span className="flex items-center gap-1.5">
+                            <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+                            <span>
+                              {isInt
+                                ? '⚠️ 任务中断 (Activation Interrupted)'
+                                : '❌ 任务报错 (Activation Failed)'}
+                            </span>
+                          </span>
+                          <span className="text-[10px] font-mono-code opacity-80">
+                            {timeStr}
+                          </span>
+                        </div>
+                        <div className="font-mono-code text-[10.5px] break-words">
+                          {detail}
+                        </div>
+                      </div>
+                    );
+                  })}
 
                 {/* Live Streaming Reasoning Slot */}
                 {liveReasoningBuffer && (

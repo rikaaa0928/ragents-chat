@@ -425,6 +425,71 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
       </div>
 
+      {/* Cluster Nodes Status Bar */}
+      {clusterNodes.length > 0 && (
+        <div className="px-3 py-2 border-t border-[var(--border-subtle)] bg-[var(--bg-surface)]/50 space-y-1 shrink-0">
+          <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+            <span>集群节点 ({clusterNodes.length})</span>
+            <span>
+              {clusterNodes.filter((n) => n.status.phase === 'ready').length}/
+              {clusterNodes.length} 在线
+            </span>
+          </div>
+          <div className="space-y-1">
+            {clusterNodes.map((node) => {
+              const isReady = node.status.phase === 'ready';
+              const active = node.status.active_runners || 0;
+              const max = node.status.max_concurrent_runners || 0;
+              return (
+                <div
+                  key={node.metadata.id}
+                  title={
+                    isReady
+                      ? `节点在线 (${node.status.os}/${node.status.arch}) · 并发运行 ${active}/${max}`
+                      : `节点断联 (${node.status.phase}) · 运行中任务享有 5 分钟重连宽限期`
+                  }
+                  className={`px-2 py-1 rounded-md border text-[11px] font-mono-code flex items-center justify-between gap-1.5 ${
+                    isReady
+                      ? 'bg-[var(--bg-main)] border-[var(--border-subtle)] text-[var(--text-primary)]'
+                      : 'bg-rose-500/10 border-rose-500/30 text-rose-600 dark:text-rose-400'
+                  }`}
+                >
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span
+                      className={`w-2 h-2 rounded-full shrink-0 ${
+                        isReady
+                          ? active > 0
+                            ? 'bg-blue-500 animate-ping'
+                            : 'bg-emerald-500'
+                          : 'bg-rose-500 animate-pulse'
+                      }`}
+                    />
+                    <span className="truncate font-semibold">{node.metadata.id}</span>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0 text-[10px]">
+                    {isReady ? (
+                      <span
+                        className={
+                          active > 0
+                            ? 'text-blue-600 dark:text-blue-400 font-semibold'
+                            : 'text-emerald-600 dark:text-emerald-400'
+                        }
+                      >
+                        {active > 0 ? `运行 ${active}/${max}` : 'Ready'}
+                      </span>
+                    ) : (
+                      <span className="px-1 py-0.1 rounded bg-rose-500/20 text-rose-600 dark:text-rose-300 font-semibold">
+                        断联 (宽限中)
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Bottom Footer Controls */}
       <div className="p-2.5 border-t border-[var(--border-subtle)] shrink-0">
         <div className="flex items-center gap-1.5">

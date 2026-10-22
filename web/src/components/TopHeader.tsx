@@ -94,11 +94,23 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   ).length;
   const thinkingCount = agents.filter((a) => a.runtime_state === 'thinking').length;
 
-  const roomNodeId = room.node_id || null;
-  const roomWorkspacePath = room.workspace_path || null;
+  const roomNodeId =
+    room.node_id ||
+    agents.find((a) => a.scheduling?.mode === 'pinned' && a.scheduling?.node_id)
+      ?.scheduling?.node_id ||
+    null;
+  const roomWorkspacePath =
+    room.workspace_path ||
+    agents.find(
+      (a) => a.scheduling?.mode === 'pinned' && a.scheduling?.workspace_path
+    )?.scheduling?.workspace_path ||
+    null;
   const roomNodeDetail = roomNodeId
     ? clusterNodes.find((n) => n.metadata.id === roomNodeId) || null
     : null;
+  const isRoomNodeReady = roomNodeDetail
+    ? roomNodeDetail.status.phase === 'ready'
+    : true;
 
   return (
     <div className="shrink-0 bg-[var(--bg-main)] border-b border-[var(--border-subtle)] z-20">
@@ -144,9 +156,21 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
               {agents.length <= 1 ? '单聊' : `群聊 · ${agents.length}`}
             </span>
             {roomNodeId ? (
-              <span className="hidden sm:inline-flex items-center gap-1 text-[10.5px] px-1.5 py-0.5 rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400 font-mono-code font-normal shrink-0 whitespace-nowrap">
+              <span
+                className={`hidden sm:inline-flex items-center gap-1 text-[10.5px] px-1.5 py-0.5 rounded-md font-mono-code font-normal shrink-0 whitespace-nowrap ${
+                  isRoomNodeReady
+                    ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400'
+                    : 'bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30 animate-pulse'
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                    isRoomNodeReady ? 'bg-emerald-500' : 'bg-rose-500'
+                  }`}
+                />
                 <Server className="w-3 h-3 shrink-0" />
                 <span>{roomNodeId}</span>
+                {!isRoomNodeReady && <span className="font-semibold">· 断联</span>}
               </span>
             ) : (
               <span className="hidden sm:inline-flex items-center gap-1 text-[10.5px] px-1.5 py-0.5 rounded-md bg-[var(--bg-surface)] text-[var(--text-muted)] font-mono-code font-normal shrink-0 whitespace-nowrap">
@@ -286,6 +310,21 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           </button>
         </div>
       </header>
+
+      {/* Node Disconnected / Reconnect Grace Period Alert Banner */}
+      {roomNodeId && roomNodeDetail && !isRoomNodeReady && (
+        <div className="px-4 py-1.5 bg-amber-500/15 border-t border-amber-500/30 text-amber-700 dark:text-amber-300 text-xs flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="w-2 h-2 rounded-full bg-rose-500 animate-ping shrink-0" />
+            <span className="font-medium truncate">
+              ⚠️ 节点 <code className="font-mono-code font-semibold">{roomNodeId}</code> 当前网络断联 ({roomNodeDetail.status.phase}) — 运行中的任务处于 5 分钟断网重连宽限期，节点重连后将自动无缝继续执行。
+            </span>
+          </div>
+          <span className="text-[11px] font-mono-code shrink-0 opacity-80">
+            上次心跳: {roomNodeDetail.status.last_heartbeat_at ? new Date(roomNodeDetail.status.last_heartbeat_at).toLocaleTimeString() : '未知'}
+          </span>
+        </div>
+      )}
 
       {/* Collapsible Drawer A: Room Basic Info & Node / Workspace Details */}
       {roomInfoOpen && (

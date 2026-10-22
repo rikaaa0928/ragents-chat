@@ -763,6 +763,27 @@ impl RoomCoordinator {
                     }
                 }
             }
+            SessionEvent::ActivationRescheduled {
+                from_node,
+                to_node,
+                reason,
+                ..
+            } => {
+                if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    self.emit_flow_status(
+                        &agent.room_id,
+                        format!(
+                            "[🔄 节点改派] @{} 从 {} 自动改派至 {} ({})",
+                            agent.name, from_node, to_node, reason
+                        ),
+                    );
+                    self.emit_room_event(ChatroomEvent::AgentActivity {
+                        room_id: agent.room_id,
+                        agent_id: agent.agent_id,
+                        activity: format!("🔄 节点已从 {from_node} 改派至 {to_node}"),
+                    });
+                }
+            }
             SessionEvent::ActivationCompleted { .. }
             | SessionEvent::ActivationFailed { .. }
             | SessionEvent::ActivationCancelled
@@ -776,6 +797,10 @@ impl RoomCoordinator {
                 let is_completed_ok = matches!(env.event, SessionEvent::ActivationCompleted { .. });
                 let fail_err = match &env.event {
                     SessionEvent::ActivationFailed { error } => Some(error.clone()),
+                    _ => None,
+                };
+                let interrupted_reason = match &env.event {
+                    SessionEvent::ActivationInterrupted { reason } => Some(reason.clone()),
                     _ => None,
                 };
                 if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
@@ -816,6 +841,10 @@ impl RoomCoordinator {
                             agent: self.to_agent_public(updated.clone()),
                         });
                         if let Some(err_msg) = fail_err {
+                            self.emit_flow_status(
+                                &updated.room_id,
+                                format!("[❌ 执行报错] @{} 内部执行报错: {}", updated.name, err_msg),
+                            );
                             self.emit_room_event(ChatroomEvent::AgentActivity {
                                 room_id: updated.room_id.clone(),
                                 agent_id: updated.agent_id.clone(),
@@ -827,6 +856,38 @@ impl RoomCoordinator {
                                 "system",
                                 "System",
                                 format!("⚠️ @{} 内部执行报错：{}", updated.name, err_msg),
+                                vec![],
+                                vec![],
+                                None,
+                                false,
+                                Some(env.session_id.clone()),
+                                env.activation_id.clone(),
+                            ) {
+                                self.emit_room_event(ChatroomEvent::MessagePosted {
+                                    room_id: updated.room_id.clone(),
+                                    message: sys_msg,
+                                });
+                                self.emit_room_event(ChatroomEvent::RoomUpdated {
+                                    room_id: updated.room_id.clone(),
+                                    room: updated_room,
+                                });
+                            }
+                        } else if let Some(reason) = interrupted_reason {
+                            self.emit_flow_status(
+                                &updated.room_id,
+                                format!("[⚠️ 任务中断] @{} 任务被中断: {}", updated.name, reason),
+                            );
+                            self.emit_room_event(ChatroomEvent::AgentActivity {
+                                room_id: updated.room_id.clone(),
+                                agent_id: updated.agent_id.clone(),
+                                activity: format!("⚠️ 任务已中断: {reason}"),
+                            });
+                            if let Ok((sys_msg, updated_room)) = self.store.append_message(
+                                &updated.room_id,
+                                SenderKind::System,
+                                "system",
+                                "System",
+                                format!("⚠️ @{} 任务执行已中断（Interrupted）：{}", updated.name, reason),
                                 vec![],
                                 vec![],
                                 None,

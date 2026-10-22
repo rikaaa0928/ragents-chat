@@ -318,7 +318,9 @@ export const App: React.FC = () => {
             evType === 'session_compacted' ||
             evType === 'permission_requested' ||
             evType === 'activation_completed' ||
-            evType === 'activation_failed'
+            evType === 'activation_failed' ||
+            evType === 'activation_interrupted' ||
+            evType === 'activation_cancelled'
           ) {
             refreshInspectorSnapshot(
               agentId,
@@ -550,6 +552,16 @@ export const App: React.FC = () => {
       }
     })();
   }, []);
+
+  // Periodically refresh cluster node status (Ready / NotReady, active runners, heartbeats)
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (activeModal !== 'auth') {
+        refreshAvailableModels();
+      }
+    }, 8000);
+    return () => clearInterval(timer);
+  }, [activeModal, refreshAvailableModels]);
 
   const handleInspectAgent = async (
     agentId: string,
