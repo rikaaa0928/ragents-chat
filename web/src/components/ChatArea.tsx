@@ -14,6 +14,7 @@ import {
   Zap,
   Clock,
   Keyboard,
+  X,
 } from 'lucide-react';
 import { Room, RoomAgent, ChatMessage, SendShortcutMode } from '../types';
 
@@ -65,6 +66,30 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [isRealtimeMsg, setIsRealtimeMsg] = useState(false); // 默认为非实时消息
   const [mentionBarOpen, setMentionBarOpen] = useState(false);
   const [expandedMetaSeqs, setExpandedMetaSeqs] = useState<Set<number>>(new Set());
+  const [dismissedSystemKeys, setDismissedSystemKeys] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('ragents_dismissed_system_msgs');
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return new Set(arr.map(String));
+      }
+    } catch (_) {}
+    return new Set();
+  });
+
+  const dismissSystemMessage = (sysKey: string) => {
+    setDismissedSystemKeys((prev) => {
+      const next = new Set(prev);
+      next.add(sysKey);
+      try {
+        localStorage.setItem(
+          'ragents_dismissed_system_msgs',
+          JSON.stringify(Array.from(next).slice(-500))
+        );
+      } catch (_) {}
+      return next;
+    });
+  };
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
   const [showJumpBottom, setShowJumpBottom] = useState(false);
 
@@ -250,10 +275,24 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               const isMetaExpanded = expandedMetaSeqs.has(m.msg_seq);
 
               if (isSystem) {
+                const sysKey = `${room.room_id}:${m.msg_seq}`;
+                if (dismissedSystemKeys.has(sysKey)) {
+                  return null;
+                }
                 return (
                   <div key={m.msg_seq} className="flex justify-center">
-                    <div className="px-3.5 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/25 text-amber-600 dark:text-amber-300 text-xs">
-                      #{m.msg_seq} · {cleanedBody}
+                    <div className="pl-3.5 pr-2 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/25 text-amber-600 dark:text-amber-300 text-xs flex items-center gap-2 max-w-[92%]">
+                      <span className="break-words">
+                        #{m.msg_seq} · {cleanedBody}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => dismissSystemMessage(sysKey)}
+                        title="关闭并不再展示此系统通知"
+                        className="w-5 h-5 rounded-full flex items-center justify-center hover:bg-amber-500/20 text-amber-600 dark:text-amber-300 shrink-0 cursor-pointer transition-colors"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   </div>
                 );

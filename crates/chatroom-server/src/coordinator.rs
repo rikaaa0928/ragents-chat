@@ -845,11 +845,6 @@ impl RoomCoordinator {
                                 &updated.room_id,
                                 format!("[❌ 执行报错] @{} 内部执行报错: {}", updated.name, err_msg),
                             );
-                            self.emit_room_event(ChatroomEvent::AgentActivity {
-                                room_id: updated.room_id.clone(),
-                                agent_id: updated.agent_id.clone(),
-                                activity: format!("❌ 执行异常: {err_msg}"),
-                            });
                             if let Ok((sys_msg, updated_room)) = self.store.append_message(
                                 &updated.room_id,
                                 SenderKind::System,
@@ -877,11 +872,6 @@ impl RoomCoordinator {
                                 &updated.room_id,
                                 format!("[⚠️ 任务中断] @{} 任务被中断: {}", updated.name, reason),
                             );
-                            self.emit_room_event(ChatroomEvent::AgentActivity {
-                                room_id: updated.room_id.clone(),
-                                agent_id: updated.agent_id.clone(),
-                                activity: format!("⚠️ 任务已中断: {reason}"),
-                            });
                             if let Ok((sys_msg, updated_room)) = self.store.append_message(
                                 &updated.room_id,
                                 SenderKind::System,
@@ -904,13 +894,12 @@ impl RoomCoordinator {
                                     room: updated_room,
                                 });
                             }
-                        } else {
-                            self.emit_room_event(ChatroomEvent::AgentActivity {
-                                room_id: updated.room_id.clone(),
-                                agent_id: updated.agent_id.clone(),
-                                activity: String::new(),
-                            });
                         }
+                        self.emit_room_event(ChatroomEvent::AgentActivity {
+                            room_id: updated.room_id.clone(),
+                            agent_id: updated.agent_id.clone(),
+                            activity: String::new(),
+                        });
                         self.on_agent_activation_finished(&updated, is_completed_ok)
                             .await;
                     }
@@ -923,7 +912,7 @@ impl RoomCoordinator {
     async fn on_agent_activation_finished(&self, agent: &RoomAgent, completed_ok: bool) {
         // 1. Check Direct-@ Auto-Nudge: if agent was explicitly @mentioned by a Human, completed without error,
         //    and forgot to call `chatroom_speak`, send 1 lightweight reminder!
-        //    (When @mentioned by another Agent, silent observation `Observed.` is allowed to avoid polite ack loops.)
+        //    (When @mentioned by another Agent, silent observation is allowed to avoid polite ack loops.)
         let (should_nudge, silent_agent_mention) = {
             let mut dm_guard = self
                 .direct_mentions
@@ -977,7 +966,7 @@ impl RoomCoordinator {
             self.emit_flow_status(
                 &agent.room_id,
                 format!(
-                    "[🤫 静默已读] @{} 完成点名回合，判断无需公开发言 (Observed.)，静默结束",
+                    "[🤫 静默已读] @{} 完成点名回合，判断无需公开发言，静默结束",
                     agent.name
                 ),
             );
@@ -1005,7 +994,7 @@ impl RoomCoordinator {
             self.emit_flow_status(
                 &agent.room_id,
                 format!(
-                    "[👀 窥屏完毕] @{} 完成本轮窥屏且未插话 (Observed.) -> 继续推进下一顺位",
+                    "[👀 窥屏完毕] @{} 完成本轮窥屏且未插话 -> 继续推进下一顺位",
                     agent.name
                 ),
             );
@@ -2768,11 +2757,11 @@ fn format_delivery_payload(
             out.push_str(&format_single_room_message(last_msg));
             if last_msg.sender_kind == SenderKind::Human {
                 out.push_str(
-                    "\n\n(Hint: Complete any private tool actions in your session, then you MUST call `chatroom_speak` to reply in the chatroom. Do NOT put other agents in `mentions` unless you explicitly need them to execute a task.)",
+                    "\n\n(Hint: Complete any private tool actions in your session, then you MUST call `chatroom_speak` to reply in the chatroom. Do NOT put other agents in `mentions` unless you explicitly need them to execute a task. After calling `chatroom_speak`, finish your internal turn with a brief natural takeaway note.)",
                 );
             } else {
                 out.push_str(
-                    "\n\n(Hint: You were @mentioned by another participant. If you were assigned a specific task or question, complete your work and call `chatroom_speak` (contribute only incremental content—never repeat full summaries already posted). If the task is already complete or they were only thanking/signing off, DO NOT call `chatroom_speak`—finish silently with `Observed.`. Only put another agent in `mentions` if you require them to perform a follow-up task.)",
+                    "\n\n(Hint: You were @mentioned by another participant. If you were assigned a specific task or question, complete your work and call `chatroom_speak` (contribute only incremental content—never repeat full summaries already posted). If the task is already complete or they were only thanking/signing off, DO NOT call `chatroom_speak`—finish silently with a brief private note or takeaway summary. Only put another agent in `mentions` if you require them to perform a follow-up task.)",
                 );
             }
         }
@@ -2788,7 +2777,7 @@ fn format_delivery_payload(
             out.push_str(
                 "\n(System Note: You were NOT directly @mentioned. You are peeking at unread chatroom messages while idle.\n\
                  - If you have valuable input, a correction, or domain insight to add, call `chatroom_speak` to chime in.\n\
-                 - If no response is needed, DO NOT call `chatroom_speak` and simply finish your turn with `Observed.`.)",
+                 - If no response is needed, DO NOT call `chatroom_speak` and simply finish your turn with a brief private note or takeaway summary.)",
             );
         }
         DeliveryMode::PeekMuted { roll } => {
@@ -2802,7 +2791,7 @@ fn format_delivery_payload(
             }
             out.push_str(
                 "\n(System Note: You are in read-only observation mode for this peek turn (`chatroom_speak` tool is disabled). \
-                 Absorb the context into your memory and finish your turn immediately with `Observed.`.)",
+                 Absorb the context into your memory and finish your turn with a brief private note or takeaway summary of what you observed.)",
             );
         }
     }

@@ -176,6 +176,30 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   const [roleDraft, setRoleDraft] = useState('');
   const [promptDraft, setPromptDraft] = useState('');
   const [copiedBlockId, setCopiedBlockId] = useState<string | null>(null);
+  const [dismissedAlertIds, setDismissedAlertIds] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('ragents_dismissed_inspector_alerts');
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return new Set(arr.map(String));
+      }
+    } catch (_) {}
+    return new Set();
+  });
+
+  const dismissInspectorAlert = (alertKey: string) => {
+    setDismissedAlertIds((prev) => {
+      const next = new Set(prev);
+      next.add(alertKey);
+      try {
+        localStorage.setItem(
+          'ragents_dismissed_inspector_alerts',
+          JSON.stringify(Array.from(next).slice(-500))
+        );
+      } catch (_) {}
+      return next;
+    });
+  };
 
   const formatValueAsYaml = (val: unknown, indent = 0): string => {
     const pad = '  '.repeat(indent);
@@ -282,6 +306,154 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
     inspector?.message_queues?.normal_messages || [];
   const rtQueuedCount = realtimeQueue.length;
   const normQueuedCount = normalQueue.length;
+
+  const getAlertKey = (env: {
+    event_id?: string;
+    event_seq?: number;
+    created_at?: string;
+  }) =>
+    String(
+      env.event_id ||
+        `${inspector?.selected_session_id || 'sess'}-${env.event_seq ?? ''}-${env.created_at ?? ''}`
+    );
+
+  // Map each `activation_interrupted` / `activation_failed` event to the exact `items` index
+  // where it occurred in the session context stream (instead of piling at the bottom).
+  const alertsByItemIndex = (() => {
+    const map = new Map<
+      number,
+      NonNullable<InspectorSnapshot['events']>[number][]
+    >();
+    const allEvents = inspector?.events || [];
+    if (allEvents.length === 0) return map;
+
+    let totalEventItems = 0;
+    for (const env of allEvents) {
+      const evItems = env.event?.items;
+      if (Array.isArray(evItems)) {
+        totalEventItems += evItems.length;
+      }
+    }
+    const baseOffset = Math.max(0, items.length - totalEventItems);
+
+    let seenEventItems = 0;
+    let lastAnchorId: string | null = null;
+    let lastAnchorCallId: string | null = null;
+
+    for (const env of allEvents) {
+      const ev = env.event;
+      if (!ev) continue;
+      const evType = ev.type || ev.kind;
+
+      if (Array.isArray(ev.items)) {
+        for (const rawIt of ev.items) {
+          seenEventItems += 1;
+          if (rawIt && typeof rawIt === 'object') {
+            const it = rawIt as { id?: unknown; call_id?: unknown };
+            if (typeof it.id === 'string' && it.id) {
+              lastAnchorId = it.id;
+            }
+            if (typeof it.call_id === 'string' && it.call_id) {
+              lastAnchorCallId = it.call_id;
+            }
+          }
+        }
+      }
+
+      if (evType === 'activation_interrupted' || evType === 'activation_failed') {
+        const alertKey = getAlertKey(env);
+        if (dismissedAlertIds.has(alertKey)) {
+          continue;
+        }
+
+        let targetIdx = -1;
+        if (lastAnchorCallId) {
+          for (let i = items.length - 1; i >= 0; i--) {
+            if (items[i].call_id === lastAnchorCallId) {
+              targetIdx = i;
+              break;
+            }
+          }
+        }
+        if (targetIdx === -1 && lastAnchorId) {
+          for (let i = items.length - 1; i >= 0; i--) {
+            if (items[i].id === lastAnchorId) {
+              targetIdx = i;
+              break;
+            }
+          }
+        }
+        if (targetIdx === -1 && seenEventItems > 0 && items.length > 0) {
+          targetIdx = Math.min(
+            items.length - 1,
+            Math.max(0, baseOffset + seenEventItems - 1)
+          );
+        }
+
+        const list = map.get(targetIdx) || [];
+        list.push(env);
+        map.set(targetIdx, list);
+      }
+    }
+
+    return map;
+  })();
+
+  const renderInlineAlertCard = (
+    env: NonNullable<InspectorSnapshot['events']>[number],
+    fallbackIdx: number
+  ) => {
+    const t = env.event?.type || env.event?.kind;
+    const isInt = t === 'activation_interrupted';
+    const detail = String(
+      (isInt ? env.event?.reason : env.event?.error) || ''
+    );
+    const timeStr = env.created_at
+      ? new Date(env.created_at).toLocaleString()
+      : '';
+    const alertKey = getAlertKey(env);
+
+    return (
+      <div
+        key={`inline-alert-${alertKey}-${fallbackIdx}`}
+        className={`rounded-xl border p-2.5 space-y-1 text-[11px] ${
+          isInt
+            ? 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+            : 'border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-300'
+        }`}
+      >
+        <div className="flex items-center justify-between gap-2 font-semibold">
+          <span className="flex items-center gap-1.5 min-w-0">
+            <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">
+              {isInt
+                ? '⚠️ 任务中断 (Activation Interrupted)'
+                : '❌ 任务报错 (Activation Failed)'}
+            </span>
+          </span>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className="text-[10px] font-mono-code opacity-80">
+              {timeStr}
+            </span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                dismissInspectorAlert(alertKey);
+              }}
+              title="关闭并不再展示此通知"
+              className="w-5 h-5 rounded-md flex items-center justify-center hover:bg-black/10 dark:hover:bg-white/10 cursor-pointer transition-colors"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+        <div className="font-mono-code text-[10.5px] break-words">
+          {detail}
+        </div>
+      </div>
+    );
+  };
 
   const scrollLogToBottom = () => {
     const el = logScrollRef.current;
@@ -1567,80 +1739,6 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
             })()}
 
             {/* ===============================================================
-                LATEST TASK INTERRUPTED / FAILED BANNER IN INSPECTOR
-                =============================================================== */}
-            {(() => {
-              const allEvents = inspector?.events || [];
-              const terminalEvents = allEvents.filter((env) => {
-                const t = env.event?.type || env.event?.kind;
-                return (
-                  t === 'activation_completed' ||
-                  t === 'activation_interrupted' ||
-                  t === 'activation_failed' ||
-                  t === 'activation_cancelled'
-                );
-              });
-              const latestTerminal =
-                terminalEvents.length > 0
-                  ? terminalEvents[terminalEvents.length - 1]
-                  : null;
-              const latestType =
-                latestTerminal?.event?.type || latestTerminal?.event?.kind;
-              const isInterrupted = latestType === 'activation_interrupted';
-              const isFailed = latestType === 'activation_failed';
-              const reason = isInterrupted
-                ? String(
-                    latestTerminal?.event?.reason ||
-                      inspector?.session?.status?.last_error ||
-                      '任务执行中断'
-                  )
-                : isFailed
-                ? String(
-                    latestTerminal?.event?.error ||
-                      inspector?.session?.status?.last_error ||
-                      '任务执行报错'
-                  )
-                : '';
-
-              if (
-                inspectedAgent.runtime_state === 'idle' &&
-                (isInterrupted || isFailed)
-              ) {
-                return (
-                  <div
-                    className={`px-3.5 py-2 border-b text-[11px] flex items-start gap-2 shrink-0 ${
-                      isInterrupted
-                        ? 'bg-amber-500/12 border-amber-500/35 text-amber-700 dark:text-amber-300'
-                        : 'bg-rose-500/12 border-rose-500/35 text-rose-700 dark:text-rose-300'
-                    }`}
-                  >
-                    <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5" />
-                    <div className="min-w-0 flex-1 space-y-0.5">
-                      <div className="flex items-center justify-between gap-2 font-semibold">
-                        <span>
-                          {isInterrupted
-                            ? '⚠️ 最近一次任务被中断 (Interrupted)'
-                            : '❌ 最近一次任务执行失败 (Failed)'}
-                        </span>
-                        {latestTerminal?.created_at && (
-                          <span className="font-mono-code text-[10px] opacity-80">
-                            {new Date(
-                              latestTerminal.created_at
-                            ).toLocaleTimeString()}
-                          </span>
-                        )}
-                      </div>
-                      <div className="font-mono-code text-[10.5px] break-words opacity-95">
-                        {reason}
-                      </div>
-                    </div>
-                  </div>
-                );
-              }
-              return null;
-            })()}
-
-            {/* ===============================================================
                 SESSION CONTENT STREAM FILTER BAR + FULL-HEIGHT SCROLLABLE LOG
                 =============================================================== */}
             <div className="px-3.5 py-2 border-b border-[var(--border-subtle)] flex items-center justify-between gap-2 text-[11px] shrink-0 bg-[var(--bg-sidebar)]">
@@ -1704,6 +1802,10 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                 onScroll={handleLogScroll}
                 className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2 font-mono-code text-xs"
               >
+                {(alertsByItemIndex.get(-1) || []).map((env, aIdx) =>
+                  renderInlineAlertCard(env, aIdx)
+                )}
+
                 {items.length === 0 && !liveReasoningBuffer && !liveStreamBuffer ? (
                   <div className="py-16 text-center text-[var(--text-muted)] font-sans text-xs space-y-1">
                     <div>该 Session 尚未产生思考或工具调用记录</div>
@@ -1716,6 +1818,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                 ) : (
                   items.map((item: ContextItem, idx: number) => {
                     const blockId = item.id || `item-${idx}`;
+                    const trailingAlerts = alertsByItemIndex.get(idx) || [];
 
                     const rawContentText = extractPartArrayText(item.content);
                     const rawSummaryText = extractPartArrayText(item.summary);
@@ -1843,128 +1946,83 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                         : defaultCollapsed;
 
                     return (
-                      <div
-                        key={blockId}
-                        className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-code)] overflow-hidden"
-                      >
-                        <div
-                          onClick={() => toggleBlockCollapse(blockId, isCollapsed)}
-                          className="px-3 py-2 flex items-center justify-between gap-2 cursor-pointer hover:bg-[var(--bg-hover)]"
-                        >
-                          <div className="flex items-center gap-2 min-w-0 flex-1">
-                            {isCollapsed ? (
-                              <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
-                            ) : (
-                              <ChevronDown className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
-                            )}
-                            {icon}
-                            <span className={`font-semibold text-[11.5px] shrink-0 ${badgeColor}`}>
-                              {title}
-                            </span>
-                            {isCollapsed && (
-                              <span className="text-[11px] text-[var(--text-muted)] truncate">
-                                {preview}
+                      <React.Fragment key={blockId}>
+                        <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-code)] overflow-hidden">
+                          <div
+                            onClick={() => toggleBlockCollapse(blockId, isCollapsed)}
+                            className="px-3 py-2 flex items-center justify-between gap-2 cursor-pointer hover:bg-[var(--bg-hover)]"
+                          >
+                            <div className="flex items-center gap-2 min-w-0 flex-1">
+                              {isCollapsed ? (
+                                <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+                              ) : (
+                                <ChevronDown className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+                              )}
+                              {icon}
+                              <span className={`font-semibold text-[11.5px] shrink-0 ${badgeColor}`}>
+                                {title}
                               </span>
-                            )}
+                              {isCollapsed && (
+                                <span className="text-[11px] text-[var(--text-muted)] truncate">
+                                  {preview}
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {rawJsonForCopy !== null && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    navigator.clipboard
+                                      .writeText(rawJsonForCopy!)
+                                      .then(() => {
+                                        setCopiedBlockId(blockId);
+                                        setTimeout(() => {
+                                          setCopiedBlockId((cur) =>
+                                            cur === blockId ? null : cur
+                                          );
+                                        }, 1500);
+                                      })
+                                      .catch(() => {});
+                                  }}
+                                  className="px-1.5 py-0.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] text-[10px] font-mono-code text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1 cursor-pointer transition-colors"
+                                  title="以标准 JSON 格式复制原始载荷"
+                                >
+                                  {copiedBlockId === blockId ? (
+                                    <>
+                                      <Check className="w-2.5 h-2.5 text-emerald-500" />
+                                      <span className="text-emerald-600 dark:text-emerald-400">
+                                        JSON
+                                      </span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Copy className="w-2.5 h-2.5" />
+                                      <span>JSON</span>
+                                    </>
+                                  )}
+                                </button>
+                              )}
+                              <span className="text-[10px] text-[var(--text-muted)]">
+                                {lineCount}行
+                              </span>
+                            </div>
                           </div>
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            {rawJsonForCopy !== null && (
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  navigator.clipboard
-                                    .writeText(rawJsonForCopy!)
-                                    .then(() => {
-                                      setCopiedBlockId(blockId);
-                                      setTimeout(() => {
-                                        setCopiedBlockId((cur) =>
-                                          cur === blockId ? null : cur
-                                        );
-                                      }, 1500);
-                                    })
-                                    .catch(() => {});
-                                }}
-                                className="px-1.5 py-0.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] text-[10px] font-mono-code text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1 cursor-pointer transition-colors"
-                                title="以标准 JSON 格式复制原始载荷"
-                              >
-                                {copiedBlockId === blockId ? (
-                                  <>
-                                    <Check className="w-2.5 h-2.5 text-emerald-500" />
-                                    <span className="text-emerald-600 dark:text-emerald-400">
-                                      JSON
-                                    </span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Copy className="w-2.5 h-2.5" />
-                                    <span>JSON</span>
-                                  </>
-                                )}
-                              </button>
-                            )}
-                            <span className="text-[10px] text-[var(--text-muted)]">
-                              {lineCount}行
-                            </span>
-                          </div>
-                        </div>
 
-                        {!isCollapsed && (
-                          <div className="px-3 pb-2.5 pt-1 border-t border-[var(--border-subtle)] text-[11.5px] leading-relaxed text-[var(--text-secondary)] whitespace-pre-wrap break-words">
-                            {bodyContent}
-                          </div>
+                          {!isCollapsed && (
+                            <div className="px-3 pb-2.5 pt-1 border-t border-[var(--border-subtle)] text-[11.5px] leading-relaxed text-[var(--text-secondary)] whitespace-pre-wrap break-words">
+                              {bodyContent}
+                            </div>
+                          )}
+                        </div>
+                        {trailingAlerts.map((env, aIdx) =>
+                          renderInlineAlertCard(env, aIdx)
                         )}
-                      </div>
+                      </React.Fragment>
                     );
                   })
                 )}
-
-                {/* Interrupted / Failed Event Cards in Timeline */}
-                {(inspector?.events || [])
-                  .filter((env) => {
-                    const t = env.event?.type || env.event?.kind;
-                    return (
-                      t === 'activation_interrupted' || t === 'activation_failed'
-                    );
-                  })
-                  .slice(-3)
-                  .map((env, eIdx) => {
-                    const t = env.event?.type || env.event?.kind;
-                    const isInt = t === 'activation_interrupted';
-                    const detail = String(
-                      (isInt ? env.event?.reason : env.event?.error) || ''
-                    );
-                    const timeStr = env.created_at
-                      ? new Date(env.created_at).toLocaleString()
-                      : '';
-                    return (
-                      <div
-                        key={`term-ev-${env.event_seq || eIdx}`}
-                        className={`rounded-xl border p-2.5 space-y-1 text-[11px] ${
-                          isInt
-                            ? 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300'
-                            : 'border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-300'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2 font-semibold">
-                          <span className="flex items-center gap-1.5">
-                            <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
-                            <span>
-                              {isInt
-                                ? '⚠️ 任务中断 (Activation Interrupted)'
-                                : '❌ 任务报错 (Activation Failed)'}
-                            </span>
-                          </span>
-                          <span className="text-[10px] font-mono-code opacity-80">
-                            {timeStr}
-                          </span>
-                        </div>
-                        <div className="font-mono-code text-[10.5px] break-words">
-                          {detail}
-                        </div>
-                      </div>
-                    );
-                  })}
 
                 {/* Live Streaming Reasoning Slot */}
                 {liveReasoningBuffer && (

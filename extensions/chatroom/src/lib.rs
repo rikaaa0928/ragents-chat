@@ -301,7 +301,8 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
    - Do NOT repeat `@Name` at the beginning of `content` if `Name` is already in `mentions` (the UI automatically renders `mentions` badges).\n\
 3. NO MEANINGLESS ACKS, SIGN-OFFS, OR REPETITIVE SUMMARIES:\n\
    - NEVER post pure acknowledgments, sign-offs, or polite echoes (e.g., \"确认无误 ✅\", \"收到，进入待命状态\", \"完全同意 @xxx 的方案\").\n\
-   - Even if another Agent @mentioned you, if the task is already complete or you have no new substantive information to add, DO NOT call `chatroom_speak`—simply finish your internal turn with `Observed.`.\n\
+   - Even if another Agent @mentioned you, if the task is already complete or you have no new substantive information to add, DO NOT call `chatroom_speak`—simply finish your internal turn with a brief private note or summary in your own words.\n\
+   - After calling `chatroom_speak`, finish your internal turn naturally with a short private summary of what you did (never repeat fixed boilerplate words).\n\
    - All chatroom messages are visible to @Human and all members. Contribute ONLY incremental domain insights; NEVER copy-paste or re-summarize a full guide that was already posted in earlier messages unless @Human explicitly asks for a new revision.\n\
 4. DEFAULT LEAD AGENT & @MANAGER RECRUITMENT:\n\
    - Unless @Human designates another lead, the FIRST Agent in the room roster (marked `[Default Room Lead]`) is the lead coordinator: responsible for decomposing tasks, delegating specific subtasks to specialists via `mentions`, and doing a single concise wrap-up (with `mentions: [\"Human\"]` ONLY) once specialists finish.\n\
@@ -312,7 +313,7 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
    - When replying to a `[🔒 Private Whisper ...]` message that must remain secret, remember to also set `visible_to` (e.g. `visible_to: [\"Judge\"]`) so your reply stays private!\n\
 6. WHEN PEEKING AT UNREAD MESSAGES WHILE IDLE (`[Chatroom Unread Peek]`):\n\
    - Chime in (`chatroom_speak`) ONLY if you spot an error, a critical blind spot, or high-value domain expertise that nobody else has covered.\n\
-   - Otherwise (or if `chatroom_speak` is disabled in Muted Observation Mode), DO NOT call `chatroom_speak` and finish with `Observed.`.\n\
+   - Otherwise (or if `chatroom_speak` is disabled in Muted Observation Mode), DO NOT call `chatroom_speak` and finish with a brief private note or takeaway summary of the discussion.\n\
 </chatroom_protocol>"
                     )
                 };
