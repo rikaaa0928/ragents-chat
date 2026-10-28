@@ -351,10 +351,8 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         ragents_client.clone(),
         callback_base_url.clone(),
     );
-    let chat_state = ChatServerState {
-        coordinator: coordinator.clone(),
-        auth_token: Some(Arc::new(chat_auth_token.to_string())),
-    };
+    let chat_state =
+        ChatServerState::new(coordinator.clone(), Some(chat_auth_token.to_string()));
     let chat_addr = serve_chat_tcp(chat_listener, chat_state, cancel.clone())
         .await
         .unwrap();
@@ -793,6 +791,158 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         .unwrap();
     assert_eq!(ok_ws_resp.status().as_u16(), 201);
 
+    // 14. Test `token_acl` extension: Admin issues a restricted user token (`alice`),
+    //     verify sub-user identity (`@Alice`), node/workspace ACL, and non-admin restrictions.
+    let create_user_resp: serde_json::Value = http
+        .post(format!("{chat_base}/api/v1/ext/token_acl/users"))
+        .bearer_auth(chat_auth_token)
+        .json(&serde_json::json!({
+            "username": "alice",
+            "display_name": "Alice",
+            "allowed_nodes": ["node-chat-test"],
+            "node_workspace_prefixes": {
+                "node-chat-test": ["/tmp"]
+            },
+            "max_approval_scope": "session"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let alice_token = create_user_resp["token"]
+        .as_str()
+        .expect("issued alice token")
+        .to_string();
+    assert!(alice_token.starts_with("rct_"));
+    assert_eq!(create_user_resp["display_name"], "Alice");
+
+    // Non-admin (`alice`) cannot create users or modify global @Manager settings
+    let alice_create_user_resp = http
+        .post(format!("{chat_base}/api/v1/ext/token_acl/users"))
+        .bearer_auth(&alice_token)
+        .json(&serde_json::json!({
+            "username": "bob",
+            "display_name": "Bob"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(alice_create_user_resp.status().as_u16(), 403);
+
+    // Sub-user (`alice`) cannot create a room on an unauthorized node (`other-node`)
+    let alice_forbidden_node_room = http
+        .post(format!("{chat_base}/api/v1/rooms"))
+        .bearer_auth(&alice_token)
+        .json(&CreateRoomRequest {
+            name: "Forbidden Node Room".to_string(),
+            description: String::new(),
+            default_agent_name: None,
+            default_agent_role: None,
+            default_agent_persona: None,
+            default_agent_model: None,
+            reasoning_effort: None,
+            reasoning_summary: None,
+            web_search: None,
+            node_id: Some("other-node".to_string()),
+            workspace_path: Some("/tmp".to_string()),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(alice_forbidden_node_room.status().as_u16(), 403);
+
+    // Sub-user (`alice`) creates a pinned room under allowed node + `/tmp/allowed_tmp_ws_e2e_test`
+    let alice_room: RoomDetailResponse = http
+        .post(format!("{chat_base}/api/v1/rooms"))
+        .bearer_auth(&alice_token)
+        .json(&CreateRoomRequest {
+            name: "Alice Pinned Workspace".to_string(),
+            description: String::new(),
+            default_agent_name: None,
+            default_agent_role: None,
+            default_agent_persona: None,
+            default_agent_model: None,
+            reasoning_effort: None,
+            reasoning_summary: None,
+            web_search: None,
+            node_id: Some("node-chat-test".to_string()),
+            workspace_path: Some("/tmp/allowed_tmp_ws_e2e_test".to_string()),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let alice_room_id = alice_room.room.room_id.clone();
+
+    // 15. Test `workspace_fs` extension: upload image to bound temporary directory (`zone=tmp`),
+    //     list `zone=tmp`, and download/preview via `/raw`.
+    let fake_png_bytes: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+    use base64::Engine as _;
+    let b64_png = base64::engine::general_purpose::STANDARD.encode(fake_png_bytes);
+    let upload_resp: serde_json::Value = http
+        .post(format!(
+            "{chat_base}/api/v1/ext/workspace_fs/rooms/{alice_room_id}/upload"
+        ))
+        .bearer_auth(&alice_token)
+        .json(&serde_json::json!({
+            "sub_dir": "uploads",
+            "filename": "screenshot.png",
+            "data_base64": b64_png,
+            "dedupe": false
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(upload_resp["ok"], true);
+    assert_eq!(upload_resp["is_image"], true);
+    assert_eq!(
+        upload_resp["agent_path"],
+        ".ragents-tmp/uploads/screenshot.png"
+    );
+
+    // Verify listing `zone=tmp` shows `uploads/screenshot.png`
+    let list_tmp_resp: serde_json::Value = http
+        .get(format!(
+            "{chat_base}/api/v1/ext/workspace_fs/rooms/{alice_room_id}/list?zone=tmp&path=uploads"
+        ))
+        .bearer_auth(&alice_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entries = list_tmp_resp["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["name"], "screenshot.png");
+
+    // Verify downloading/previewing via `/raw` returns exact PNG bytes and `image/png` Content-Type
+    let raw_resp = http
+        .get(format!(
+            "{chat_base}/api/v1/ext/workspace_fs/rooms/{alice_room_id}/raw?zone=tmp&path=uploads/screenshot.png"
+        ))
+        .bearer_auth(&alice_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(raw_resp.status().as_u16(), 200);
+    assert_eq!(
+        raw_resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("image/png")
+    );
+    let downloaded_bytes = raw_resp.bytes().await.unwrap();
+    assert_eq!(downloaded_bytes.as_ref(), fake_png_bytes);
+
     cancel.cancel();
 }
 
@@ -874,10 +1024,8 @@ async fn test_live_multi_agent_chatroom_when_env_present() {
         ragents_client.clone(),
         callback_base_url.clone(),
     );
-    let chat_state = ChatServerState {
-        coordinator: coordinator.clone(),
-        auth_token: Some(Arc::new(chat_auth_token.to_string())),
-    };
+    let chat_state =
+        ChatServerState::new(coordinator.clone(), Some(chat_auth_token.to_string()));
     let chat_addr = serve_chat_tcp(chat_listener, chat_state, cancel.clone())
         .await
         .unwrap();

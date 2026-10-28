@@ -5,7 +5,6 @@ use chatroom_server::{
 use ragents_client::RagentsClient;
 use ragents_protocol::ExtensionSpec;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -130,10 +129,7 @@ async fn main() -> anyhow::Result<()> {
 
     let coordinator = RoomCoordinator::new(store, ragents_client, callback_base_url.clone());
 
-    let state = ChatServerState {
-        coordinator,
-        auth_token: cli.auth_token.map(Arc::new),
-    };
+    let state = ChatServerState::new(coordinator, cli.auth_token);
 
     let cancel = CancellationToken::new();
     let bound = serve_chat_tcp(listener, state, cancel.clone()).await?;

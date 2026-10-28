@@ -25,6 +25,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.11", features = ["v4", "v7", "serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 rand = "0.8"
+base64 = "0.22"
 
 [dev-dependencies]
 ragents-apiserver = { git = "https://github.com/rikaaa0928/ragents.git", branch = "main" }

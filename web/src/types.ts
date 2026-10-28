@@ -203,7 +203,37 @@ export interface ClusterNode {
     supported_models?: string[];
     default_model?: string;
     allowed_workspace_dirs?: string[];
+    active_runners?: number;
+    max_concurrent_runners?: number;
+    last_heartbeat_at?: string;
   };
+}
+
+export interface ChatPrincipal {
+  user_id: string;
+  username: string;
+  display_name: string;
+  is_admin: boolean;
+  allowed_nodes?: string[] | null;
+  node_workspace_prefixes?: Record<string, string[]>;
+  max_approval_scope: string;
+}
+
+export interface UiContribution {
+  plugin_id: string;
+  id: string;
+  slot: string;
+  title: string;
+  icon: string;
+  require_admin: boolean;
+  entry_url: string;
+}
+
+export interface ExtensionManifest {
+  auth_required: boolean;
+  auth_mode: string;
+  auth_plugin_id?: string | null;
+  contributions: UiContribution[];
 }
 
 export interface ManagerSettings {

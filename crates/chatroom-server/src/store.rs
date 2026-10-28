@@ -137,6 +137,19 @@ impl ChatroomStore {
                  source_activation_id    TEXT,
                  created_at              TEXT NOT NULL,
                  PRIMARY KEY (room_id, msg_seq)
+             );
+
+             CREATE TABLE IF NOT EXISTS chat_users_acl (
+                 user_id                 TEXT PRIMARY KEY,
+                 username                TEXT NOT NULL UNIQUE,
+                 display_name            TEXT NOT NULL,
+                 token                   TEXT NOT NULL UNIQUE,
+                 is_admin                INTEGER NOT NULL DEFAULT 0,
+                 allowed_nodes_json      TEXT,
+                 node_workspaces_json    TEXT NOT NULL DEFAULT '{}',
+                 max_approval_scope      TEXT NOT NULL DEFAULT 'node',
+                 created_at              TEXT NOT NULL,
+                 updated_at              TEXT NOT NULL
              );",
         )?;
 
@@ -164,6 +177,14 @@ You manage the room's specialist agent roster using your tools:\n\
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    pub fn with_conn<F, R>(&self, f: F) -> Result<R, ChatStoreError>
+    where
+        F: FnOnce(&Connection) -> Result<R, ChatStoreError>,
+    {
+        let conn = self.conn.lock().expect("chatroom store mutex poisoned");
+        f(&conn)
     }
 
     pub fn get_manager_settings(&self) -> Result<ManagerSettings, ChatStoreError> {

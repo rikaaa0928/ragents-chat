@@ -15,8 +15,25 @@ import {
   Clock,
   Keyboard,
   X,
+  ImagePlus,
+  FileText,
+  Loader2,
 } from 'lucide-react';
 import { Room, RoomAgent, ChatMessage, SendShortcutMode } from '../types';
+
+export interface UploadedTempAttachment {
+  agent_path: string;
+  rel_path: string;
+  raw_url: string;
+  is_image: boolean;
+}
+
+interface PendingAttachmentItem {
+  id: string;
+  file: File;
+  previewUrl: string | null;
+  isImage: boolean;
+}
 
 interface ChatAreaProps {
   room: Room | null;
@@ -27,9 +44,82 @@ interface ChatAreaProps {
   onChangeSendShortcutMode: (mode: SendShortcutMode) => void;
   onToggleMention: (name: string) => void;
   onSendMessage: (content: string, isRealtime: boolean) => void;
+  onUploadTempFile?: (file: File) => Promise<UploadedTempAttachment>;
   onInspectAgent: (agentId: string) => void;
   onOpenRecruitModal: () => void;
   restoredDraft?: { text: string; seq: number } | null;
+}
+
+function agentPathToTmpRelPath(agentPath: string): string {
+  const trimmed = agentPath.trim();
+  if (trimmed.startsWith('.ragents-tmp/')) {
+    return trimmed.slice('.ragents-tmp/'.length);
+  }
+  return trimmed.replace(/^\/+/, '');
+}
+
+function renderMessageWithAttachments(text: string, roomId?: string | null): React.ReactNode {
+  const pattern = /\[Attached (Image|File):\s*([^\]]+)\]/g;
+  const matches: Array<{ kind: 'Image' | 'File'; agentPath: string }> = [];
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    matches.push({
+      kind: match[1] as 'Image' | 'File',
+      agentPath: match[2].trim(),
+    });
+  }
+  if (matches.length === 0 || !roomId) {
+    return text;
+  }
+
+  const textWithoutTags = text.replace(pattern, '').trim();
+  return (
+    <div className="space-y-2">
+      {textWithoutTags && <div>{textWithoutTags}</div>}
+      <div className="flex flex-wrap gap-2 pt-0.5">
+        {matches.map((item, idx) => {
+          const relPath = agentPathToTmpRelPath(item.agentPath);
+          const rawUrl = `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(
+            roomId
+          )}/raw?zone=tmp&path=${encodeURIComponent(relPath)}`;
+          if (item.kind === 'Image') {
+            return (
+              <a
+                key={`${item.agentPath}-${idx}`}
+                href={rawUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="group/att block rounded-xl overflow-hidden border border-[var(--border-subtle)] bg-[var(--bg-surface)] max-w-[240px] hover:border-blue-500/50 transition-colors"
+                title={`点击查看原图 · Agent 读取路径: ${item.agentPath}`}
+              >
+                <img
+                  src={rawUrl}
+                  alt={item.agentPath}
+                  loading="lazy"
+                  className="max-h-44 w-auto object-contain bg-black/5 dark:bg-white/5 mx-auto"
+                />
+                <div className="px-2 py-1 text-[10px] font-mono-code text-[var(--text-muted)] truncate border-t border-[var(--border-subtle)]">
+                  🖼️ {item.agentPath}
+                </div>
+              </a>
+            );
+          }
+          return (
+            <a
+              key={`${item.agentPath}-${idx}`}
+              href={`${rawUrl}&download=1`}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-xs font-mono-code text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            >
+              <FileText className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+              <span className="truncate max-w-[220px]">{item.agentPath}</span>
+            </a>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function stripLeadingRedundantMentions(content: string, mentions: string[]): string {
@@ -58,6 +148,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onChangeSendShortcutMode,
   onToggleMention,
   onSendMessage,
+  onUploadTempFile,
   onInspectAgent,
   onOpenRecruitModal,
   restoredDraft,
@@ -65,6 +156,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [inputText, setInputText] = useState('');
   const [isRealtimeMsg, setIsRealtimeMsg] = useState(false); // 默认为非实时消息
   const [mentionBarOpen, setMentionBarOpen] = useState(false);
+  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachmentItem[]>([]);
+  const [uploadingAttachments, setUploadingAttachments] = useState(false);
   const [expandedMetaSeqs, setExpandedMetaSeqs] = useState<Set<number>>(new Set());
   const [dismissedSystemKeys, setDismissedSystemKeys] = useState<Set<string>>(() => {
     try {
@@ -95,6 +188,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isComposingRef = useRef(false);
   const lastCompositionEndTimeRef = useRef(0);
   const lastScrollTopRef = useRef(0);
@@ -166,15 +260,91 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     });
   };
 
-  const handleSend = () => {
+  const addFilesToPending = (files: File[]) => {
+    if (!files || files.length === 0) return;
+    const items: PendingAttachmentItem[] = files.map((file) => {
+      const isImage = file.type.startsWith('image/');
+      const ext = file.name.includes('.')
+        ? file.name.slice(file.name.lastIndexOf('.'))
+        : isImage
+        ? '.png'
+        : '.bin';
+      const normalizedFile =
+        !file.name || file.name === 'image.png'
+          ? new File([file], `paste-${Date.now()}${ext}`, { type: file.type })
+          : file;
+      return {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        file: normalizedFile,
+        previewUrl: isImage ? URL.createObjectURL(normalizedFile) : null,
+        isImage,
+      };
+    });
+    setPendingAttachments((prev) => [...prev, ...items]);
+  };
+
+  const removePendingAttachment = (id: string) => {
+    setPendingAttachments((prev) => {
+      const target = prev.find((x) => x.id === id);
+      if (target?.previewUrl) {
+        URL.revokeObjectURL(target.previewUrl);
+      }
+      return prev.filter((x) => x.id !== id);
+    });
+  };
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (let i = 0; i < items.length; i += 1) {
+      const item = items[i];
+      if (item.kind === 'file') {
+        const f = item.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      addFilesToPending(files);
+    }
+  };
+
+  const handleSend = async () => {
     const trimmed = inputText.trim();
-    if (!trimmed || !room) return;
+    if ((!trimmed && pendingAttachments.length === 0) || !room || uploadingAttachments) {
+      return;
+    }
+
+    let attachmentLines: string[] = [];
+    if (pendingAttachments.length > 0 && onUploadTempFile) {
+      setUploadingAttachments(true);
+      try {
+        for (const item of pendingAttachments) {
+          const uploaded = await onUploadTempFile(item.file);
+          const tagKind = uploaded.is_image || item.isImage ? 'Image' : 'File';
+          attachmentLines.push(`[Attached ${tagKind}: ${uploaded.agent_path}]`);
+        }
+        pendingAttachments.forEach((item) => {
+          if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+        });
+        setPendingAttachments([]);
+      } catch (_) {
+        setUploadingAttachments(false);
+        return;
+      }
+      setUploadingAttachments(false);
+    }
+
+    const finalContent = [trimmed, ...attachmentLines].filter(Boolean).join('\n');
+    if (!finalContent) return;
+
     setInputText('');
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
     setPinnedToBottom(true);
-    onSendMessage(trimmed, isRealtimeMsg);
+    onSendMessage(finalContent, isRealtimeMsg);
   };
 
   const handleCompositionStart = () => {
@@ -303,6 +473,11 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 return (
                   <div key={m.msg_seq} className="flex flex-col items-end gap-1.5">
                     <div className="flex items-center gap-2 text-[11px] text-[var(--text-muted)] px-1">
+                      {m.sender_name && m.sender_name !== 'Human' && (
+                        <span className="font-semibold text-[var(--text-secondary)]">
+                          @{m.sender_name}
+                        </span>
+                      )}
                       <span className="font-mono-code">#{m.msg_seq}</span>
                       {m.is_realtime ? (
                         <span
@@ -337,7 +512,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     </div>
 
                     <div className="max-w-[85%] sm:max-w-[78%] rounded-[22px] rounded-br-md bg-[var(--bg-human)] px-4 py-2.5 text-[14px] leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap break-words">
-                      {cleanedBody}
+                      {renderMessageWithAttachments(cleanedBody, room?.room_id)}
                     </div>
                   </div>
                 );
@@ -425,7 +600,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
                     {/* Message Body */}
                     <div className="text-[14px] leading-[1.65] text-[var(--text-primary)] whitespace-pre-wrap break-words">
-                      {cleanedBody}
+                      {renderMessageWithAttachments(cleanedBody, room?.room_id)}
                     </div>
 
                     {/* Action & Collapsible Envelope Details Bar */}
@@ -543,6 +718,46 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               </div>
             )}
 
+            {/* Pending Image / File Attachments Strip (Uploaded to Temp Dir on Send) */}
+            {pendingAttachments.length > 0 && (
+              <div className="px-3.5 pt-2.5 pb-1.5 flex items-center flex-wrap gap-2 border-b border-[var(--border-subtle)] bg-[var(--bg-main)]/40">
+                {pendingAttachments.map((item) => (
+                  <div
+                    key={item.id}
+                    className="relative group/pending flex items-center gap-2 p-1.5 pr-6 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] text-xs"
+                  >
+                    {item.previewUrl ? (
+                      <img
+                        src={item.previewUrl}
+                        alt={item.file.name}
+                        className="w-10 h-10 rounded-lg object-cover border border-[var(--border-subtle)] shrink-0"
+                      />
+                    ) : (
+                      <div className="w-10 h-10 rounded-lg bg-[var(--bg-surface)] flex items-center justify-center shrink-0">
+                        <FileText className="w-4 h-4 text-blue-500" />
+                      </div>
+                    )}
+                    <div className="min-w-0 max-w-[140px]">
+                      <div className="font-medium text-[11px] text-[var(--text-primary)] truncate">
+                        {item.file.name}
+                      </div>
+                      <div className="text-[9.5px] text-[var(--text-muted)]">
+                        发送时上传至临时区并传递路径
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removePendingAttachment(item.id)}
+                      className="absolute top-1 right-1 w-4 h-4 rounded-full bg-[var(--bg-surface)] hover:bg-rose-500 hover:text-white text-[var(--text-muted)] flex items-center justify-center cursor-pointer"
+                      title="移除附件"
+                    >
+                      <X className="w-2.5 h-2.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* Textarea */}
             <div className="px-4 pt-2.5 pb-1">
               <textarea
@@ -550,6 +765,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 rows={2}
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
+                onPaste={handlePaste}
                 onCompositionStart={handleCompositionStart}
                 onCompositionEnd={handleCompositionEnd}
                 onKeyDown={handleKeyDown}
@@ -557,8 +773,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 placeholder={
                   room
                     ? sendShortcutMode === 'enter_send'
-                      ? '给聊天室发送消息（Enter 发送，Shift+Enter 换行，支持 @Agent 点名）...'
-                      : '给聊天室发送消息（Shift+Enter 发送，Enter 换行，支持 @Agent 点名）...'
+                      ? '给聊天室发送消息（Enter 发送，Shift+Enter 换行，支持粘贴或选择图片上传临时区）...'
+                      : '给聊天室发送消息（Shift+Enter 发送，Enter 换行，支持粘贴或选择图片上传临时区）...'
                     : '请先选择或创建聊天室'
                 }
                 disabled={!room}
@@ -569,6 +785,30 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             {/* Composer Bottom Toolbar */}
             <div className="px-3 pb-2.5 pt-1 flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5 min-w-0 overflow-x-auto">
+                {/* Hidden File Input for Image / File Attachment */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  accept="image/*,*/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const files = Array.from(e.target.files || []);
+                    addFilesToPending(files);
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  type="button"
+                  disabled={!room || uploadingAttachments}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-2.5 py-1 rounded-full text-xs font-medium flex items-center gap-1 bg-[var(--bg-main)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-[var(--border-subtle)] transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+                  title="选择图片或文件（也可在输入框直接 Ctrl+V / Cmd+V 粘贴图片）。消息发出时自动上传到节点临时目录，并在消息中仅附带文件路径供 Agent 调用 view_image 查看"
+                >
+                  <ImagePlus className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                  <span>图片/文件</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={() => setMentionBarOpen(!mentionBarOpen)}
@@ -654,19 +894,31 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               <button
                 type="button"
                 onClick={handleSend}
-                disabled={!inputText.trim() || !room}
+                disabled={
+                  (!inputText.trim() && pendingAttachments.length === 0) ||
+                  !room ||
+                  uploadingAttachments
+                }
                 className={`w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer shrink-0 ${
-                  inputText.trim() && room
+                  (inputText.trim() || pendingAttachments.length > 0) &&
+                  room &&
+                  !uploadingAttachments
                     ? 'bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] hover:opacity-90'
                     : 'bg-[var(--bg-surface-2)] text-[var(--text-muted)] cursor-not-allowed opacity-50'
                 }`}
                 title={
-                  sendShortcutMode === 'enter_send'
+                  uploadingAttachments
+                    ? '正在上传图片/附件到临时目录...'
+                    : sendShortcutMode === 'enter_send'
                     ? '发送消息 (Enter)'
                     : '发送消息 (Shift+Enter)'
                 }
               >
-                <ArrowUp className="w-4 h-4 stroke-[2.5]" />
+                {uploadingAttachments ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <ArrowUp className="w-4 h-4 stroke-[2.5]" />
+                )}
               </button>
             </div>
           </div>

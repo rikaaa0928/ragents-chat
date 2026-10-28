@@ -8,12 +8,17 @@ import {
   ClusterNode,
   CreateRoomPreset,
   SendShortcutMode,
+  ChatPrincipal,
+  ExtensionManifest,
+  UiContribution,
 } from './types';
 import { Sidebar } from './components/Sidebar';
 import { TopHeader } from './components/TopHeader';
-import { ChatArea } from './components/ChatArea';
+import { ChatArea, UploadedTempAttachment } from './components/ChatArea';
 import { RightInspectorPane } from './components/RightInspectorPane';
 import { Modals, ActiveModalType } from './components/Modals';
+import { ExtensionSlotHost } from './components/ExtensionSlotHost';
+import { X } from 'lucide-react';
 
 const DEFAULT_MANAGER_SETTINGS: ManagerSettings = {
   manager_model: '',
@@ -54,6 +59,8 @@ export const App: React.FC = () => {
 
   // Layout Collapsible States (Right-side columns default to closed for clean Codex focus!)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [activeExtRightColumnId, setActiveExtRightColumnId] = useState<string | null>(null);
+  const [activeExtModal, setActiveExtModal] = useState<UiContribution | null>(null);
   const [flowColumnOpen, setFlowColumnOpen] = useState(false);
   const [rosterColumnOpen, setRosterColumnOpen] = useState(false);
   const [inspectorColumnOpen, setInspectorColumnOpen] = useState(false);
@@ -64,6 +71,8 @@ export const App: React.FC = () => {
   const [authToken, setAuthToken] = useState(
     () => localStorage.getItem('ragents_chat_token') || ''
   );
+  const [principal, setPrincipal] = useState<ChatPrincipal | null>(null);
+  const [extManifest, setExtManifest] = useState<ExtensionManifest | null>(null);
   const [roomsList, setRoomsList] = useState<RoomListItem[]>([]);
   const [currentRoomId, setCurrentRoomId] = useState<string | null>(
     () => localStorage.getItem('ragents_chat_room_id') || null
@@ -541,6 +550,12 @@ export const App: React.FC = () => {
           return;
         }
         const st = await res.json();
+        if (st.manifest) {
+          setExtManifest(st.manifest);
+        }
+        if (st.principal) {
+          setPrincipal(st.principal);
+        }
         if (st.auth_required && !st.authenticated) {
           setActiveModal('auth');
           return;
@@ -604,7 +619,7 @@ export const App: React.FC = () => {
     await apiFetch(`/api/v1/rooms/${currentRoomId}/messages`, {
       method: 'POST',
       body: JSON.stringify({
-        sender_name: 'Human',
+        sender_name: principal?.display_name || 'Human',
         content,
         mentions,
         is_realtime: isRealtime,
@@ -614,6 +629,34 @@ export const App: React.FC = () => {
       setSelectedMentions(new Set([currentDetail.agents[0].name]));
       setSingleChatAutoPreselected(true);
     }
+  };
+
+  const handleUploadTempFile = async (file: File): Promise<UploadedTempAttachment> => {
+    if (!currentRoomId) {
+      throw new Error('请先选择聊天室');
+    }
+    const base64Data: string = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const res = String(reader.result || '');
+        const idx = res.indexOf(',');
+        resolve(idx >= 0 ? res.slice(idx + 1) : res);
+      };
+      reader.onerror = () => reject(reader.error || new Error('Failed to read file'));
+      reader.readAsDataURL(file);
+    });
+    return await apiFetch(
+      `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(currentRoomId)}/upload`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          sub_dir: 'uploads',
+          filename: file.name || `upload-${Date.now()}.bin`,
+          data_base64: base64Data,
+          dedupe: true,
+        }),
+      }
+    );
   };
 
   const handleUpdateRoomControls = async (patch: Partial<Room>) => {
@@ -652,6 +695,19 @@ export const App: React.FC = () => {
           await refreshAvailableModels();
           setActiveModal('managerSettings');
         }}
+        principal={principal}
+        authRequired={extManifest?.auth_required}
+        footerContributions={(extManifest?.contributions || []).filter(
+          (c) => c.slot === 'sidebar.footer'
+        )}
+        onOpenExtensionModal={(contrib) => setActiveExtModal(contrib)}
+        onLogout={async () => {
+          await fetch('/api/v1/auth/logout', { method: 'POST' }).catch(() => {});
+          localStorage.removeItem('ragents_chat_token');
+          setAuthToken('');
+          setPrincipal(null);
+          setActiveModal('auth');
+        }}
         theme={theme}
         onToggleTheme={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
       />
@@ -672,6 +728,13 @@ export const App: React.FC = () => {
           inspectedAgent={inspectorSnap?.agent || null}
           flowLogCount={currentDetail?.flow_logs?.length || 0}
           peekStatusBanner={peekStatusBanner}
+          rightColumnContributions={(extManifest?.contributions || []).filter(
+            (c) => c.slot === 'room.right_column'
+          )}
+          activeExtRightColumnId={activeExtRightColumnId}
+          onToggleExtRightColumn={(id) =>
+            setActiveExtRightColumnId((prev) => (prev === id ? null : id))
+          }
           flowColumnOpen={flowColumnOpen}
           onToggleFlowColumn={() => setFlowColumnOpen(!flowColumnOpen)}
           rosterColumnOpen={rosterColumnOpen}
@@ -755,11 +818,43 @@ export const App: React.FC = () => {
           onChangeSendShortcutMode={setSendShortcutMode}
           onToggleMention={handleToggleMention}
           onSendMessage={handleSendMessage}
+          onUploadTempFile={handleUploadTempFile}
           onInspectAgent={(id) => handleInspectAgent(id, undefined, true)}
           onOpenRecruitModal={() => setActiveModal('recruit')}
           restoredDraft={restoredDraft}
         />
       </main>
+
+      {/* 2b. Pluggable Extension Right-Side Vertical Column (e.g. 📁 文件穿透) */}
+      {activeExtRightColumnId &&
+        (() => {
+          const contrib = (extManifest?.contributions || []).find(
+            (c) => c.id === activeExtRightColumnId
+          );
+          if (!contrib) return null;
+          return (
+            <aside className="w-[360px] shrink-0 h-full border-l border-[var(--border-subtle)] bg-[var(--bg-sidebar)] flex flex-col overflow-hidden">
+              <ExtensionSlotHost
+                contribution={contrib}
+                slot="room.right_column"
+                theme={theme}
+                principal={principal}
+                room={currentDetail?.room || null}
+                agents={currentDetail?.agents || []}
+                clusterNodes={clusterNodes}
+                apiFetch={apiFetch}
+                onInsertComposerText={(text) =>
+                  setRestoredDraft({ text, seq: Date.now() })
+                }
+                onAuthSuccess={async () => {}}
+                onShowError={(msg) =>
+                  pushApiError('EXT', contrib.plugin_id, 'EXT_ERR', msg)
+                }
+                onClose={() => setActiveExtRightColumnId(null)}
+              />
+            </aside>
+          );
+        })()}
 
       {/* 3. Right Three Independent Vertical Columns (流程轨迹竖列 + 群成员竖列 + 具体 Agent 透视竖列) */}
       <RightInspectorPane
@@ -905,9 +1000,14 @@ export const App: React.FC = () => {
               alert('访问密钥错误');
               return;
             }
+            const loginData = await res.json().catch(() => ({}));
+            if (loginData?.principal) {
+              setPrincipal(loginData.principal);
+            }
             setAuthToken(tok);
             localStorage.setItem('ragents_chat_token', tok);
             setActiveModal(null);
+            await refreshAvailableModels();
             await refreshRooms();
           } catch (e: unknown) {
             alert(e instanceof Error ? e.message : String(e));
@@ -947,6 +1047,52 @@ export const App: React.FC = () => {
           setManagerSettings(saved);
         }}
       />
+
+      {/* 5. Pluggable Extension Modal (e.g. 🔑 用户与权限 ACL 管理) */}
+      {activeExtModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs"
+          onClick={() => setActiveExtModal(null)}
+        >
+          <div
+            className="w-full max-w-3xl rounded-2xl bg-[var(--bg-elevated)] border border-[var(--border-default)] shadow-2xl overflow-hidden flex flex-col max-h-[88vh]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-3.5 border-b border-[var(--border-subtle)] flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-[var(--text-primary)]">
+                {activeExtModal.title}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setActiveExtModal(null)}
+                className="w-7 h-7 rounded-lg flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <ExtensionSlotHost
+                contribution={activeExtModal}
+                slot={activeExtModal.slot}
+                theme={theme}
+                principal={principal}
+                room={currentDetail?.room || null}
+                agents={currentDetail?.agents || []}
+                clusterNodes={clusterNodes}
+                apiFetch={apiFetch}
+                onInsertComposerText={(text) =>
+                  setRestoredDraft({ text, seq: Date.now() })
+                }
+                onAuthSuccess={async () => {}}
+                onShowError={(msg) =>
+                  pushApiError('EXT', activeExtModal.plugin_id, 'EXT_ERR', msg)
+                }
+                onClose={() => setActiveExtModal(null)}
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

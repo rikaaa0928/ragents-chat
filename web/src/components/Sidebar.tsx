@@ -13,8 +13,16 @@ import {
   Globe,
   Plus,
   MoreHorizontal,
+  KeyRound,
+  LogOut,
 } from 'lucide-react';
-import { RoomListItem, ClusterNode, CreateRoomPreset } from '../types';
+import {
+  RoomListItem,
+  ClusterNode,
+  CreateRoomPreset,
+  ChatPrincipal,
+  UiContribution,
+} from '../types';
 
 interface SidebarProps {
   collapsed: boolean;
@@ -25,6 +33,11 @@ interface SidebarProps {
   onSelectRoom: (roomId: string) => void;
   onOpenCreateRoom: (preset?: CreateRoomPreset) => void;
   onOpenManagerSettings: () => void;
+  principal?: ChatPrincipal | null;
+  authRequired?: boolean;
+  footerContributions?: UiContribution[];
+  onOpenExtensionModal?: (contrib: UiContribution) => void;
+  onLogout?: () => void;
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
 }
@@ -72,6 +85,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectRoom,
   onOpenCreateRoom,
   onOpenManagerSettings,
+  principal,
+  authRequired,
+  footerContributions = [],
+  onOpenExtensionModal,
+  onLogout,
   theme,
   onToggleTheme,
 }) => {
@@ -491,15 +509,57 @@ export const Sidebar: React.FC<SidebarProps> = ({
       )}
 
       {/* Bottom Footer Controls */}
-      <div className="p-2.5 border-t border-[var(--border-subtle)] shrink-0">
+      <div className="p-2.5 border-t border-[var(--border-subtle)] space-y-1.5 shrink-0">
+        {principal && (
+          <div className="px-2 py-1 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] flex items-center justify-between gap-1.5 text-[11px]">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span>{principal.is_admin ? '👑' : '👤'}</span>
+              <span className="font-semibold text-[var(--text-primary)] truncate">
+                @{principal.display_name}
+              </span>
+              {!principal.is_admin && (
+                <span className="text-[9.5px] px-1 py-0.1 rounded bg-blue-500/12 text-blue-600 dark:text-blue-400">
+                  {principal.max_approval_scope}
+                </span>
+              )}
+            </div>
+            {authRequired && onLogout && (
+              <button
+                type="button"
+                onClick={onLogout}
+                title="切换访问 Token / 退出登录"
+                className="p-1 rounded hover:bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-rose-500 cursor-pointer shrink-0"
+              >
+                <LogOut className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        )}
+
+        {footerContributions
+          .filter((c) => !c.require_admin || principal?.is_admin)
+          .map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              onClick={() => onOpenExtensionModal?.(c)}
+              className="w-full px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer transition-colors"
+            >
+              <KeyRound className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+              <span className="truncate">{c.title}</span>
+            </button>
+          ))}
+
         <div className="flex items-center gap-1.5">
-          <button
-            onClick={onOpenManagerSettings}
-            className="flex-1 px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer transition-colors"
-          >
-            <Settings className="w-3.5 h-3.5" />
-            <span>@Manager 设置</span>
-          </button>
+          {(!principal || principal.is_admin) && (
+            <button
+              onClick={onOpenManagerSettings}
+              className="flex-1 px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer transition-colors"
+            >
+              <Settings className="w-3.5 h-3.5" />
+              <span>@Manager 设置</span>
+            </button>
+          )}
 
           <button
             onClick={onToggleTheme}

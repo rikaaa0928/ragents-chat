@@ -18,8 +18,9 @@ import {
   Compass,
   Server,
   Globe,
+  FolderOpen,
 } from 'lucide-react';
-import { Room, RoomAgent, ClusterNode } from '../types';
+import { Room, RoomAgent, ClusterNode, UiContribution } from '../types';
 
 interface TopHeaderProps {
   sidebarCollapsed: boolean;
@@ -31,6 +32,9 @@ interface TopHeaderProps {
   inspectedAgent: RoomAgent | null;
   flowLogCount: number;
   peekStatusBanner: string;
+  rightColumnContributions?: UiContribution[];
+  activeExtRightColumnId?: string | null;
+  onToggleExtRightColumn?: (id: string) => void;
   flowColumnOpen: boolean;
   onToggleFlowColumn: () => void;
   rosterColumnOpen: boolean;
@@ -52,6 +56,9 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   inspectedAgent,
   flowLogCount,
   peekStatusBanner,
+  rightColumnContributions = [],
+  activeExtRightColumnId = null,
+  onToggleExtRightColumn,
   flowColumnOpen,
   onToggleFlowColumn,
   rosterColumnOpen,
@@ -246,6 +253,26 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
               <ChevronDown className="w-3 h-3 text-[var(--text-muted)] shrink-0" />
             )}
           </button>
+
+          {/* 1b. Extension Right Columns (e.g. 📁 文件穿透) */}
+          {rightColumnContributions.map((contrib) => {
+            const isOpen = activeExtRightColumnId === contrib.id;
+            return (
+              <button
+                key={contrib.id}
+                onClick={() => onToggleExtRightColumn?.(contrib.id)}
+                className={`h-8 px-2 rounded-lg text-xs font-medium flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                  isOpen
+                    ? 'bg-[var(--bg-active)] border-[var(--border-default)] text-[var(--text-primary)]'
+                    : 'bg-transparent border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'
+                }`}
+                title={`展开/隐藏 ${contrib.title} 竖列`}
+              >
+                <FolderOpen className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                <span className="hidden lg:inline">{contrib.title}</span>
+              </button>
+            );
+          })}
 
           {/* 2. Toggle Flow Trace Vertical Column (右侧流程轨迹竖列 - 默认不打开) */}
           <button
