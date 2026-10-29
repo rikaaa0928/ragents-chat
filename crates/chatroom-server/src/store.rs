@@ -836,6 +836,20 @@ You manage the room's specialist agent roster using your tools:\n\
             .ok_or_else(|| ChatStoreError::NotFound(format!("agent {agent_id}")))
     }
 
+    pub fn has_system_message_for_activation(
+        &self,
+        room_id: &str,
+        activation_id: &ActivationId,
+    ) -> Result<bool, ChatStoreError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM room_messages WHERE room_id = ?1 AND sender_kind = 'system' AND source_activation_id = ?2",
+            params![room_id, activation_id.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn append_message(
         &self,

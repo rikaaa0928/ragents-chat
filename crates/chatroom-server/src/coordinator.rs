@@ -38,6 +38,7 @@ pub struct RoomCoordinator {
     pub store: ChatroomStore,
     pub ragents_client: RagentsClient,
     pub callback_base_url: String,
+    pub started_at: chrono::DateTime<Utc>,
     pub room_event_tx: broadcast::Sender<ChatroomEvent>,
     pub inspector_event_tx: broadcast::Sender<SessionEventEnvelope>,
     direct_mentions: Arc<Mutex<HashMap<String, DirectMentionState>>>,
@@ -63,6 +64,7 @@ impl RoomCoordinator {
             store,
             ragents_client,
             callback_base_url,
+            started_at: Utc::now(),
             room_event_tx,
             inspector_event_tx,
             direct_mentions: Arc::new(Mutex::new(HashMap::new())),
@@ -532,6 +534,11 @@ impl RoomCoordinator {
                                             if rv > after_rv {
                                                 after_rv = rv;
                                             }
+                                            // Skip historical events created before this `RoomCoordinator` process started
+                                            // so restarting `ragents-chat` never replays old `ActivationFailed` / `ActivationInterrupted` events.
+                                            if env.created_at < coord.started_at {
+                                                continue;
+                                            }
                                             let _ = coord.inspector_event_tx.send(env.clone());
                                             coord.handle_ragents_event(env).await;
                                         }
@@ -840,59 +847,72 @@ impl RoomCoordinator {
                             room_id: updated.room_id.clone(),
                             agent: self.to_agent_public(updated.clone()),
                         });
+                        let already_logged = env
+                            .activation_id
+                            .as_ref()
+                            .and_then(|aid| {
+                                self.store
+                                    .has_system_message_for_activation(&updated.room_id, aid)
+                                    .ok()
+                            })
+                            .unwrap_or(false);
                         if let Some(err_msg) = fail_err {
                             self.emit_flow_status(
                                 &updated.room_id,
                                 format!("[❌ 执行报错] @{} 内部执行报错: {}", updated.name, err_msg),
                             );
-                            if let Ok((sys_msg, updated_room)) = self.store.append_message(
-                                &updated.room_id,
-                                SenderKind::System,
-                                "system",
-                                "System",
-                                format!("⚠️ @{} 内部执行报错：{}", updated.name, err_msg),
-                                vec![],
-                                vec![],
-                                None,
-                                false,
-                                Some(env.session_id.clone()),
-                                env.activation_id.clone(),
-                            ) {
-                                self.emit_room_event(ChatroomEvent::MessagePosted {
-                                    room_id: updated.room_id.clone(),
-                                    message: sys_msg,
-                                });
-                                self.emit_room_event(ChatroomEvent::RoomUpdated {
-                                    room_id: updated.room_id.clone(),
-                                    room: updated_room,
-                                });
+                            if !already_logged {
+                                if let Ok((sys_msg, updated_room)) = self.store.append_message(
+                                    &updated.room_id,
+                                    SenderKind::System,
+                                    "system",
+                                    "System",
+                                    format!("⚠️ @{} 内部执行报错：{}", updated.name, err_msg),
+                                    vec![],
+                                    vec![],
+                                    None,
+                                    false,
+                                    Some(env.session_id.clone()),
+                                    env.activation_id.clone(),
+                                ) {
+                                    self.emit_room_event(ChatroomEvent::MessagePosted {
+                                        room_id: updated.room_id.clone(),
+                                        message: sys_msg,
+                                    });
+                                    self.emit_room_event(ChatroomEvent::RoomUpdated {
+                                        room_id: updated.room_id.clone(),
+                                        room: updated_room,
+                                    });
+                                }
                             }
                         } else if let Some(reason) = interrupted_reason {
                             self.emit_flow_status(
                                 &updated.room_id,
                                 format!("[⚠️ 任务中断] @{} 任务被中断: {}", updated.name, reason),
                             );
-                            if let Ok((sys_msg, updated_room)) = self.store.append_message(
-                                &updated.room_id,
-                                SenderKind::System,
-                                "system",
-                                "System",
-                                format!("⚠️ @{} 任务执行已中断（Interrupted）：{}", updated.name, reason),
-                                vec![],
-                                vec![],
-                                None,
-                                false,
-                                Some(env.session_id.clone()),
-                                env.activation_id.clone(),
-                            ) {
-                                self.emit_room_event(ChatroomEvent::MessagePosted {
-                                    room_id: updated.room_id.clone(),
-                                    message: sys_msg,
-                                });
-                                self.emit_room_event(ChatroomEvent::RoomUpdated {
-                                    room_id: updated.room_id.clone(),
-                                    room: updated_room,
-                                });
+                            if !already_logged {
+                                if let Ok((sys_msg, updated_room)) = self.store.append_message(
+                                    &updated.room_id,
+                                    SenderKind::System,
+                                    "system",
+                                    "System",
+                                    format!("⚠️ @{} 任务执行已中断（Interrupted）：{}", updated.name, reason),
+                                    vec![],
+                                    vec![],
+                                    None,
+                                    false,
+                                    Some(env.session_id.clone()),
+                                    env.activation_id.clone(),
+                                ) {
+                                    self.emit_room_event(ChatroomEvent::MessagePosted {
+                                        room_id: updated.room_id.clone(),
+                                        message: sys_msg,
+                                    });
+                                    self.emit_room_event(ChatroomEvent::RoomUpdated {
+                                        room_id: updated.room_id.clone(),
+                                        room: updated_room,
+                                    });
+                                }
                             }
                         }
                         self.emit_room_event(ChatroomEvent::AgentActivity {
