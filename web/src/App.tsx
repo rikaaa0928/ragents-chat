@@ -941,7 +941,7 @@ export const App: React.FC = () => {
           );
           if (!contrib) return null;
           return (
-            <aside className="fixed inset-y-0 right-0 z-40 w-full sm:w-[360px] md:relative md:inset-auto md:z-auto md:w-[360px] shrink-0 h-full border-l border-[var(--border-subtle)] bg-[var(--bg-sidebar)] flex flex-col overflow-hidden pb-[env(safe-area-inset-bottom,0px)] md:pb-0 shadow-2xl md:shadow-none">
+            <aside className="fixed inset-y-0 right-0 z-40 w-full sm:w-[360px] md:relative md:inset-auto md:z-auto md:w-[360px] shrink-0 h-full border-l border-[var(--border-subtle)] bg-[var(--bg-sidebar)] flex flex-col overflow-hidden pb-[calc(2rem+env(safe-area-inset-bottom,0px))] md:pb-0 shadow-2xl md:shadow-none">
               <ExtensionSlotHost
                 contribution={contrib}
                 slot="room.right_column"

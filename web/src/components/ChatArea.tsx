@@ -381,6 +381,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     }
 
     if (e.key === 'Enter') {
+      const isMobileDevice =
+        typeof window !== 'undefined' &&
+        (window.innerWidth < 768 ||
+          Boolean(window.matchMedia?.('(pointer: coarse)').matches));
+      if (isMobileDevice) {
+        // 移动端回车始终换行，通过显式发送按钮发送
+        return;
+      }
       if (sendShortcutMode === 'enter_send') {
         if (!e.shiftKey) {
           e.preventDefault();
@@ -660,7 +668,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
       {/* Floating Jump-to-Bottom Pill */}
       {showJumpBottom && (
-        <div className="absolute bottom-28 sm:bottom-32 left-1/2 -translate-x-1/2 z-10">
+        <div className="absolute bottom-36 sm:bottom-32 left-1/2 -translate-x-1/2 z-10">
           <button
             onClick={scrollToBottom}
             className="px-3.5 py-1.5 rounded-full bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] shadow-md text-xs font-medium flex items-center gap-1.5 cursor-pointer hover:bg-[var(--bg-surface)]"
@@ -672,7 +680,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       )}
 
       {/* Bottom Floating Codex Composer */}
-      <div className="px-2.5 sm:px-6 pb-[calc(0.65rem+env(safe-area-inset-bottom,0px))] sm:pb-4 pt-1 shrink-0 bg-[var(--bg-main)]">
+      <div className="px-2.5 sm:px-6 pb-[calc(2.25rem+env(safe-area-inset-bottom,0px))] sm:pb-4 pt-1 shrink-0 bg-[var(--bg-main)]">
         <div className="max-w-[780px] mx-auto">
           <div className="rounded-[20px] sm:rounded-[24px] bg-[var(--bg-surface)] border border-[var(--border-default)] shadow-sm focus-within:border-[var(--text-muted)] transition-colors overflow-hidden">
             {/* Collapsible @Mention Selector Bar inside Composer */}
@@ -772,9 +780,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 onKeyUp={handleKeyUp}
                 placeholder={
                   room
-                    ? sendShortcutMode === 'enter_send'
-                      ? '给聊天室发送消息（Enter 发送，Shift+Enter 换行，支持粘贴或选择图片上传临时区）...'
-                      : '给聊天室发送消息（Shift+Enter 发送，Enter 换行，支持粘贴或选择图片上传临时区）...'
+                    ? typeof window !== 'undefined' &&
+                      (window.innerWidth < 768 ||
+                        Boolean(window.matchMedia?.('(pointer: coarse)').matches))
+                      ? '给聊天室发送消息（点击右下角「发送」按钮发送，回车换行，支持附带图片）...'
+                      : sendShortcutMode === 'enter_send'
+                      ? '给聊天室发送消息（点击「发送」或按 Enter 发送，Shift+Enter 换行，支持粘贴/选择图片）...'
+                      : '给聊天室发送消息（点击「发送」或按 Shift+Enter 发送，Enter 换行，支持粘贴/选择图片）...'
                     : '请先选择或创建聊天室'
                 }
                 disabled={!room}
@@ -890,7 +902,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 </button>
               </div>
 
-              {/* Circular Up-Arrow Send Button (Codex Signature) */}
+              {/* Prominent Send Button (Both Mobile & Desktop) */}
               <button
                 type="button"
                 onClick={handleSend}
@@ -899,25 +911,29 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   !room ||
                   uploadingAttachments
                 }
-                className={`w-8 h-8 rounded-full flex items-center justify-center transition-all cursor-pointer shrink-0 ${
+                className={`h-9 px-3.5 sm:px-4 rounded-full font-semibold text-xs sm:text-[13px] flex items-center justify-center gap-1.5 transition-all cursor-pointer shrink-0 shadow-xs ${
                   (inputText.trim() || pendingAttachments.length > 0) &&
                   room &&
                   !uploadingAttachments
-                    ? 'bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] hover:opacity-90'
-                    : 'bg-[var(--bg-surface-2)] text-[var(--text-muted)] cursor-not-allowed opacity-50'
+                    ? 'bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] hover:opacity-90 active:scale-95'
+                    : 'bg-[var(--bg-surface-2)] text-[var(--text-muted)] cursor-not-allowed opacity-60'
                 }`}
                 title={
                   uploadingAttachments
                     ? '正在上传图片/附件到临时目录...'
-                    : sendShortcutMode === 'enter_send'
-                    ? '发送消息 (Enter)'
-                    : '发送消息 (Shift+Enter)'
+                    : '发送消息'
                 }
               >
                 {uploadingAttachments ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                    <span>上传中</span>
+                  </>
                 ) : (
-                  <ArrowUp className="w-4 h-4 stroke-[2.5]" />
+                  <>
+                    <ArrowUp className="w-4 h-4 stroke-[2.5] shrink-0" />
+                    <span>发送</span>
+                  </>
                 )}
               </button>
             </div>
