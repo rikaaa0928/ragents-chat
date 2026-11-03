@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   KeyRound,
@@ -116,10 +116,16 @@ export const Modals: React.FC<ModalsProps> = ({
   // Manager Settings State + Collapsible Prompt Section
   const [mgrDraft, setMgrDraft] = useState<ManagerSettings>(managerSettings);
   const [mgrClusterOpen, setMgrClusterOpen] = useState(false);
+  const prevActiveModalRef = useRef<ActiveModalType>(null);
 
   useEffect(() => {
-    setMgrDraft(managerSettings);
-    if (activeModal === 'createRoom') {
+    const justOpened = prevActiveModalRef.current !== activeModal;
+    prevActiveModalRef.current = activeModal;
+    if (!justOpened) return;
+
+    if (activeModal === 'managerSettings') {
+      setMgrDraft(managerSettings);
+    } else if (activeModal === 'createRoom') {
       if (createRoomPreset) {
         setInitNodeId(createRoomPreset.nodeId);
         setInitWorkdir(createRoomPreset.workspacePath);
@@ -128,7 +134,7 @@ export const Modals: React.FC<ModalsProps> = ({
         setInitWorkdir('');
       }
     }
-  }, [managerSettings, activeModal, createRoomPreset]);
+  }, [activeModal, createRoomPreset, managerSettings]);
 
   if (!activeModal) return null;
 

@@ -217,7 +217,10 @@ export const App: React.FC = () => {
     try {
       const data = await apiFetch('/api/v1/settings/manager');
       const s = data.settings || {};
-      setManagerSettings((prev) => ({ ...prev, ...s }));
+      setManagerSettings((prev) => {
+        const merged = { ...prev, ...s };
+        return JSON.stringify(prev) === JSON.stringify(merged) ? prev : merged;
+      });
       setClusterNodes(data.cluster_nodes || []);
       const models = new Set<string>();
       for (const node of data.cluster_nodes || []) {
@@ -229,7 +232,10 @@ export const App: React.FC = () => {
       }
       if (s.default_agent_model) models.add(s.default_agent_model);
       if (s.manager_model) models.add(s.manager_model);
-      setAvailableModels(Array.from(models));
+      const nextModels = Array.from(models);
+      setAvailableModels((prev) =>
+        JSON.stringify(prev) === JSON.stringify(nextModels) ? prev : nextModels
+      );
       return data;
     } catch (_) {
       return null;
@@ -595,12 +601,12 @@ export const App: React.FC = () => {
   // Periodically refresh cluster node status (Ready / NotReady, active runners, heartbeats)
   useEffect(() => {
     const timer = setInterval(() => {
-      if (activeModal !== 'auth') {
+      if (!activeModal && !activeExtModal) {
         refreshAvailableModels();
       }
     }, 8000);
     return () => clearInterval(timer);
-  }, [activeModal, refreshAvailableModels]);
+  }, [activeModal, activeExtModal, refreshAvailableModels]);
 
   const handleInspectAgent = async (
     agentId: string,
