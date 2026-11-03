@@ -1090,6 +1090,29 @@ export const App: React.FC = () => {
             await refreshInspectorSnapshot(agentId, inspectedSessionId, false);
           }
         }}
+        onRevokePermissionRule={async (agentId, rule, sessionId) => {
+          const updatedSummary = await apiFetch(
+            `/api/v1/agents/${encodeURIComponent(agentId)}/permissions/revoke`,
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                scope: rule.scope,
+                category: rule.category,
+                list_kind: rule.list_kind,
+                rule: rule.rule,
+                session_id: sessionId || null,
+              }),
+            }
+          );
+          setInspectorSnap((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  permission_summary: updatedSummary,
+                }
+              : prev
+          );
+        }}
         onWithdrawQueuedMessage={async (agentId, msgSeq) => {
           const res = await apiFetch(
             `/api/v1/agents/${agentId}/queue/${msgSeq}/withdraw`,

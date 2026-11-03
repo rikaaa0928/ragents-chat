@@ -173,6 +173,22 @@ export interface PromptParts {
   extension_prompts: Record<string, string>;
 }
 
+export interface PermissionRuleEntry {
+  category: string;
+  list_kind: string;
+  rule: string;
+  scope: 'builtin' | 'node_base' | 'node_grant' | 'workspace_grant' | 'session_grant' | string;
+  scope_label: string;
+  can_delete: boolean;
+}
+
+export interface AgentPermissionSummary {
+  node_id?: string | null;
+  workspace_path?: string | null;
+  defaults: Record<string, string>;
+  rules: PermissionRuleEntry[];
+}
+
 export interface InspectorSnapshot {
   agent: RoomAgent;
   selected_session_id: string;
@@ -189,6 +205,7 @@ export interface InspectorSnapshot {
   };
   events: InspectorEventEnvelope[];
   message_queues?: AgentMessageQueueSnapshot;
+  permission_summary?: AgentPermissionSummary;
 }
 
 export interface ClusterNode {

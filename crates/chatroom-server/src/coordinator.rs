@@ -599,6 +599,304 @@ impl RoomCoordinator {
         Ok(act)
     }
 
+    pub async fn build_agent_permission_summary(
+        &self,
+        agent: &RoomAgent,
+        session: Option<&Session>,
+    ) -> AgentPermissionSummary {
+        let scheduling = session
+            .map(|s| &s.spec.scheduling)
+            .unwrap_or(&agent.scheduling);
+        let (node_id, workspace_path) = match scheduling {
+            SchedulingMode::Pinned {
+                node_id,
+                workspace_path,
+            } => (
+                Some(node_id.clone()),
+                Some(workspace_path.to_string_lossy().into_owned()),
+            ),
+            SchedulingMode::Floating { .. } => (
+                session.and_then(|s| s.status.bound_node_id.clone()),
+                None,
+            ),
+        };
+
+        let node = match &node_id {
+            Some(nid) => self.ragents_client.get_node(nid).await.ok().flatten(),
+            None => None,
+        };
+
+        let mut defaults = BTreeMap::new();
+        for cat in ["file_read", "file_write", "command_work_dir", "http_hosts"] {
+            defaults.insert(cat.to_string(), "ask".to_string());
+        }
+
+        fn apply_default(defaults: &mut BTreeMap<String, String>, cat: &str, rs: &Option<RuleSet<String>>) {
+            if let Some(r) = rs {
+                if let Some(d) = r.default {
+                    let s = match d {
+                        DefaultPermissionDecision::Allow => "allow",
+                        DefaultPermissionDecision::Deny => "deny",
+                        DefaultPermissionDecision::Ask => "ask",
+                    };
+                    defaults.insert(cat.to_string(), s.to_string());
+                }
+            }
+        }
+
+        fn collect_layer_rules(
+            layer: &PermissionPolicyLayer,
+            scope: &str,
+            scope_label: &str,
+            can_delete: bool,
+            defaults: &mut BTreeMap<String, String>,
+            out: &mut Vec<PermissionRuleEntry>,
+        ) {
+            let cats = [
+                ("file_read", &layer.file_read),
+                ("file_write", &layer.file_write),
+                ("command_work_dir", &layer.command_work_dir),
+                ("http_hosts", &layer.http_hosts),
+            ];
+            for (cat, rs_opt) in cats {
+                apply_default(defaults, cat, rs_opt);
+                let Some(rs) = rs_opt else { continue };
+                if let Some(ref allow_list) = rs.allow {
+                    for rule in allow_list {
+                        if !can_delete
+                            && scope == "node_base"
+                            && (rule == "." || rule == "/tmp")
+                            && matches!(cat, "file_read" | "file_write" | "command_work_dir")
+                        {
+                            continue;
+                        }
+                        out.push(PermissionRuleEntry {
+                            category: cat.to_string(),
+                            list_kind: "allow".to_string(),
+                            rule: rule.clone(),
+                            scope: scope.to_string(),
+                            scope_label: scope_label.to_string(),
+                            can_delete,
+                        });
+                    }
+                }
+                if let Some(ref deny_list) = rs.deny {
+                    for rule in deny_list {
+                        out.push(PermissionRuleEntry {
+                            category: cat.to_string(),
+                            list_kind: "deny".to_string(),
+                            rule: rule.clone(),
+                            scope: scope.to_string(),
+                            scope_label: scope_label.to_string(),
+                            can_delete,
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut rules = Vec::new();
+        let ws_display = workspace_path
+            .as_deref()
+            .map(|p| format!(". ({p})"))
+            .unwrap_or_else(|| ". (当前临时工作目录)".to_string());
+        for cat in ["file_read", "file_write", "command_work_dir"] {
+            rules.push(PermissionRuleEntry {
+                category: cat.to_string(),
+                list_kind: "allow".to_string(),
+                rule: ws_display.clone(),
+                scope: "builtin".to_string(),
+                scope_label: "内置默认 · 工作区".to_string(),
+                can_delete: false,
+            });
+            rules.push(PermissionRuleEntry {
+                category: cat.to_string(),
+                list_kind: "allow".to_string(),
+                rule: "/tmp".to_string(),
+                scope: "builtin".to_string(),
+                scope_label: "内置默认 · 临时目录".to_string(),
+                can_delete: false,
+            });
+        }
+
+        if let Some(ref n) = node {
+            collect_layer_rules(
+                &n.spec.base_permissions,
+                "node_base",
+                "节点配置 (daemon.toml)",
+                false,
+                &mut defaults,
+                &mut rules,
+            );
+            collect_layer_rules(
+                &n.spec.granted_permissions,
+                "node_grant",
+                "节点全局授权 (AllowNode)",
+                true,
+                &mut defaults,
+                &mut rules,
+            );
+            if let Some(ref ws_str) = workspace_path {
+                let norm_ws = normalize_and_resolve_workspace_path(std::path::Path::new(ws_str))
+                    .to_string_lossy()
+                    .into_owned();
+                let mut matched_keys = vec![norm_ws];
+                if !matched_keys.contains(ws_str) {
+                    matched_keys.push(ws_str.clone());
+                }
+                for key in matched_keys {
+                    if let Some(ws_layer) = n.spec.workspace_permissions.get(&key) {
+                        collect_layer_rules(
+                            ws_layer,
+                            "workspace_grant",
+                            "当前项目授权 (AllowWorkspace)",
+                            true,
+                            &mut defaults,
+                            &mut rules,
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(s) = session {
+            collect_layer_rules(
+                &s.spec.permissions,
+                "session_grant",
+                "本 Agent 会话授权 (AllowSession)",
+                true,
+                &mut defaults,
+                &mut rules,
+            );
+        }
+
+        AgentPermissionSummary {
+            node_id: node_id.map(|n| n.to_string()),
+            workspace_path,
+            defaults,
+            rules,
+        }
+    }
+
+    pub async fn revoke_agent_permission_rule(
+        &self,
+        agent_id: &str,
+        req: RevokeAgentPermissionRuleRequest,
+    ) -> anyhow::Result<AgentPermissionSummary> {
+        let agent = self
+            .store
+            .get_agent(agent_id)?
+            .ok_or_else(|| anyhow::anyhow!("agent {agent_id} not found"))?;
+        let target_session_id = req
+            .session_id
+            .clone()
+            .unwrap_or_else(|| agent.active_session_id.clone());
+        let mut session = self
+            .ragents_client
+            .get_session(&target_session_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("session {target_session_id} not found"))?;
+
+        let target_node_id = match &session.spec.scheduling {
+            SchedulingMode::Pinned { node_id, .. } => Some(node_id.clone()),
+            SchedulingMode::Floating { .. } => session.status.bound_node_id.clone(),
+        };
+
+        match req.scope.as_str() {
+            "session_grant" => {
+                let mut perms = session.spec.permissions.clone();
+                if !perms.revoke_rule(&req.category, &req.list_kind, &req.rule) {
+                    anyhow::bail!("未在当前会话权限中找到规则: {}", req.rule);
+                }
+                session = self
+                    .ragents_client
+                    .patch_session(
+                        &target_session_id,
+                        PatchSessionSpecRequest {
+                            permissions: Some(perms),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+            }
+            "workspace_grant" => {
+                let nid = target_node_id
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("当前 Agent 未绑定节点"))?;
+                let node = self
+                    .ragents_client
+                    .get_node(&nid)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("节点 {nid} 不存在"))?;
+                let mut ws_map = node.spec.workspace_permissions.clone();
+                let mut removed = false;
+                if let SchedulingMode::Pinned { ref workspace_path, .. } = session.spec.scheduling {
+                    let raw_ws = workspace_path.to_string_lossy().into_owned();
+                    let norm_ws = normalize_and_resolve_workspace_path(workspace_path)
+                        .to_string_lossy()
+                        .into_owned();
+                    for k in [norm_ws, raw_ws] {
+                        if let Some(layer) = ws_map.get_mut(&k) {
+                            if layer.revoke_rule(&req.category, &req.list_kind, &req.rule) {
+                                removed = true;
+                            }
+                        }
+                    }
+                }
+                if !removed {
+                    anyhow::bail!("未在项目工作区权限中找到规则: {}", req.rule);
+                }
+                self.ragents_client
+                    .patch_node(
+                        &nid,
+                        PatchNodeSpecRequest {
+                            workspace_permissions: Some(ws_map),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+            }
+            "node_grant" => {
+                let nid = target_node_id
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("当前 Agent 未绑定节点"))?;
+                let node = self
+                    .ragents_client
+                    .get_node(&nid)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("节点 {nid} 不存在"))?;
+                let mut granted = node.spec.granted_permissions.clone();
+                if !granted.revoke_rule(&req.category, &req.list_kind, &req.rule) {
+                    anyhow::bail!("未在节点全局授权中找到规则: {}", req.rule);
+                }
+                self.ragents_client
+                    .patch_node(
+                        &nid,
+                        PatchNodeSpecRequest {
+                            granted_permissions: Some(granted),
+                            ..Default::default()
+                        },
+                    )
+                    .await?;
+            }
+            other => {
+                anyhow::bail!("该权限来源 ({other}) 属于系统默认或 daemon.toml 静态配置，不支持直接删除");
+            }
+        }
+
+        self.emit_flow_status(
+            &agent.room_id,
+            format!(
+                "[🔒 权限移除] 已删除 @{} 的 {} ({}) 权限规则 `{}`",
+                agent.name, req.category, req.scope, req.rule
+            ),
+        );
+
+        Ok(self
+            .build_agent_permission_summary(&agent, Some(&session))
+            .await)
+    }
+
     pub fn emit_flow_status(&self, room_id: &str, status: impl Into<String>) {
         let status_str = status.into();
         {

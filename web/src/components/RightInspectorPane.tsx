@@ -47,6 +47,7 @@ import {
   FlowLogEntry,
   AgentTokenUsage,
   QueuedMessageEntry,
+  PermissionRuleEntry,
 } from '../types';
 
 function formatCompactTokens(n?: number | null): string {
@@ -118,6 +119,11 @@ interface RightInspectorPaneProps {
   ) => void;
   onCancelAgent: (agentId: string) => void;
   onRetryAgent?: (agentId: string) => void;
+  onRevokePermissionRule?: (
+    agentId: string,
+    rule: PermissionRuleEntry,
+    sessionId?: string
+  ) => void;
   onWithdrawQueuedMessage: (agentId: string, msgSeq: number) => void;
 }
 
@@ -146,6 +152,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   onResolvePermission,
   onCancelAgent,
   onRetryAgent,
+  onRevokePermissionRule,
   onWithdrawQueuedMessage,
 }) => {
   // Inspector Column Width Mode: standard (430px) or wide (580px)
@@ -154,7 +161,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   // Master Collapsible Toggle for Inspector Configuration Section (collapsed by default to maximize content preview space!)
   const [configDrawerOpen, setConfigDrawerOpen] = useState(false);
   // Active tab inside the collapsible config drawer
-  const [activeConfigTab, setActiveConfigTab] = useState<'reasoning' | 'prompt' | 'lineage'>('reasoning');
+  const [activeConfigTab, setActiveConfigTab] = useState<'reasoning' | 'prompt' | 'permissions' | 'lineage'>('reasoning');
 
   // Permission Box Collapsible State
   const [permExpanded, setPermExpanded] = useState(true);
@@ -1056,8 +1063,30 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                       }`}
                     >
                       <FileText className="w-3 h-3 text-emerald-500" />
-                      <span>System Prompt (四段式)</span>
+                      <span>System Prompt</span>
                       <Unlock className="w-2.5 h-2.5 text-emerald-500" />
+                    </button>
+
+                    <button
+                      onClick={() => setActiveConfigTab('permissions')}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors ${
+                        activeConfigTab === 'permissions'
+                          ? 'bg-[var(--bg-main)] text-[var(--text-primary)] shadow-2xs'
+                          : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                      }`}
+                    >
+                      <Lock className="w-3 h-3 text-amber-500" />
+                      <span>权限策略</span>
+                      {(() => {
+                        const customCount = (
+                          inspector?.permission_summary?.rules || []
+                        ).filter((r) => r.can_delete).length;
+                        return customCount > 0 ? (
+                          <span className="px-1 py-0 rounded bg-amber-500/20 text-amber-600 dark:text-amber-300 text-[9.5px] font-mono-code">
+                            +{customCount}
+                          </span>
+                        ) : null;
+                      })()}
                     </button>
 
                     <button
@@ -1340,6 +1369,166 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                               </div>
                             )}
                         </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* Tab 2.5: Agent & Project Permissions */}
+                {activeConfigTab === 'permissions' && (
+                  <div className="p-2.5 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] space-y-2.5">
+                    {(() => {
+                      const summary = inspector?.permission_summary;
+                      const allRules = summary?.rules || [];
+                      const defaults = summary?.defaults || {};
+                      const categories = [
+                        {
+                          key: 'file_read',
+                          label: '📖 文件读取 (file_read)',
+                        },
+                        {
+                          key: 'file_write',
+                          label: '✏️ 文件写入 (file_write)',
+                        },
+                        {
+                          key: 'command_work_dir',
+                          label: '💻 命令目录与可执行程序 (command_work_dir)',
+                        },
+                        {
+                          key: 'http_hosts',
+                          label: '🌐 网络访问域名 (http_hosts)',
+                        },
+                      ];
+
+                      const getScopeBadgeClass = (scope: string) => {
+                        switch (scope) {
+                          case 'session_grant':
+                            return 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border-emerald-500/30';
+                          case 'workspace_grant':
+                            return 'bg-blue-500/15 text-blue-600 dark:text-blue-300 border-blue-500/30';
+                          case 'node_grant':
+                            return 'bg-amber-500/15 text-amber-600 dark:text-amber-300 border-amber-500/30';
+                          case 'node_base':
+                            return 'bg-violet-500/15 text-violet-600 dark:text-violet-300 border-violet-500/30';
+                          default:
+                            return 'bg-[var(--bg-surface)] text-[var(--text-muted)] border-[var(--border-subtle)]';
+                        }
+                      };
+
+                      return (
+                        <>
+                          <div className="flex flex-wrap items-center justify-between gap-1.5 text-[10.5px] text-[var(--text-secondary)] pb-1 border-b border-[var(--border-subtle)]">
+                            <span className="truncate">
+                              节点:{' '}
+                              <code className="font-mono-code text-[var(--text-primary)]">
+                                {summary?.node_id || 'Floating'}
+                              </code>
+                              {summary?.workspace_path ? (
+                                <>
+                                  {' · '}工作区:{' '}
+                                  <code className="font-mono-code text-[var(--text-primary)]">
+                                    {summary.workspace_path}
+                                  </code>
+                                </>
+                              ) : null}
+                            </span>
+                            <span className="text-[10px] text-[var(--text-muted)]">
+                              非默认动态授权可点击右侧 × 实时移除
+                            </span>
+                          </div>
+
+                          <div className="space-y-2 max-h-56 overflow-y-auto pr-0.5">
+                            {categories.map((cat) => {
+                              const catRules = allRules.filter(
+                                (r) => r.category === cat.key
+                              );
+                              const defDecision = defaults[cat.key] || 'ask';
+                              return (
+                                <div
+                                  key={cat.key}
+                                  className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-sidebar)] p-2 space-y-1.5"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="text-[11px] font-semibold text-[var(--text-primary)]">
+                                      {cat.label}
+                                    </span>
+                                    <span className="px-1.5 py-0.5 rounded bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[9.5px] font-mono-code text-[var(--text-muted)]">
+                                      默认策略: {defDecision}
+                                    </span>
+                                  </div>
+
+                                  {catRules.length === 0 ? (
+                                    <div className="text-[10.5px] text-[var(--text-muted)] italic py-0.5">
+                                      暂无额外白名单规则（访问时按默认策略 {defDecision} 处理）
+                                    </div>
+                                  ) : (
+                                    <div className="space-y-1">
+                                      {catRules.map((r, rIdx) => (
+                                        <div
+                                          key={`${r.category}-${r.scope}-${r.list_kind}-${r.rule}-${rIdx}`}
+                                          className="flex items-center justify-between gap-1.5 px-2 py-1 rounded-md bg-[var(--bg-main)] border border-[var(--border-subtle)] text-[10.5px]"
+                                        >
+                                          <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                                            <span
+                                              className={`px-1 py-0 rounded text-[9.5px] font-mono-code shrink-0 ${
+                                                r.list_kind === 'deny'
+                                                  ? 'bg-rose-500/15 text-rose-500'
+                                                  : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                                              }`}
+                                            >
+                                              {r.list_kind === 'deny'
+                                                ? 'DENY'
+                                                : 'ALLOW'}
+                                            </span>
+                                            <code
+                                              className="font-mono-code text-[var(--text-primary)] truncate"
+                                              title={r.rule}
+                                            >
+                                              {r.rule}
+                                            </code>
+                                          </div>
+
+                                          <div className="flex items-center gap-1.5 shrink-0">
+                                            <span
+                                              className={`px-1.5 py-0.5 rounded border text-[9.5px] ${getScopeBadgeClass(
+                                                r.scope
+                                              )}`}
+                                            >
+                                              {r.scope_label}
+                                            </span>
+                                            {r.can_delete && onRevokePermissionRule ? (
+                                              <button
+                                                type="button"
+                                                onClick={() =>
+                                                  onRevokePermissionRule(
+                                                    inspectedAgent.agent_id,
+                                                    r,
+                                                    inspector?.selected_session_id
+                                                  )
+                                                }
+                                                title={`实时删除此非默认权限: ${r.rule}`}
+                                                className="w-5 h-5 rounded flex items-center justify-center text-rose-500 hover:bg-rose-500/15 cursor-pointer transition-colors"
+                                              >
+                                                <X className="w-3.5 h-3.5" />
+                                              </button>
+                                            ) : (
+                                              <span
+                                                title="系统内置或 daemon.toml 基础静态权限，不可删除"
+                                                className="w-5 h-5 flex items-center justify-center text-[var(--text-muted)] opacity-50"
+                                              >
+                                                <Lock className="w-3 h-3" />
+                                              </span>
+                                            )}
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </>
                       );
                     })()}
                   </div>

@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use openresponses_rust::{ReasoningConfig, ReasoningEffort, ReasoningSummary};
 use ragents_protocol::*;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub fn build_reasoning_config(
     effort: Option<&str>,
@@ -524,6 +525,39 @@ pub enum ChatroomEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionRuleEntry {
+    pub category: String,
+    pub list_kind: String,
+    pub rule: String,
+    /// `builtin` | `node_base` | `node_grant` | `workspace_grant` | `session_grant`
+    pub scope: String,
+    pub scope_label: String,
+    pub can_delete: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentPermissionSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
+    #[serde(default)]
+    pub defaults: BTreeMap<String, String>,
+    #[serde(default)]
+    pub rules: Vec<PermissionRuleEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevokeAgentPermissionRuleRequest {
+    pub scope: String,
+    pub category: String,
+    pub list_kind: String,
+    pub rule: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InspectorResponse {
     pub agent: RoomAgentPublic,
     pub selected_session_id: SessionId,
@@ -535,6 +569,8 @@ pub struct InspectorResponse {
     pub can_edit_prompt: bool,
     #[serde(default)]
     pub message_queues: AgentMessageQueueSnapshot,
+    #[serde(default)]
+    pub permission_summary: AgentPermissionSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
