@@ -771,87 +771,55 @@ impl RoomCoordinator {
             );
         }
 
-        // Also extract `AllowActivation` and `AllowOnce` grants from the session's event history
-        let mut req_map: BTreeMap<PermissionRequestId, (Option<ActivationId>, CapabilityRequest)> =
-            BTreeMap::new();
-        for env in events {
-            if let SessionEvent::PermissionRequested { ref request } = env.event {
-                req_map.insert(
-                    request.id.clone(),
-                    (
-                        env.activation_id
-                            .clone()
-                            .or_else(|| Some(request.activation_id.clone())),
-                        request.capability.clone(),
-                    ),
-                );
-            }
-        }
+        // Also extract `AllowActivation` grants for the currently active activation (if any)
+        let active_act_id = session
+            .and_then(|s| s.status.active_activation_id.clone())
+            .or_else(|| {
+                if agent.runtime_state != AgentRuntimeState::Idle {
+                    agent.active_activation_id.clone()
+                } else {
+                    None
+                }
+            });
 
-        let active_act_id = if agent.runtime_state != AgentRuntimeState::Idle {
-            agent
-                .active_activation_id
-                .clone()
-                .or_else(|| session.and_then(|s| s.status.active_activation_id.clone()))
-        } else {
-            None
-        };
-
-        let mut active_act_layer = PermissionPolicyLayer::default();
-        let mut expired_act_layer = PermissionPolicyLayer::default();
-        for env in events {
-            if let SessionEvent::PermissionResolved {
-                ref request_id,
-                decision,
-                ref override_path,
-                ..
-            } = env.event
-            {
-                if matches!(
-                    decision,
-                    PermissionDecision::AllowActivation | PermissionDecision::AllowOnce
-                ) {
-                    if let Some((req_act_id, base_cap)) = req_map.get(request_id) {
-                        let effective_cap = base_cap.with_override_path(override_path.as_deref());
-                        let is_current_active = decision == PermissionDecision::AllowActivation
-                            && active_act_id.is_some()
-                            && req_act_id.as_ref() == active_act_id.as_ref();
-                        if is_current_active {
-                            active_act_layer.grant_capability(&effective_cap);
-                        } else {
-                            expired_act_layer.grant_capability(&effective_cap);
-                        }
+        if let Some(ref current_act_id) = active_act_id {
+            let mut req_map: BTreeMap<PermissionRequestId, CapabilityRequest> = BTreeMap::new();
+            for env in events {
+                if let SessionEvent::PermissionRequested { ref request } = env.event {
+                    let ev_act = env
+                        .activation_id
+                        .as_ref()
+                        .unwrap_or(&request.activation_id);
+                    if ev_act == current_act_id {
+                        req_map.insert(request.id.clone(), request.capability.clone());
                     }
                 }
             }
-        }
 
-        collect_layer_rules(
-            &active_act_layer,
-            "activation_grant",
-            "本轮回复激活 (AllowActivation · 当前运行中有效)",
-            false,
-            &mut defaults,
-            &mut rules,
-        );
-
-        let mut expired_rules = Vec::new();
-        collect_layer_rules(
-            &expired_act_layer,
-            "activation_expired",
-            "本轮激活历史 (已随该轮回复结束释放)",
-            false,
-            &mut BTreeMap::new(),
-            &mut expired_rules,
-        );
-        for mut exp in expired_rules {
-            let already_active = rules
-                .iter()
-                .any(|r| r.category == exp.category && r.rule == exp.rule);
-            if !already_active {
-                exp.list_kind = "expired_activation".to_string();
-                rules.push(exp);
+            let mut active_act_layer = PermissionPolicyLayer::default();
+            for env in events {
+                if let SessionEvent::PermissionResolved {
+                    ref request_id,
+                    decision: PermissionDecision::AllowActivation,
+                    ref override_path,
+                    ..
+                } = env.event
+                {
+                    if let Some(base_cap) = req_map.get(request_id) {
+                        let effective_cap = base_cap.with_override_path(override_path.as_deref());
+                        active_act_layer.grant_capability(&effective_cap);
+                    }
+                }
             }
+
+            collect_layer_rules(
+                &active_act_layer,
+                "activation_grant",
+                "本轮回复激活 (AllowActivation)",
+                false,
+                &mut defaults,
+                &mut rules,
+            );
         }
 
         AgentPermissionSummary {
@@ -975,134 +943,10 @@ impl RoomCoordinator {
                 agent.name, req.category, req.scope, req.rule
             ),
         );
-
-        let events = self
-            .ragents_client
-            .read_events(Some(&target_session_id), 0)
-            .await
-            .unwrap_or_default();
-
-        Ok(self
-            .build_agent_permission_summary(&agent, Some(&session), &events)
-            .await)
-    }
-
-    pub async fn grant_agent_permission_rule(
-        &self,
-        agent_id: &str,
-        req: GrantAgentPermissionRuleRequest,
-    ) -> anyhow::Result<AgentPermissionSummary> {
-        let agent = self
-            .store
-            .get_agent(agent_id)?
-            .ok_or_else(|| anyhow::anyhow!("agent {agent_id} not found"))?;
-        let target_session_id = req
-            .session_id
-            .clone()
-            .unwrap_or_else(|| agent.active_session_id.clone());
-        let mut session = self
-            .ragents_client
-            .get_session(&target_session_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("session {target_session_id} not found"))?;
-
-        let cap = match req.category.as_str() {
-            "file_read" => CapabilityRequest::FileRead {
-                path: std::path::PathBuf::from(&req.rule),
-            },
-            "file_write" => CapabilityRequest::FileWrite {
-                path: std::path::PathBuf::from(&req.rule),
-            },
-            "command_work_dir" => CapabilityRequest::CommandWorkDir {
-                work_dir: std::path::PathBuf::from(&req.rule),
-            },
-            "http_hosts" => CapabilityRequest::Http {
-                scheme: "https".to_string(),
-                host: req.rule.clone(),
-                port: None,
-                method: "GET".to_string(),
-            },
-            other => anyhow::bail!("不支持的权限类别: {other}"),
-        };
-
-        let target_node_id = match &session.spec.scheduling {
-            SchedulingMode::Pinned { node_id, .. } => Some(node_id.clone()),
-            SchedulingMode::Floating { .. } => session.status.bound_node_id.clone(),
-        };
-
-        match req.target_scope.as_str() {
-            "session_grant" => {
-                let mut perms = session.spec.permissions.clone();
-                perms.grant_capability(&cap);
-                session = self
-                    .ragents_client
-                    .patch_session(
-                        &target_session_id,
-                        PatchSessionSpecRequest {
-                            permissions: Some(perms),
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
-            }
-            "workspace_grant" => {
-                let nid = target_node_id
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("当前 Agent 未绑定节点"))?;
-                let node = self
-                    .ragents_client
-                    .get_node(&nid)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("节点 {nid} 不存在"))?;
-                let SchedulingMode::Pinned { ref workspace_path, .. } = session.spec.scheduling else {
-                    anyhow::bail!("Floating 会话不支持工作区级持久授权，请选择本会话授权");
-                };
-                let ws_key = normalize_and_resolve_workspace_path(workspace_path)
-                    .to_string_lossy()
-                    .into_owned();
-                let mut ws_map = node.spec.workspace_permissions.clone();
-                ws_map.entry(ws_key).or_default().grant_capability(&cap);
-                self.ragents_client
-                    .patch_node(
-                        &nid,
-                        PatchNodeSpecRequest {
-                            workspace_permissions: Some(ws_map),
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
-            }
-            "node_grant" => {
-                let nid = target_node_id
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("当前 Agent 未绑定节点"))?;
-                let node = self
-                    .ragents_client
-                    .get_node(&nid)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("节点 {nid} 不存在"))?;
-                let mut granted = node.spec.granted_permissions.clone();
-                granted.grant_capability(&cap);
-                self.ragents_client
-                    .patch_node(
-                        &nid,
-                        PatchNodeSpecRequest {
-                            granted_permissions: Some(granted),
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
-            }
-            other => anyhow::bail!("不支持的授权层级: {other}"),
-        }
-
-        self.emit_flow_status(
-            &agent.room_id,
-            format!(
-                "[🔓 权限升级] 已将 @{} 的 {} 规则 `{}` 持久授权至 {}",
-                agent.name, req.category, req.rule, req.target_scope
-            ),
-        );
+        self.emit_room_event(ChatroomEvent::AgentUpdated {
+            room_id: agent.room_id.clone(),
+            agent: self.to_agent_public(agent.clone()),
+        });
 
         let events = self
             .ragents_client

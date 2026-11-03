@@ -272,6 +272,10 @@ export const App: React.FC = () => {
           realtime_messages: [],
           normal_messages: [],
         },
+        permission_summary: snap.permission_summary || {
+          defaults: {},
+          rules: [],
+        },
       };
       inspectedAgentIdRef.current = snap.agent.agent_id;
       inspectedSessionIdRef.current = sessionId;
@@ -356,6 +360,7 @@ export const App: React.FC = () => {
           } else if (
             evType === 'session_compacted' ||
             evType === 'permission_requested' ||
+            evType === 'permission_resolved' ||
             evType === 'activation_completed' ||
             evType === 'activation_failed' ||
             evType === 'activation_interrupted' ||
@@ -364,7 +369,8 @@ export const App: React.FC = () => {
             refreshInspectorSnapshot(
               agentId,
               sessionId,
-              evType !== 'permission_requested'
+              evType !== 'permission_requested' &&
+                evType !== 'permission_resolved'
             );
           }
         } catch (err) {
@@ -1099,33 +1105,6 @@ export const App: React.FC = () => {
                 scope: rule.scope,
                 category: rule.category,
                 list_kind: rule.list_kind,
-                rule: rule.rule,
-                session_id: sessionId || null,
-              }),
-            }
-          );
-          setInspectorSnap((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  permission_summary: updatedSummary,
-                }
-              : prev
-          );
-        }}
-        onGrantPermissionRule={async (
-          agentId,
-          rule,
-          targetScope,
-          sessionId
-        ) => {
-          const updatedSummary = await apiFetch(
-            `/api/v1/agents/${encodeURIComponent(agentId)}/permissions/grant`,
-            {
-              method: 'POST',
-              body: JSON.stringify({
-                target_scope: targetScope,
-                category: rule.category,
                 rule: rule.rule,
                 session_id: sessionId || null,
               }),
