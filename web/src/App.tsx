@@ -58,7 +58,9 @@ export const App: React.FC = () => {
   }, [theme]);
 
   // Layout Collapsible States (Right-side columns default to closed for clean Codex focus!)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth < 768 : false
+  );
   const [activeExtRightColumnId, setActiveExtRightColumnId] = useState<string | null>(null);
   const [activeExtModal, setActiveExtModal] = useState<UiContribution | null>(null);
   const [flowColumnOpen, setFlowColumnOpen] = useState(false);
@@ -66,6 +68,28 @@ export const App: React.FC = () => {
   const [inspectorColumnOpen, setInspectorColumnOpen] = useState(false);
   const [activeModal, setActiveModal] = useState<ActiveModalType>(null);
   const [createRoomPreset, setCreateRoomPreset] = useState<CreateRoomPreset | null>(null);
+
+  // Track dynamic visualViewport height on mobile browsers so bottom navigation bars / keyboards never obscure the bottom composer
+  useEffect(() => {
+    const updateViewportHeight = () => {
+      const vh = window.visualViewport?.height || window.innerHeight;
+      if (vh > 0) {
+        document.documentElement.style.setProperty('--app-height', `${vh}px`);
+      }
+    };
+    updateViewportHeight();
+    window.addEventListener('resize', updateViewportHeight);
+    window.visualViewport?.addEventListener('resize', updateViewportHeight);
+    window.visualViewport?.addEventListener('scroll', updateViewportHeight);
+    return () => {
+      window.removeEventListener('resize', updateViewportHeight);
+      window.visualViewport?.removeEventListener('resize', updateViewportHeight);
+      window.visualViewport?.removeEventListener('scroll', updateViewportHeight);
+    };
+  }, []);
+
+  const isMobileViewport = () =>
+    typeof window !== 'undefined' && window.innerWidth < 768;
 
   // Core State
   const [authToken, setAuthToken] = useState(
@@ -583,7 +607,15 @@ export const App: React.FC = () => {
     sessionId?: string,
     autoOpenPane = true
   ) => {
-    if (autoOpenPane) setInspectorColumnOpen(true);
+    if (autoOpenPane) {
+      if (isMobileViewport()) {
+        setSidebarCollapsed(true);
+        setActiveExtRightColumnId(null);
+        setFlowColumnOpen(false);
+        setRosterColumnOpen(false);
+      }
+      setInspectorColumnOpen(true);
+    }
     setInspectedAgentId(agentId);
     setLiveReasoningBuffer('');
     setLiveStreamBuffer('');
@@ -676,8 +708,32 @@ export const App: React.FC = () => {
     setCurrentDetail((prev) => (prev ? { ...prev, room: updated } : null));
   };
 
+  const anyMobileDrawerOpen =
+    !sidebarCollapsed ||
+    Boolean(activeExtRightColumnId) ||
+    flowColumnOpen ||
+    rosterColumnOpen ||
+    inspectorColumnOpen;
+
   return (
-    <div className="flex w-screen h-screen overflow-hidden bg-[var(--bg-main)] text-[var(--text-primary)]">
+    <div
+      style={{ height: 'var(--app-height, 100dvh)' }}
+      className="relative flex w-full overflow-hidden bg-[var(--bg-main)] text-[var(--text-primary)]"
+    >
+      {/* Mobile Backdrop Overlay when Sidebar or Right Sheet is open */}
+      {anyMobileDrawerOpen && (
+        <div
+          onClick={() => {
+            setSidebarCollapsed(true);
+            setActiveExtRightColumnId(null);
+            setFlowColumnOpen(false);
+            setRosterColumnOpen(false);
+            setInspectorColumnOpen(false);
+          }}
+          className="fixed inset-0 z-30 bg-black/45 backdrop-blur-[1px] md:hidden"
+        />
+      )}
+
       {/* 1. Collapsible Left Sidebar */}
       <Sidebar
         collapsed={sidebarCollapsed}
@@ -685,13 +741,24 @@ export const App: React.FC = () => {
         rooms={roomsList}
         clusterNodes={clusterNodes}
         currentRoomId={currentRoomId}
-        onSelectRoom={(id) => handleSelectRoom(id)}
+        onSelectRoom={(id) => {
+          if (isMobileViewport()) {
+            setSidebarCollapsed(true);
+          }
+          handleSelectRoom(id);
+        }}
         onOpenCreateRoom={async (preset) => {
+          if (isMobileViewport()) {
+            setSidebarCollapsed(true);
+          }
           setCreateRoomPreset(preset || null);
           await refreshAvailableModels();
           setActiveModal('createRoom');
         }}
         onOpenManagerSettings={async () => {
+          if (isMobileViewport()) {
+            setSidebarCollapsed(true);
+          }
           await refreshAvailableModels();
           setActiveModal('managerSettings');
         }}
@@ -700,7 +767,12 @@ export const App: React.FC = () => {
         footerContributions={(extManifest?.contributions || []).filter(
           (c) => c.slot === 'sidebar.footer'
         )}
-        onOpenExtensionModal={(contrib) => setActiveExtModal(contrib)}
+        onOpenExtensionModal={(contrib) => {
+          if (isMobileViewport()) {
+            setSidebarCollapsed(true);
+          }
+          setActiveExtModal(contrib);
+        }}
         onLogout={async () => {
           await fetch('/api/v1/auth/logout', { method: 'POST' }).catch(() => {});
           localStorage.removeItem('ragents_chat_token');
@@ -716,7 +788,15 @@ export const App: React.FC = () => {
       <main className="flex-1 flex flex-col min-w-0 min-h-0 h-full overflow-hidden">
         <TopHeader
           sidebarCollapsed={sidebarCollapsed}
-          onToggleSidebar={() => setSidebarCollapsed(false)}
+          onToggleSidebar={() => {
+            if (isMobileViewport()) {
+              setActiveExtRightColumnId(null);
+              setFlowColumnOpen(false);
+              setRosterColumnOpen(false);
+              setInspectorColumnOpen(false);
+            }
+            setSidebarCollapsed(false);
+          }}
           onOpenCreateRoom={async () => {
             setCreateRoomPreset(null);
             await refreshAvailableModels();
@@ -732,17 +812,45 @@ export const App: React.FC = () => {
             (c) => c.slot === 'room.right_column'
           )}
           activeExtRightColumnId={activeExtRightColumnId}
-          onToggleExtRightColumn={(id) =>
-            setActiveExtRightColumnId((prev) => (prev === id ? null : id))
-          }
+          onToggleExtRightColumn={(id) => {
+            if (isMobileViewport() && activeExtRightColumnId !== id) {
+              setSidebarCollapsed(true);
+              setFlowColumnOpen(false);
+              setRosterColumnOpen(false);
+              setInspectorColumnOpen(false);
+            }
+            setActiveExtRightColumnId((prev) => (prev === id ? null : id));
+          }}
           flowColumnOpen={flowColumnOpen}
-          onToggleFlowColumn={() => setFlowColumnOpen(!flowColumnOpen)}
+          onToggleFlowColumn={() => {
+            if (isMobileViewport() && !flowColumnOpen) {
+              setSidebarCollapsed(true);
+              setActiveExtRightColumnId(null);
+              setRosterColumnOpen(false);
+              setInspectorColumnOpen(false);
+            }
+            setFlowColumnOpen(!flowColumnOpen);
+          }}
           rosterColumnOpen={rosterColumnOpen}
-          onToggleRosterColumn={() => setRosterColumnOpen(!rosterColumnOpen)}
+          onToggleRosterColumn={() => {
+            if (isMobileViewport() && !rosterColumnOpen) {
+              setSidebarCollapsed(true);
+              setActiveExtRightColumnId(null);
+              setFlowColumnOpen(false);
+              setInspectorColumnOpen(false);
+            }
+            setRosterColumnOpen(!rosterColumnOpen);
+          }}
           inspectorColumnOpen={inspectorColumnOpen}
-          onToggleInspectorColumn={() =>
-            setInspectorColumnOpen(!inspectorColumnOpen)
-          }
+          onToggleInspectorColumn={() => {
+            if (isMobileViewport() && !inspectorColumnOpen) {
+              setSidebarCollapsed(true);
+              setActiveExtRightColumnId(null);
+              setFlowColumnOpen(false);
+              setRosterColumnOpen(false);
+            }
+            setInspectorColumnOpen(!inspectorColumnOpen);
+          }}
           onUpdateRoomControls={handleUpdateRoomControls}
           onResumeRelay={handleResumeRelay}
           onDeleteRoom={async () => {
@@ -833,7 +941,7 @@ export const App: React.FC = () => {
           );
           if (!contrib) return null;
           return (
-            <aside className="w-[360px] shrink-0 h-full border-l border-[var(--border-subtle)] bg-[var(--bg-sidebar)] flex flex-col overflow-hidden">
+            <aside className="fixed inset-y-0 right-0 z-40 w-full sm:w-[360px] md:relative md:inset-auto md:z-auto md:w-[360px] shrink-0 h-full border-l border-[var(--border-subtle)] bg-[var(--bg-sidebar)] flex flex-col overflow-hidden pb-[env(safe-area-inset-bottom,0px)] md:pb-0 shadow-2xl md:shadow-none">
               <ExtensionSlotHost
                 contribution={contrib}
                 slot="room.right_column"
@@ -843,9 +951,12 @@ export const App: React.FC = () => {
                 agents={currentDetail?.agents || []}
                 clusterNodes={clusterNodes}
                 apiFetch={apiFetch}
-                onInsertComposerText={(text) =>
-                  setRestoredDraft({ text, seq: Date.now() })
-                }
+                onInsertComposerText={(text) => {
+                  setRestoredDraft({ text, seq: Date.now() });
+                  if (isMobileViewport()) {
+                    setActiveExtRightColumnId(null);
+                  }
+                }}
                 onAuthSuccess={async () => {}}
                 onShowError={(msg) =>
                   pushApiError('EXT', contrib.plugin_id, 'EXT_ERR', msg)

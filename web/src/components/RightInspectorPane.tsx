@@ -646,10 +646,10 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
           VERTICAL COLUMN 0: 流程轨迹竖列 (Flow Trace Column - Closed by default!)
           ===================================================================== */}
       <aside
-        className={`flex flex-col h-full shrink-0 border-l border-[var(--border-subtle)] bg-[var(--bg-sidebar)] transition-all duration-200 ease-out overflow-hidden ${
+        className={`flex flex-col h-full shrink-0 border-l border-[var(--border-subtle)] bg-[var(--bg-sidebar)] transition-all duration-200 ease-out overflow-hidden fixed inset-y-0 right-0 z-40 md:relative md:inset-auto md:z-auto pb-[env(safe-area-inset-bottom,0px)] md:pb-0 ${
           !flowColumnOpen
-            ? 'w-0 border-l-0 opacity-0 pointer-events-none'
-            : 'w-[300px] opacity-100'
+            ? 'w-0 translate-x-full md:translate-x-0 border-l-0 opacity-0 pointer-events-none'
+            : 'w-full sm:w-[320px] md:w-[300px] translate-x-0 opacity-100 shadow-2xl md:shadow-none'
         }`}
       >
         {/* Flow Column Header (52px) */}
@@ -765,10 +765,10 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
           VERTICAL COLUMN 1: 群成员竖列 (Agent Roster Column)
           ===================================================================== */}
       <aside
-        className={`flex flex-col h-full shrink-0 border-l border-[var(--border-subtle)] bg-[var(--bg-sidebar)] transition-all duration-200 ease-out overflow-hidden ${
+        className={`flex flex-col h-full shrink-0 border-l border-[var(--border-subtle)] bg-[var(--bg-sidebar)] transition-all duration-200 ease-out overflow-hidden fixed inset-y-0 right-0 z-40 md:relative md:inset-auto md:z-auto pb-[env(safe-area-inset-bottom,0px)] md:pb-0 ${
           !rosterColumnOpen
-            ? 'w-0 border-l-0 opacity-0 pointer-events-none'
-            : 'w-[280px] opacity-100'
+            ? 'w-0 translate-x-full md:translate-x-0 border-l-0 opacity-0 pointer-events-none'
+            : 'w-full sm:w-[320px] md:w-[280px] translate-x-0 opacity-100 shadow-2xl md:shadow-none'
         }`}
       >
         {/* Column 1 Header (52px) */}
@@ -919,12 +919,12 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
           VERTICAL COLUMN 2: 具体 Agent Session 透视竖列 (Independently Hideable!)
           ===================================================================== */}
       <aside
-        className={`flex flex-col h-full shrink-0 border-l border-[var(--border-subtle)] bg-[var(--bg-main)] transition-all duration-200 ease-out overflow-hidden ${
+        className={`flex flex-col h-full shrink-0 border-l border-[var(--border-subtle)] bg-[var(--bg-main)] transition-all duration-200 ease-out overflow-hidden fixed inset-y-0 right-0 z-40 md:relative md:inset-auto md:z-auto pb-[env(safe-area-inset-bottom,0px)] md:pb-0 ${
           !inspectorColumnOpen
-            ? 'w-0 border-l-0 opacity-0 pointer-events-none'
+            ? 'w-0 translate-x-full md:translate-x-0 border-l-0 opacity-0 pointer-events-none'
             : wideMode
-            ? 'w-[600px] max-w-[85vw] opacity-100'
-            : 'w-[430px] max-w-[82vw] opacity-100'
+            ? 'w-full md:w-[600px] md:max-w-[85vw] translate-x-0 opacity-100 shadow-2xl md:shadow-none'
+            : 'w-full sm:w-[430px] md:max-w-[82vw] translate-x-0 opacity-100 shadow-2xl md:shadow-none'
         }`}
       >
         {/* Column 2 Top Header (52px) */}

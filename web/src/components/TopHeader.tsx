@@ -213,11 +213,11 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
         </div>
 
         {/* Right: Expandable Component Toggle Pills */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          {/* 0. Toggle Room Basic Info Drawer */}
+        <div className="flex items-center gap-1 sm:gap-1.5 shrink-0 overflow-x-auto no-scrollbar">
+          {/* 0. Toggle Room Basic Info Drawer (Desktop shortcut; on mobile tapping room title toggles info) */}
           <button
             onClick={() => setRoomInfoOpen(!roomInfoOpen)}
-            className={`h-8 px-2 rounded-lg text-xs font-medium flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+            className={`hidden sm:flex h-8 px-2 rounded-lg text-xs font-medium items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
               roomInfoOpen
                 ? 'bg-[var(--bg-active)] border-[var(--border-default)] text-[var(--text-primary)]'
                 : 'bg-transparent border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'
@@ -231,7 +231,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           {/* 1. Toggle Peek & Turn-Taking Config Drawer */}
           <button
             onClick={() => setPeekConfigOpen(!peekConfigOpen)}
-            className={`h-8 px-2 rounded-lg text-xs font-medium flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+            className={`h-8 px-1.5 sm:px-2 rounded-lg text-xs font-medium flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
               peekConfigOpen
                 ? 'bg-[var(--bg-active)] border-[var(--border-default)] text-[var(--text-primary)]'
                 : 'bg-transparent border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'
@@ -244,13 +244,13 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
               <EyeOff className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
             )}
             <span className="hidden lg:inline">窥屏配置</span>
-            <span className="text-[11px] text-[var(--text-muted)]">
+            <span className="hidden sm:inline text-[11px] text-[var(--text-muted)]">
               {room.peek_enabled ? `${room.peek_idle_secs}s` : '已关'}
             </span>
             {peekConfigOpen ? (
-              <ChevronUp className="w-3 h-3 text-[var(--text-muted)] shrink-0" />
+              <ChevronUp className="hidden sm:block w-3 h-3 text-[var(--text-muted)] shrink-0" />
             ) : (
-              <ChevronDown className="w-3 h-3 text-[var(--text-muted)] shrink-0" />
+              <ChevronDown className="hidden sm:block w-3 h-3 text-[var(--text-muted)] shrink-0" />
             )}
           </button>
 
@@ -261,7 +261,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
               <button
                 key={contrib.id}
                 onClick={() => onToggleExtRightColumn?.(contrib.id)}
-                className={`h-8 px-2 rounded-lg text-xs font-medium flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                className={`h-8 px-1.5 sm:px-2 rounded-lg text-xs font-medium flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                   isOpen
                     ? 'bg-[var(--bg-active)] border-[var(--border-default)] text-[var(--text-primary)]'
                     : 'bg-transparent border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'
@@ -277,7 +277,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           {/* 2. Toggle Flow Trace Vertical Column (右侧流程轨迹竖列 - 默认不打开) */}
           <button
             onClick={onToggleFlowColumn}
-            className={`h-8 px-2 rounded-lg text-xs font-medium flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+            className={`h-8 px-1.5 sm:px-2 rounded-lg text-xs font-medium flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
               flowColumnOpen
                 ? 'bg-[var(--bg-active)] border-[var(--border-default)] text-[var(--text-primary)]'
                 : 'bg-transparent border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'
@@ -286,7 +286,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           >
             <Compass className="w-3.5 h-3.5 text-violet-500 shrink-0" />
             <span className="hidden lg:inline">流程轨迹</span>
-            <span className="px-1.5 py-0.2 rounded-full bg-[var(--bg-surface)] text-[10.5px] text-[var(--text-secondary)]">
+            <span className="px-1 sm:px-1.5 py-0.2 rounded-full bg-[var(--bg-surface)] text-[10px] sm:text-[10.5px] text-[var(--text-secondary)]">
               {flowLogCount}
             </span>
           </button>
@@ -294,7 +294,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           {/* 3. Toggle Roster Vertical Column (群成员竖列) */}
           <button
             onClick={onToggleRosterColumn}
-            className={`h-8 px-2 rounded-lg text-xs font-medium flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+            className={`h-8 px-1.5 sm:px-2 rounded-lg text-xs font-medium flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
               rosterColumnOpen
                 ? 'bg-[var(--bg-active)] border-[var(--border-default)] text-[var(--text-primary)]'
                 : 'bg-transparent border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'
@@ -303,7 +303,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           >
             <Users className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
             <span className="hidden lg:inline">群成员</span>
-            <span className="px-1.5 py-0.2 rounded-full bg-[var(--bg-surface)] text-[10.5px] text-[var(--text-secondary)]">
+            <span className="px-1 sm:px-1.5 py-0.2 rounded-full bg-[var(--bg-surface)] text-[10px] sm:text-[10.5px] text-[var(--text-secondary)]">
               {agents.length}
             </span>
           </button>
@@ -311,7 +311,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           {/* 4. Toggle Specific Agent Inspector Vertical Column (具体 Agent 透视竖列) */}
           <button
             onClick={onToggleInspectorColumn}
-            className={`h-8 px-2.5 rounded-lg text-xs font-medium flex items-center gap-1.5 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+            className={`h-8 px-2 sm:px-2.5 rounded-lg text-xs font-medium flex items-center gap-1 sm:gap-1.5 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
               inspectorColumnOpen
                 ? 'bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] border-transparent'
                 : 'bg-transparent border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'

@@ -660,7 +660,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
       {/* Floating Jump-to-Bottom Pill */}
       {showJumpBottom && (
-        <div className="absolute bottom-32 left-1/2 -translate-x-1/2 z-10">
+        <div className="absolute bottom-28 sm:bottom-32 left-1/2 -translate-x-1/2 z-10">
           <button
             onClick={scrollToBottom}
             className="px-3.5 py-1.5 rounded-full bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] shadow-md text-xs font-medium flex items-center gap-1.5 cursor-pointer hover:bg-[var(--bg-surface)]"
@@ -672,9 +672,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       )}
 
       {/* Bottom Floating Codex Composer */}
-      <div className="px-4 sm:px-6 pb-4 pt-1 shrink-0 bg-[var(--bg-main)]">
+      <div className="px-2.5 sm:px-6 pb-[calc(0.65rem+env(safe-area-inset-bottom,0px))] sm:pb-4 pt-1 shrink-0 bg-[var(--bg-main)]">
         <div className="max-w-[780px] mx-auto">
-          <div className="rounded-[24px] bg-[var(--bg-surface)] border border-[var(--border-default)] shadow-sm focus-within:border-[var(--text-muted)] transition-colors overflow-hidden">
+          <div className="rounded-[20px] sm:rounded-[24px] bg-[var(--bg-surface)] border border-[var(--border-default)] shadow-sm focus-within:border-[var(--text-muted)] transition-colors overflow-hidden">
             {/* Collapsible @Mention Selector Bar inside Composer */}
             {room && mentionBarOpen && (
               <div className="px-3.5 pt-2.5 pb-1.5 flex items-center flex-wrap gap-1.5 border-b border-[var(--border-subtle)]">
@@ -759,7 +759,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             )}
 
             {/* Textarea */}
-            <div className="px-4 pt-2.5 pb-1">
+            <div className="px-3.5 sm:px-4 pt-2 sm:pt-2.5 pb-1">
               <textarea
                 ref={textareaRef}
                 rows={2}
@@ -778,13 +778,13 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                     : '请先选择或创建聊天室'
                 }
                 disabled={!room}
-                className="w-full bg-transparent border-0 outline-none resize-none text-[14px] leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-muted)] max-h-40"
+                className="w-full bg-transparent border-0 outline-none resize-none text-[16px] sm:text-[14px] leading-relaxed text-[var(--text-primary)] placeholder:text-[var(--text-muted)] max-h-36 sm:max-h-40"
               />
             </div>
 
             {/* Composer Bottom Toolbar */}
-            <div className="px-3 pb-2.5 pt-1 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 min-w-0 overflow-x-auto">
+            <div className="px-2.5 sm:px-3 pb-2 sm:pb-2.5 pt-1 flex items-center justify-between gap-1.5 sm:gap-2">
+              <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 overflow-x-auto no-scrollbar">
                 {/* Hidden File Input for Image / File Attachment */}
                 <input
                   ref={fileInputRef}
@@ -858,9 +858,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   )}
                 </button>
 
-                {/* Send / Newline Shortcut Configuration Selector */}
+                {/* Send / Newline Shortcut Configuration Selector (Desktop only) */}
                 <div
-                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[var(--bg-main)] border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)] shrink-0"
+                  className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[var(--bg-main)] border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)] shrink-0"
                   title="设置发送与换行快捷键模式"
                 >
                   <Keyboard className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />

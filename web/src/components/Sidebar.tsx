@@ -185,8 +185,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <aside
-      className={`flex flex-col shrink-0 select-none border-r border-[var(--border-subtle)] bg-[var(--bg-sidebar)] transition-all duration-200 ease-out overflow-hidden ${
-        collapsed ? 'w-0 border-r-0 opacity-0 pointer-events-none' : 'w-[272px] opacity-100'
+      className={`flex flex-col shrink-0 select-none border-r border-[var(--border-subtle)] bg-[var(--bg-sidebar)] transition-all duration-200 ease-out overflow-hidden fixed inset-y-0 left-0 z-40 md:relative md:inset-auto md:z-auto ${
+        collapsed
+          ? 'w-0 -translate-x-full md:translate-x-0 border-r-0 opacity-0 pointer-events-none'
+          : 'w-[278px] max-w-[84vw] translate-x-0 opacity-100 shadow-2xl md:shadow-none'
       }`}
     >
       {/* Top Bar */}
@@ -509,7 +511,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       )}
 
       {/* Bottom Footer Controls */}
-      <div className="p-2.5 border-t border-[var(--border-subtle)] space-y-1.5 shrink-0">
+      <div className="p-2.5 pb-[calc(0.625rem+env(safe-area-inset-bottom,0px))] md:pb-2.5 border-t border-[var(--border-subtle)] space-y-1.5 shrink-0">
         {principal && (
           <div className="px-2 py-1 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] flex items-center justify-between gap-1.5 text-[11px]">
             <div className="flex items-center gap-1.5 min-w-0">
