@@ -106,6 +106,10 @@ pub fn build_chat_router(state: ChatServerState) -> Router {
             post(handle_cancel_agent_activation),
         )
         .route(
+            "/api/v1/agents/{agent_id}/retry",
+            post(handle_retry_agent_activation),
+        )
+        .route(
             "/api/v1/agents/{agent_id}/queue/{msg_seq}/withdraw",
             post(handle_withdraw_queued_message),
         )
@@ -761,6 +765,40 @@ async fn handle_cancel_agent_activation(
             .await;
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RetryAgentTurnRequest {
+    #[serde(default)]
+    dismiss_msg_seq: Option<u64>,
+}
+
+async fn handle_retry_agent_activation(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<Activation>, ChatApiError> {
+    let principal = verify_user_auth(&state, &headers)?;
+    let agent = state
+        .coordinator
+        .store
+        .get_agent(&agent_id)?
+        .ok_or_else(|| ChatApiError::Http(StatusCode::NOT_FOUND, "agent not found".into()))?;
+    verify_room_access(&state, &principal, &agent.room_id)?;
+
+    let req: RetryAgentTurnRequest = if body.is_empty() {
+        RetryAgentTurnRequest::default()
+    } else {
+        serde_json::from_slice(&body).unwrap_or_default()
+    };
+
+    let act = state
+        .coordinator
+        .retry_agent_turn(&agent_id, req.dismiss_msg_seq)
+        .await
+        .map_err(|e| ChatApiError::Http(StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(act))
 }
 
 async fn handle_withdraw_queued_message(

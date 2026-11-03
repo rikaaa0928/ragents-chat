@@ -37,6 +37,7 @@ import {
   ArrowDown,
   Copy,
   Check,
+  RotateCcw,
 } from 'lucide-react';
 import {
   Room,
@@ -116,6 +117,7 @@ interface RightInspectorPaneProps {
     overridePath: string | null
   ) => void;
   onCancelAgent: (agentId: string) => void;
+  onRetryAgent?: (agentId: string) => void;
   onWithdrawQueuedMessage: (agentId: string, msgSeq: number) => void;
 }
 
@@ -143,6 +145,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   onUpdateAgentConfig,
   onResolvePermission,
   onCancelAgent,
+  onRetryAgent,
   onWithdrawQueuedMessage,
 }) => {
   // Inspector Column Width Mode: standard (430px) or wide (580px)
@@ -435,6 +438,21 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
             <span className="text-[10px] font-mono-code opacity-80">
               {timeStr}
             </span>
+            {onRetryAgent && inspectedAgent && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  dismissInspectorAlert(alertKey);
+                  onRetryAgent(inspectedAgent.agent_id);
+                }}
+                title="直接重试该中断/失败的回合（无需重新输入）"
+                className="px-2 py-0.5 rounded-md bg-amber-500 hover:bg-amber-400 text-black font-semibold text-[10px] inline-flex items-center gap-1 cursor-pointer transition-colors"
+              >
+                <RotateCcw className="w-2.5 h-2.5 stroke-[2.5]" />
+                <span>重试</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={(e) => {

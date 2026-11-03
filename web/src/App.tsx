@@ -933,6 +933,27 @@ export const App: React.FC = () => {
           onToggleMention={handleToggleMention}
           onSendMessage={handleSendMessage}
           onUploadTempFile={handleUploadTempFile}
+          onRetryAgent={async (agentId, dismissMsgSeq) => {
+            await apiFetch(`/api/v1/agents/${encodeURIComponent(agentId)}/retry`, {
+              method: 'POST',
+              body: JSON.stringify({ dismiss_msg_seq: dismissMsgSeq ?? null }),
+            });
+            if (dismissMsgSeq) {
+              setCurrentDetail((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      messages: prev.messages.filter(
+                        (m) => m.msg_seq !== dismissMsgSeq
+                      ),
+                    }
+                  : prev
+              );
+            }
+            if (inspectedAgentId === agentId) {
+              await refreshInspectorSnapshot(agentId, inspectedSessionId, false);
+            }
+          }}
           onInspectAgent={(id) => handleInspectAgent(id, undefined, true)}
           onOpenRecruitModal={() => setActiveModal('recruit')}
           restoredDraft={restoredDraft}
@@ -1059,6 +1080,15 @@ export const App: React.FC = () => {
         }}
         onCancelAgent={async (agentId) => {
           await apiFetch(`/api/v1/agents/${agentId}/cancel`, { method: 'POST' });
+        }}
+        onRetryAgent={async (agentId) => {
+          await apiFetch(`/api/v1/agents/${encodeURIComponent(agentId)}/retry`, {
+            method: 'POST',
+            body: JSON.stringify({}),
+          });
+          if (inspectedAgentId === agentId) {
+            await refreshInspectorSnapshot(agentId, inspectedSessionId, false);
+          }
         }}
         onWithdrawQueuedMessage={async (agentId, msgSeq) => {
           const res = await apiFetch(

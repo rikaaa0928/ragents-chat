@@ -18,6 +18,7 @@ import {
   ImagePlus,
   FileText,
   Loader2,
+  RotateCcw,
 } from 'lucide-react';
 import { Room, RoomAgent, ChatMessage, SendShortcutMode } from '../types';
 
@@ -45,6 +46,7 @@ interface ChatAreaProps {
   onToggleMention: (name: string) => void;
   onSendMessage: (content: string, isRealtime: boolean) => void;
   onUploadTempFile?: (file: File) => Promise<UploadedTempAttachment>;
+  onRetryAgent?: (agentId: string, dismissMsgSeq?: number) => void;
   onInspectAgent: (agentId: string) => void;
   onOpenRecruitModal: () => void;
   restoredDraft?: { text: string; seq: number } | null;
@@ -149,6 +151,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   onToggleMention,
   onSendMessage,
   onUploadTempFile,
+  onRetryAgent,
   onInspectAgent,
   onOpenRecruitModal,
   restoredDraft,
@@ -457,12 +460,38 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 if (dismissedSystemKeys.has(sysKey)) {
                   return null;
                 }
+                const mentionedMatch = cleanedBody.match(/@([A-Za-z0-9_-]+)/);
+                const retryTargetAgent =
+                  (mentionedMatch &&
+                    agentLookup.get(mentionedMatch[1].toLowerCase())) ||
+                  (agents.length === 1 ? agents[0] : null);
+                const canRetry =
+                  Boolean(onRetryAgent && retryTargetAgent) &&
+                  (cleanedBody.includes('报错') ||
+                    cleanedBody.includes('中断') ||
+                    cleanedBody.includes('Interrupted') ||
+                    cleanedBody.includes('error'));
+
                 return (
                   <div key={m.msg_seq} className="flex justify-center">
-                    <div className="pl-3.5 pr-2 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/25 text-amber-600 dark:text-amber-300 text-xs flex items-center gap-2 max-w-[92%]">
-                      <span className="break-words">
+                    <div className="pl-3.5 pr-2 py-1.5 rounded-2xl bg-amber-500/10 border border-amber-500/25 text-amber-600 dark:text-amber-300 text-xs flex items-center gap-2 max-w-[94%]">
+                      <span className="break-words flex-1 min-w-0">
                         #{m.msg_seq} · {cleanedBody}
                       </span>
+                      {canRetry && retryTargetAgent && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            dismissSystemMessage(sysKey);
+                            onRetryAgent?.(retryTargetAgent.agent_id, m.msg_seq);
+                          }}
+                          title={`直接让 @${retryTargetAgent.name} 重试中断/失败的回合（无需重新输入）`}
+                          className="px-2.5 py-1 rounded-full bg-amber-500 hover:bg-amber-400 text-black font-semibold text-[11px] inline-flex items-center gap-1 shrink-0 cursor-pointer transition-colors shadow-xs"
+                        >
+                          <RotateCcw className="w-3 h-3 stroke-[2.5]" />
+                          <span>直接重试</span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => dismissSystemMessage(sysKey)}

@@ -470,6 +470,135 @@ impl RoomCoordinator {
         })
     }
 
+    pub async fn retry_agent_turn(
+        &self,
+        agent_id: &str,
+        dismiss_msg_seq: Option<u64>,
+    ) -> anyhow::Result<Activation> {
+        let agent = self
+            .store
+            .get_agent(agent_id)?
+            .ok_or_else(|| anyhow::anyhow!("agent {agent_id} not found"))?;
+        let room = self
+            .store
+            .get_room(&agent.room_id)?
+            .ok_or_else(|| anyhow::anyhow!("room {} not found", agent.room_id))?;
+
+        if let Some(seq) = dismiss_msg_seq {
+            if let Ok(Some(sys_msg)) = self.store.get_room_message(&room.room_id, seq) {
+                if sys_msg.sender_kind == SenderKind::System {
+                    let _ = self.store.delete_room_message(&room.room_id, seq);
+                    self.emit_room_event(ChatroomEvent::MessageWithdrawn {
+                        room_id: room.room_id.clone(),
+                        msg_seq: seq,
+                        withdrawn_message: sys_msg,
+                    });
+                }
+            }
+        }
+
+        let room = self
+            .store
+            .get_room(&agent.room_id)?
+            .ok_or_else(|| anyhow::anyhow!("room {} not found", agent.room_id))?;
+        let all_agents = self.store.list_room_agents(&room.room_id)?;
+        let unread = self.store.list_room_messages_for_agent(
+            &room.room_id,
+            agent.last_delivered_seq,
+            &agent.name,
+        )?;
+
+        let (updated_agent, prompt) = if !unread.is_empty() {
+            let max_seq = room.last_msg_seq;
+            let formatted = format_delivery_payload(
+                &room,
+                &all_agents,
+                &agent,
+                &unread,
+                DeliveryMode::DirectMention,
+            );
+            let upd = self.store.prepare_agent_delivery(
+                &agent.agent_id,
+                max_seq,
+                room.roster_version,
+                true,
+            )?;
+            (upd, formatted)
+        } else {
+            let upd = self.store.prepare_agent_delivery(
+                &agent.agent_id,
+                agent.last_delivered_seq,
+                room.roster_version,
+                true,
+            )?;
+            let retry_prompt = format!(
+                "=== [Chatroom Retry (@{}) | Action Required] ===\n\
+                 Your previous turn was interrupted or failed before completing. \
+                 Please continue and complete the pending request in the conversation context above, \
+                 then you MUST call `chatroom_speak` to reply in the chatroom.",
+                agent.name
+            );
+            (upd, retry_prompt)
+        };
+
+        {
+            let mut dm_guard = self
+                .direct_mentions
+                .lock()
+                .expect("direct_mentions mutex poisoned");
+            dm_guard.insert(
+                updated_agent.agent_id.clone(),
+                DirectMentionState {
+                    from_human: true,
+                    spoke: false,
+                    nudged: false,
+                },
+            );
+        }
+
+        let act = self
+            .ragents_client
+            .create_activation(CreateActivationRequest {
+                activation_id: None,
+                labels: BTreeMap::new(),
+                spec: ActivationSpec {
+                    session_id: updated_agent.active_session_id.clone(),
+                    submission_kind: SubmissionKind::Normal,
+                    input: vec![Item::user_message(prompt)],
+                    model_override: None,
+                    disabled_tools: vec![],
+                    desired_phase: DesiredActivationPhase::Running,
+                    interaction_responses: BTreeMap::new(),
+                },
+            })
+            .await?;
+
+        let act_id = ActivationId::new(act.metadata.id.clone());
+        let mut final_agent = updated_agent.clone();
+        if act.status.phase.is_active() {
+            if let Ok(thinking_agent) = self.store.update_agent_runtime_state(
+                &updated_agent.agent_id,
+                AgentRuntimeState::Thinking,
+                Some(act_id),
+            ) {
+                final_agent = thinking_agent;
+            }
+        }
+        self.emit_room_event(ChatroomEvent::AgentUpdated {
+            room_id: room.room_id.clone(),
+            agent: self.to_agent_public(final_agent.clone()),
+        });
+        self.emit_flow_status(
+            &room.room_id,
+            format!(
+                "[🔄 异常重试] 已触发 @{} 直接重试中断/失败的回合",
+                final_agent.name
+            ),
+        );
+
+        Ok(act)
+    }
+
     pub fn emit_flow_status(&self, room_id: &str, status: impl Into<String>) {
         let status_str = status.into();
         {
