@@ -558,6 +558,16 @@ pub struct RevokeAgentPermissionRuleRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrantAgentPermissionRuleRequest {
+    /// Target persistent scope: `session_grant` | `workspace_grant` | `node_grant`
+    pub target_scope: String,
+    pub category: String,
+    pub rule: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InspectorResponse {
     pub agent: RoomAgentPublic,
     pub selected_session_id: SessionId,

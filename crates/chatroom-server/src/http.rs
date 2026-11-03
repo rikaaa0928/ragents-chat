@@ -106,6 +106,10 @@ pub fn build_chat_router(state: ChatServerState) -> Router {
             post(handle_revoke_agent_permission),
         )
         .route(
+            "/api/v1/agents/{agent_id}/permissions/grant",
+            post(handle_grant_agent_permission),
+        )
+        .route(
             "/api/v1/agents/{agent_id}/cancel",
             post(handle_cancel_agent_activation),
         )
@@ -648,7 +652,7 @@ async fn handle_get_inspector(
         .build_agent_message_queues(&agent, &events);
     let permission_summary = state
         .coordinator
-        .build_agent_permission_summary(&agent, session.as_ref())
+        .build_agent_permission_summary(&agent, session.as_ref(), &events)
         .await;
     let agent_pub = state.coordinator.to_agent_public_hydrated(agent).await;
 
@@ -771,6 +775,28 @@ async fn handle_revoke_agent_permission(
     let summary = state
         .coordinator
         .revoke_agent_permission_rule(&agent_id, req)
+        .await
+        .map_err(|e| ChatApiError::Http(StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(summary))
+}
+
+async fn handle_grant_agent_permission(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+    Json(req): Json<GrantAgentPermissionRuleRequest>,
+) -> Result<Json<AgentPermissionSummary>, ChatApiError> {
+    let principal = verify_user_auth(&state, &headers)?;
+    let agent = state
+        .coordinator
+        .store
+        .get_agent(&agent_id)?
+        .ok_or_else(|| ChatApiError::Http(StatusCode::NOT_FOUND, "agent not found".into()))?;
+    verify_room_access(&state, &principal, &agent.room_id)?;
+
+    let summary = state
+        .coordinator
+        .grant_agent_permission_rule(&agent_id, req)
         .await
         .map_err(|e| ChatApiError::Http(StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(Json(summary))

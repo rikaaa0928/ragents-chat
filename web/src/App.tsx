@@ -1113,6 +1113,33 @@ export const App: React.FC = () => {
               : prev
           );
         }}
+        onGrantPermissionRule={async (
+          agentId,
+          rule,
+          targetScope,
+          sessionId
+        ) => {
+          const updatedSummary = await apiFetch(
+            `/api/v1/agents/${encodeURIComponent(agentId)}/permissions/grant`,
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                target_scope: targetScope,
+                category: rule.category,
+                rule: rule.rule,
+                session_id: sessionId || null,
+              }),
+            }
+          );
+          setInspectorSnap((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  permission_summary: updatedSummary,
+                }
+              : prev
+          );
+        }}
         onWithdrawQueuedMessage={async (agentId, msgSeq) => {
           const res = await apiFetch(
             `/api/v1/agents/${agentId}/queue/${msgSeq}/withdraw`,

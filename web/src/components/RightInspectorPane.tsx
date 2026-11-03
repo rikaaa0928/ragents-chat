@@ -124,6 +124,12 @@ interface RightInspectorPaneProps {
     rule: PermissionRuleEntry,
     sessionId?: string
   ) => void;
+  onGrantPermissionRule?: (
+    agentId: string,
+    rule: PermissionRuleEntry,
+    targetScope: 'session_grant' | 'workspace_grant' | 'node_grant',
+    sessionId?: string
+  ) => void;
   onWithdrawQueuedMessage: (agentId: string, msgSeq: number) => void;
 }
 
@@ -153,6 +159,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   onCancelAgent,
   onRetryAgent,
   onRevokePermissionRule,
+  onGrantPermissionRule,
   onWithdrawQueuedMessage,
 }) => {
   // Inspector Column Width Mode: standard (430px) or wide (580px)
@@ -1078,12 +1085,12 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                       <Lock className="w-3 h-3 text-amber-500" />
                       <span>权限策略</span>
                       {(() => {
-                        const customCount = (
+                        const nonDefaultCount = (
                           inspector?.permission_summary?.rules || []
-                        ).filter((r) => r.can_delete).length;
-                        return customCount > 0 ? (
+                        ).filter((r) => r.scope !== 'builtin' && r.scope !== 'node_base').length;
+                        return nonDefaultCount > 0 ? (
                           <span className="px-1 py-0 rounded bg-amber-500/20 text-amber-600 dark:text-amber-300 text-[9.5px] font-mono-code">
-                            +{customCount}
+                            +{nonDefaultCount}
                           </span>
                         ) : null;
                       })()}
@@ -1408,6 +1415,10 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                             return 'bg-blue-500/15 text-blue-600 dark:text-blue-300 border-blue-500/30';
                           case 'node_grant':
                             return 'bg-amber-500/15 text-amber-600 dark:text-amber-300 border-amber-500/30';
+                          case 'activation_grant':
+                            return 'bg-cyan-500/15 text-cyan-600 dark:text-cyan-300 border-cyan-500/30';
+                          case 'activation_expired':
+                            return 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/25';
                           case 'node_base':
                             return 'bg-violet-500/15 text-violet-600 dark:text-violet-300 border-violet-500/30';
                           default:
@@ -1463,65 +1474,114 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                                     </div>
                                   ) : (
                                     <div className="space-y-1">
-                                      {catRules.map((r, rIdx) => (
-                                        <div
-                                          key={`${r.category}-${r.scope}-${r.list_kind}-${r.rule}-${rIdx}`}
-                                          className="flex items-center justify-between gap-1.5 px-2 py-1 rounded-md bg-[var(--bg-main)] border border-[var(--border-subtle)] text-[10.5px]"
-                                        >
-                                          <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                                            <span
-                                              className={`px-1 py-0 rounded text-[9.5px] font-mono-code shrink-0 ${
-                                                r.list_kind === 'deny'
-                                                  ? 'bg-rose-500/15 text-rose-500'
-                                                  : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
-                                              }`}
-                                            >
-                                              {r.list_kind === 'deny'
-                                                ? 'DENY'
-                                                : 'ALLOW'}
-                                            </span>
-                                            <code
-                                              className="font-mono-code text-[var(--text-primary)] truncate"
-                                              title={r.rule}
-                                            >
-                                              {r.rule}
-                                            </code>
-                                          </div>
-
-                                          <div className="flex items-center gap-1.5 shrink-0">
-                                            <span
-                                              className={`px-1.5 py-0.5 rounded border text-[9.5px] ${getScopeBadgeClass(
-                                                r.scope
-                                              )}`}
-                                            >
-                                              {r.scope_label}
-                                            </span>
-                                            {r.can_delete && onRevokePermissionRule ? (
-                                              <button
-                                                type="button"
-                                                onClick={() =>
-                                                  onRevokePermissionRule(
-                                                    inspectedAgent.agent_id,
-                                                    r,
-                                                    inspector?.selected_session_id
-                                                  )
-                                                }
-                                                title={`实时删除此非默认权限: ${r.rule}`}
-                                                className="w-5 h-5 rounded flex items-center justify-center text-rose-500 hover:bg-rose-500/15 cursor-pointer transition-colors"
-                                              >
-                                                <X className="w-3.5 h-3.5" />
-                                              </button>
-                                            ) : (
+                                      {catRules.map((r, rIdx) => {
+                                        const isExpiredActivation =
+                                          r.list_kind === 'expired_activation';
+                                        return (
+                                          <div
+                                            key={`${r.category}-${r.scope}-${r.list_kind}-${r.rule}-${rIdx}`}
+                                            className={`flex flex-wrap items-center justify-between gap-1.5 px-2 py-1 rounded-md border text-[10.5px] ${
+                                              isExpiredActivation
+                                                ? 'bg-amber-500/5 border-amber-500/25'
+                                                : 'bg-[var(--bg-main)] border-[var(--border-subtle)]'
+                                            }`}
+                                          >
+                                            <div className="flex items-center gap-1.5 min-w-0 flex-1">
                                               <span
-                                                title="系统内置或 daemon.toml 基础静态权限，不可删除"
-                                                className="w-5 h-5 flex items-center justify-center text-[var(--text-muted)] opacity-50"
+                                                className={`px-1 py-0 rounded text-[9.5px] font-mono-code shrink-0 ${
+                                                  r.list_kind === 'deny'
+                                                    ? 'bg-rose-500/15 text-rose-500'
+                                                    : isExpiredActivation
+                                                    ? 'bg-amber-500/20 text-amber-600 dark:text-amber-300'
+                                                    : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                                                }`}
                                               >
-                                                <Lock className="w-3 h-3" />
+                                                {r.list_kind === 'deny'
+                                                  ? 'DENY'
+                                                  : isExpiredActivation
+                                                  ? '已释放'
+                                                  : 'ALLOW'}
                                               </span>
-                                            )}
+                                              <code
+                                                className="font-mono-code text-[var(--text-primary)] truncate"
+                                                title={r.rule}
+                                              >
+                                                {r.rule}
+                                              </code>
+                                            </div>
+
+                                            <div className="flex items-center gap-1 shrink-0">
+                                              <span
+                                                className={`px-1.5 py-0.5 rounded border text-[9.5px] ${getScopeBadgeClass(
+                                                  r.scope
+                                                )}`}
+                                              >
+                                                {r.scope_label}
+                                              </span>
+                                              {isExpiredActivation &&
+                                              onGrantPermissionRule ? (
+                                                <>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                      onGrantPermissionRule(
+                                                        inspectedAgent.agent_id,
+                                                        r,
+                                                        'session_grant',
+                                                        inspector?.selected_session_id
+                                                      )
+                                                    }
+                                                    title="将该单轮权限升级为当前 Agent 会话持久有效"
+                                                    className="px-1.5 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[9.5px] font-medium cursor-pointer transition-colors"
+                                                  >
+                                                    +本会话
+                                                  </button>
+                                                  {summary?.workspace_path && (
+                                                    <button
+                                                      type="button"
+                                                      onClick={() =>
+                                                        onGrantPermissionRule(
+                                                          inspectedAgent.agent_id,
+                                                          r,
+                                                          'workspace_grant',
+                                                          inspector?.selected_session_id
+                                                        )
+                                                      }
+                                                      title="将该单轮权限升级为当前项目工作区持久有效"
+                                                      className="px-1.5 py-0.5 rounded bg-blue-600 hover:bg-blue-500 text-white text-[9.5px] font-medium cursor-pointer transition-colors"
+                                                    >
+                                                      +本项目
+                                                    </button>
+                                                  )}
+                                                </>
+                                              ) : r.can_delete &&
+                                                onRevokePermissionRule ? (
+                                                <button
+                                                  type="button"
+                                                  onClick={() =>
+                                                    onRevokePermissionRule(
+                                                      inspectedAgent.agent_id,
+                                                      r,
+                                                      inspector?.selected_session_id
+                                                    )
+                                                  }
+                                                  title={`实时删除此非默认权限: ${r.rule}`}
+                                                  className="w-5 h-5 rounded flex items-center justify-center text-rose-500 hover:bg-rose-500/15 cursor-pointer transition-colors"
+                                                >
+                                                  <X className="w-3.5 h-3.5" />
+                                                </button>
+                                              ) : (
+                                                <span
+                                                  title="系统内置或 daemon.toml 基础静态权限，不可删除"
+                                                  className="w-5 h-5 flex items-center justify-center text-[var(--text-muted)] opacity-50"
+                                                >
+                                                  <Lock className="w-3 h-3" />
+                                                </span>
+                                              )}
+                                            </div>
                                           </div>
-                                        </div>
-                                      ))}
+                                        );
+                                      })}
                                     </div>
                                   )}
                                 </div>
@@ -1688,14 +1748,35 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
 
                             <div className="flex flex-wrap gap-1.5 pt-0.5">
                               {[
-                                { key: 'allow_once', label: '仅本次' },
-                                { key: 'allow_activation', label: '本轮激活' },
-                                { key: 'allow_session', label: '本会话' },
-                                { key: 'allow_workspace', label: '工作区' },
-                                { key: 'allow_node', label: '全节点' },
+                                {
+                                  key: 'allow_once',
+                                  label: '仅单次调用',
+                                  tip: '仅放行当前这一次工具调用，后续调用仍需审批',
+                                },
+                                {
+                                  key: 'allow_activation',
+                                  label: '仅本轮回复',
+                                  tip: '仅在 Agent 完成本次消息回复前有效，本轮回复结束后自动释放',
+                                },
+                                {
+                                  key: 'allow_session',
+                                  label: '本会话持久',
+                                  tip: '在当前 Agent 会话内持久有效（跨多轮对话保留）',
+                                },
+                                {
+                                  key: 'allow_workspace',
+                                  label: '本项目持久',
+                                  tip: '在当前项目工作区的所有会话中持久有效',
+                                },
+                                {
+                                  key: 'allow_node',
+                                  label: '全节点持久',
+                                  tip: '在该节点的所有项目中全局持久有效',
+                                },
                               ].map((btn) => (
                                 <button
                                   key={btn.key}
+                                  title={btn.tip}
                                   onClick={() =>
                                     onResolvePermission(
                                       actId,
