@@ -508,7 +508,7 @@ impl RoomCoordinator {
             &agent.name,
         )?;
 
-        let (updated_agent, prompt) = if !unread.is_empty() {
+        let (updated_agent, submission_kind, input_items) = if !unread.is_empty() {
             let max_seq = room.last_msg_seq;
             let formatted = format_delivery_payload(
                 &room,
@@ -523,7 +523,7 @@ impl RoomCoordinator {
                 room.roster_version,
                 true,
             )?;
-            (upd, formatted)
+            (upd, SubmissionKind::Normal, vec![Item::user_message(formatted)])
         } else {
             let upd = self.store.prepare_agent_delivery(
                 &agent.agent_id,
@@ -531,14 +531,7 @@ impl RoomCoordinator {
                 room.roster_version,
                 true,
             )?;
-            let retry_prompt = format!(
-                "=== [Chatroom Retry (@{}) | Action Required] ===\n\
-                 Your previous turn was interrupted or failed before completing. \
-                 Please continue and complete the pending request in the conversation context above, \
-                 then you MUST call `chatroom_speak` to reply in the chatroom.",
-                agent.name
-            );
-            (upd, retry_prompt)
+            (upd, SubmissionKind::Continuation, Vec::new())
         };
 
         {
@@ -563,8 +556,8 @@ impl RoomCoordinator {
                 labels: BTreeMap::new(),
                 spec: ActivationSpec {
                     session_id: updated_agent.active_session_id.clone(),
-                    submission_kind: SubmissionKind::Normal,
-                    input: vec![Item::user_message(prompt)],
+                    submission_kind,
+                    input: input_items,
                     model_override: None,
                     disabled_tools: vec![],
                     desired_phase: DesiredActivationPhase::Running,
