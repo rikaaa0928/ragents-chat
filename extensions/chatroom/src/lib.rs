@@ -24,6 +24,10 @@ struct ChatroomPluginConfig {
     #[serde(default)]
     room_name: String,
     #[serde(default)]
+    workspace_path: Option<String>,
+    #[serde(default)]
+    room_tmp_dir: String,
+    #[serde(default)]
     agent_id: String,
     #[serde(default)]
     agent_name: String,
@@ -265,6 +269,39 @@ impl exports::ragent::extension::lifecycle::Guest for ChatroomExtension {
                 } else {
                     &cfg.agent_role
                 };
+                let room_tmp_dir = if !cfg.room_tmp_dir.trim().is_empty() {
+                    cfg.room_tmp_dir.trim().to_string()
+                } else if !cfg.room_id.trim().is_empty() {
+                    format!("/tmp/ragents/rooms/{}", cfg.room_id.trim())
+                } else {
+                    "/tmp/ragents/rooms/default".to_string()
+                };
+                let directory_layout_section = if let Some(ws_path) = cfg
+                    .workspace_path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    format!(
+                        "7. WORKSPACE & 3-TIER DIRECTORY LAYOUT (PINNED WORKSPACE MODE):\n\
+   - Project Working Directory (`.` / `cwd`): `{ws_path}`\n\
+     Your bound project workspace and current working directory. Read and edit project source code here. Visible to @Human in the UI File Panel (\"工作目录\" tab).\n\
+   - Room Shared Temporary Directory: `{room_tmp_dir}`\n\
+     Shared across @Human and all Agents in this chatroom (`\"{room_name}\"`). Files uploaded or pasted by @Human (`{room_tmp_dir}/uploads/...`) land here, and any temporary files/artifacts you want to share with @Human or other Agents in this room should be placed here. Visible to @Human in the UI File Panel (\"房间临时目录\" tab).\n\
+   - Agent Private Session Temporary Directory (`$TMPDIR`):\n\
+     Private to your own Agent Session only (not shown in the UI File Panel). Use `$TMPDIR` for your own private scratch files or intermediate build caches.\n"
+                    )
+                } else {
+                    format!(
+                        "7. WORKSPACE & DIRECTORY LAYOUT (FLOATING ROOM MODE):\n\
+   - Current Working Directory & Room Shared Temporary Directory (`.` / `cwd`): `{room_tmp_dir}`\n\
+     Because this room has no bound external project workspace, your current working directory (`.`) IS the Room Shared Temporary Directory (`{room_tmp_dir}`).\n\
+     All Agents in this room share `{room_tmp_dir}`, and @Human can directly browse, preview, download, and upload files (`uploads/...`) in `{room_tmp_dir}` via the UI File Panel.\n\
+     Save any scripts, documents, images, or deliverables intended for @Human or teammates directly inside `.` (`{room_tmp_dir}`).\n\
+   - Agent Private Session Temporary Directory (`$TMPDIR`):\n\
+     Private to your own Agent Session only (not shown in the UI File Panel). Use `$TMPDIR` only for private scratch/cache files that @Human does not need to inspect.\n"
+                    )
+                };
 
                 let protocol_prompt = if cfg.is_manager {
                     format!(
@@ -314,7 +351,7 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
 6. WHEN PEEKING AT UNREAD MESSAGES WHILE IDLE (`[Chatroom Unread Peek]`):\n\
    - Chime in (`chatroom_speak`) ONLY if you spot an error, a critical blind spot, or high-value domain expertise that nobody else has covered.\n\
    - Otherwise (or if `chatroom_speak` is disabled in Muted Observation Mode), DO NOT call `chatroom_speak` and finish with a brief private note or takeaway summary of the discussion.\n\
-</chatroom_protocol>"
+{directory_layout_section}</chatroom_protocol>"
                     )
                 };
 

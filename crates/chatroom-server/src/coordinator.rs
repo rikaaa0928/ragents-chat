@@ -7,7 +7,7 @@ use ragents_client::RagentsClient;
 use ragents_protocol::*;
 use rand::Rng;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -997,7 +997,157 @@ impl RoomCoordinator {
         let _ = self.room_event_tx.send(event);
     }
 
+    pub fn room_tmp_dir(room_id: &str) -> String {
+        format!("/tmp/ragents/rooms/{room_id}")
+    }
+
+    pub async fn sync_floating_room_node(
+        &self,
+        room_id: &str,
+        target_node_id: &str,
+        reason_banner: Option<String>,
+    ) -> anyhow::Result<Room> {
+        let room = self
+            .store
+            .get_room(room_id)?
+            .ok_or_else(|| anyhow::anyhow!("room {room_id} not found"))?;
+        if room.workspace_path.is_some() {
+            anyhow::bail!("房间已绑定固定工作区目录，不支持浮动节点漂移");
+        }
+        let changed = room.node_id.as_deref() != Some(target_node_id);
+        self.store
+            .set_room_binding(room_id, Some(target_node_id), None)?;
+        let updated_room = self
+            .store
+            .get_room(room_id)?
+            .ok_or_else(|| anyhow::anyhow!("room {room_id} not found"))?;
+
+        let mut session_ids = Vec::new();
+        if let Ok(agents) = self.store.list_room_agents(room_id) {
+            for ag in agents {
+                session_ids.push(ag.active_session_id);
+            }
+        }
+        if let Ok(Some(mgr_ag)) = self.store.get_room_manager_agent(room_id) {
+            session_ids.push(mgr_ag.active_session_id);
+        }
+
+        let target_nid = NodeId::new(target_node_id);
+        let extra_tmp = vec![PathBuf::from(Self::room_tmp_dir(room_id))];
+        for sid in session_ids {
+            let _ = self
+                .ragents_client
+                .patch_session(
+                    &sid,
+                    PatchSessionSpecRequest {
+                        bound_node_id: Some(Some(target_nid.clone())),
+                        extra_tmp_dirs: Some(extra_tmp.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+        }
+
+        let _ = self
+            .ragents_client
+            .node_fs_query(
+                &target_nid,
+                &NodeFsRequest {
+                    zone: NodeFsZone::Tmp,
+                    workspace_path: None,
+                    tmp_dir: Some(Self::room_tmp_dir(room_id)),
+                    op: NodeFsOp::ListDir {
+                        rel_path: String::new(),
+                    },
+                },
+            )
+            .await;
+
+        if changed {
+            if let Some(msg) = reason_banner {
+                self.emit_flow_status(room_id, msg);
+            }
+            self.emit_room_event(ChatroomEvent::RoomUpdated {
+                room_id: room_id.to_string(),
+                room: updated_room.clone(),
+            });
+        }
+        Ok(updated_room)
+    }
+
+    pub async fn sync_existing_rooms_on_startup(&self) {
+        let Ok(rooms) = self.store.list_rooms() else {
+            return;
+        };
+        for room in rooms {
+            let room_tmp_dir = Self::room_tmp_dir(&room.room_id);
+            let extra_tmp = vec![PathBuf::from(&room_tmp_dir)];
+            let mut all_agents = self.store.list_room_agents(&room.room_id).unwrap_or_default();
+            if let Ok(Some(mgr)) = self.store.get_room_manager_agent(&room.room_id) {
+                all_agents.push(mgr);
+            }
+            let mut detected_bound_node: Option<String> = room.node_id.clone();
+            for ag in &all_agents {
+                if let Ok(Some(sess)) = self
+                    .ragents_client
+                    .get_session(&ag.active_session_id)
+                    .await
+                {
+                    if detected_bound_node.is_none() && ag.created_by != "system_manager" {
+                        if let Some(ref bn) = sess.status.bound_node_id {
+                            detected_bound_node = Some(bn.as_str().to_string());
+                        }
+                    }
+                    let mut exts = sess.spec.extensions.clone();
+                    let mut ext_changed = false;
+                    for ext in &mut exts {
+                        if ext.name == "chatroom" {
+                            if let Some(obj) = ext.config.as_object_mut() {
+                                if obj.get("room_tmp_dir").and_then(|v| v.as_str())
+                                    != Some(room_tmp_dir.as_str())
+                                {
+                                    obj.insert(
+                                        "room_tmp_dir".to_string(),
+                                        serde_json::json!(room_tmp_dir),
+                                    );
+                                    obj.insert(
+                                        "workspace_path".to_string(),
+                                        serde_json::json!(room.workspace_path),
+                                    );
+                                    ext_changed = true;
+                                }
+                            }
+                        }
+                    }
+                    if sess.spec.extra_tmp_dirs != extra_tmp || ext_changed {
+                        let _ = self
+                            .ragents_client
+                            .patch_session(
+                                &ag.active_session_id,
+                                PatchSessionSpecRequest {
+                                    extensions: if ext_changed { Some(exts) } else { None },
+                                    extra_tmp_dirs: Some(extra_tmp.clone()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
+                    }
+                }
+            }
+            if room.workspace_path.is_none() && room.node_id.is_none() {
+                if let Some(ref bn) = detected_bound_node {
+                    let _ = self.sync_floating_room_node(&room.room_id, bn, None).await;
+                }
+            }
+        }
+    }
+
     pub fn spawn_background_watcher(&self, cancel: CancellationToken) {
+        let coord_init = self.clone();
+        tokio::spawn(async move {
+            coord_init.sync_existing_rooms_on_startup().await;
+        });
+
         let coord = self.clone();
         tokio::spawn(async move {
             let mut after_rv = 0u64;
@@ -1045,6 +1195,10 @@ impl RoomCoordinator {
         match env.event {
             SessionEvent::ActivationScheduled { .. } | SessionEvent::ActivationStarted { .. } => {
                 let is_started = matches!(env.event, SessionEvent::ActivationStarted { .. });
+                let scheduled_node_id = match &env.event {
+                    SessionEvent::ActivationScheduled { node_id, .. } => Some(node_id.clone()),
+                    _ => None,
+                };
                 if is_started {
                     if let Some(ref act_id) = env.activation_id {
                         self.started_activation_ids
@@ -1054,6 +1208,24 @@ impl RoomCoordinator {
                     }
                 }
                 if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    if let Some(ref sched_nid) = scheduled_node_id {
+                        if let Ok(Some(room)) = self.store.get_room(&agent.room_id) {
+                            if room.workspace_path.is_none()
+                                && room.node_id.as_deref() != Some(sched_nid.as_str())
+                            {
+                                let _ = self
+                                    .sync_floating_room_node(
+                                        &agent.room_id,
+                                        sched_nid.as_str(),
+                                        Some(format!(
+                                            "[📌 节点固化] Floating 房间已绑定至节点 {sched_nid} (房间共享临时目录: {})",
+                                            Self::room_tmp_dir(&agent.room_id)
+                                        )),
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
                     if is_started {
                         if let Some(ref act_id) = env.activation_id {
                             if let Some(list) = self
@@ -1259,17 +1431,34 @@ impl RoomCoordinator {
                 ..
             } => {
                 if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    if let Ok(Some(room)) = self.store.get_room(&agent.room_id) {
+                        if room.workspace_path.is_none()
+                            && room.node_id.as_deref() != Some(to_node.as_str())
+                        {
+                            let _ = self
+                                .sync_floating_room_node(
+                                    &agent.room_id,
+                                    to_node.as_str(),
+                                    None,
+                                )
+                                .await;
+                        }
+                    }
                     self.emit_flow_status(
                         &agent.room_id,
                         format!(
-                            "[🔄 节点改派] @{} 从 {} 自动改派至 {} ({})",
-                            agent.name, from_node, to_node, reason
+                            "[🔄 节点自动漂移] @{} 从 {} 自动漂移至 {}，已初始化房间临时目录 {} ({})",
+                            agent.name,
+                            from_node,
+                            to_node,
+                            Self::room_tmp_dir(&agent.room_id),
+                            reason
                         ),
                     );
                     self.emit_room_event(ChatroomEvent::AgentActivity {
                         room_id: agent.room_id,
                         agent_id: agent.agent_id,
-                        activity: format!("🔄 节点已从 {from_node} 改派至 {to_node}"),
+                        activity: format!("🔄 节点已从 {from_node} 自动漂移至 {to_node}"),
                     });
                 }
             }
@@ -1592,6 +1781,9 @@ impl RoomCoordinator {
         let add_agent_url = format!("{base}/api/v1/internal/manager/add-agent");
         let remove_agent_url = format!("{base}/api/v1/internal/manager/remove-agent");
 
+        let room_tmp_dir = Self::room_tmp_dir(&room.room_id);
+        let extra_tmp_dirs = vec![PathBuf::from(&room_tmp_dir)];
+
         extensions.push(ExtensionSpec {
             name: "chatroom".to_string(),
             path: String::new(),
@@ -1603,6 +1795,8 @@ impl RoomCoordinator {
                 "chatroom_remove_agent_url": remove_agent_url,
                 "room_id": room.room_id,
                 "room_name": room.name,
+                "workspace_path": room.workspace_path,
+                "room_tmp_dir": room_tmp_dir,
                 "agent_id": agent_id,
                 "agent_name": "Manager",
                 "agent_role": "聊天室管家",
@@ -1616,6 +1810,9 @@ impl RoomCoordinator {
         labels.insert("ragents.chat.agent_id".to_string(), agent_id.clone());
         labels.insert("ragents.chat.agent_name".to_string(), "Manager".to_string());
         labels.insert("ragents.chat.role".to_string(), "chatroom_manager".to_string());
+        if let Some(ref sticky_nid) = room.node_id {
+            labels.insert("ragents.io/preferred-node".to_string(), sticky_nid.clone());
+        }
 
         let permissions = PermissionPolicyLayer::default();
 
@@ -1643,6 +1840,7 @@ impl RoomCoordinator {
                     }),
                     extensions,
                     permissions,
+                    extra_tmp_dirs,
                 },
                 initial_activation: None,
             })
@@ -1728,6 +1926,9 @@ impl RoomCoordinator {
         );
         let web_search = req.web_search.unwrap_or(mgr.default_web_search);
 
+        let room_tmp_dir = Self::room_tmp_dir(&room.room_id);
+        let extra_tmp_dirs = vec![PathBuf::from(&room_tmp_dir)];
+
         let force_floating = req.node_id.as_deref() == Some("__floating__");
         let existing_room_pinned = if !force_floating {
             room.node_id.clone().zip(room.workspace_path.clone())
@@ -1753,9 +1954,17 @@ impl RoomCoordinator {
                 .or_else(|| mgr.default_workspace_root.filter(|s| !s.trim().is_empty()))
         };
 
-        let scheduling = if force_floating
-            || (effective_node_id.is_none() && effective_workspace_path.is_none())
-        {
+        let mut preferred_floating_node: Option<String> = None;
+        let mut pinned_workspace_str: Option<String> = None;
+
+        let scheduling = if force_floating || effective_workspace_path.is_none() {
+            let sticky = effective_node_id.or_else(|| room.node_id.clone());
+            if let Some(ref sn) = sticky {
+                if room.node_id.as_deref() != Some(sn.as_str()) && room.workspace_path.is_none() {
+                    let _ = self.store.set_room_binding(room_id, Some(sn), None);
+                }
+            }
+            preferred_floating_node = sticky;
             SchedulingMode::Floating {
                 node_selector: BTreeMap::new(),
             }
@@ -1773,19 +1982,14 @@ impl RoomCoordinator {
                     let trimmed = w.trim_end_matches('/');
                     let p = Path::new(if trimmed.is_empty() { "/" } else { trimmed });
                     if p == Path::new("/tmp") || p == Path::new("/private/tmp") {
-                        p.join(format!("chatroom-{room_id}"))
+                        PathBuf::from(&room_tmp_dir)
                     } else if p.is_absolute() {
                         p.to_path_buf()
                     } else {
                         std::env::current_dir()?.join(p)
                     }
                 }
-                None => {
-                    let base_dir = target_node
-                        .and_then(|n| n.status.allowed_workspace_dirs.first().cloned())
-                        .unwrap_or_else(|| "/tmp".to_string());
-                    Path::new(&base_dir).join(format!("chatroom-{room_id}"))
-                }
+                None => PathBuf::from(&room_tmp_dir),
             };
 
             if let Some(node) = target_node {
@@ -1801,13 +2005,15 @@ impl RoomCoordinator {
                 }
             }
             let _ = std::fs::create_dir_all(&abs_w);
+            let ws_str = abs_w.to_string_lossy().to_string();
             if room.node_id.is_none() || room.workspace_path.is_none() {
                 let _ = self.store.set_room_binding(
                     room_id,
                     Some(&target_node_id),
-                    Some(&abs_w.to_string_lossy()),
+                    Some(&ws_str),
                 );
             }
+            pinned_workspace_str = Some(ws_str);
             SchedulingMode::Pinned {
                 node_id: NodeId::new(target_node_id),
                 workspace_path: abs_w,
@@ -1832,6 +2038,8 @@ impl RoomCoordinator {
                 "chatroom_callback_url": callback_url,
                 "room_id": room.room_id,
                 "room_name": room.name,
+                "workspace_path": pinned_workspace_str,
+                "room_tmp_dir": room_tmp_dir,
                 "agent_id": agent_id,
                 "agent_name": clean_name,
                 "agent_role": req.role_title,
@@ -1844,6 +2052,9 @@ impl RoomCoordinator {
         labels.insert("ragents.chat.room_id".to_string(), room.room_id.clone());
         labels.insert("ragents.chat.agent_id".to_string(), agent_id.clone());
         labels.insert("ragents.chat.agent_name".to_string(), clean_name.clone());
+        if let Some(ref pref_nid) = preferred_floating_node {
+            labels.insert("ragents.io/preferred-node".to_string(), pref_nid.clone());
+        }
 
         let permissions = PermissionPolicyLayer::default();
 
@@ -1867,6 +2078,7 @@ impl RoomCoordinator {
                     }),
                     extensions,
                     permissions,
+                    extra_tmp_dirs,
                 },
                 initial_activation: None,
             })
@@ -1966,8 +2178,7 @@ impl RoomCoordinator {
                         reasoning: reasoning_cfg,
                         built_in_tools: build_built_in_tools(updated.web_search),
                     }),
-                    extensions: None,
-                    permissions: None,
+                    ..Default::default()
                 },
             )
             .await;
@@ -1996,10 +2207,7 @@ impl RoomCoordinator {
                 &removed.active_session_id,
                 PatchSessionSpecRequest {
                     desired_phase: Some(DesiredSessionPhase::Closed),
-                    system_prompt: None,
-                    model: None,
-                    extensions: None,
-                    permissions: None,
+                    ..Default::default()
                 },
             )
             .await;
@@ -2025,10 +2233,7 @@ impl RoomCoordinator {
                     &agent.active_session_id,
                     PatchSessionSpecRequest {
                         desired_phase: Some(DesiredSessionPhase::Closed),
-                        system_prompt: None,
-                        model: None,
-                        extensions: None,
-                        permissions: None,
+                        ..Default::default()
                     },
                 )
                 .await;

@@ -112,6 +112,8 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
       (a) => a.scheduling?.mode === 'pinned' && a.scheduling?.workspace_path
     )?.scheduling?.workspace_path ||
     null;
+  const isFloatingRoom = !roomWorkspacePath;
+  const roomTmpDir = `/tmp/ragents/rooms/${room.room_id}`;
   const roomNodeDetail = roomNodeId
     ? clusterNodes.find((n) => n.metadata.id === roomNodeId) || null
     : null;
@@ -166,7 +168,9 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
               <span
                 className={`hidden sm:inline-flex items-center gap-1 text-[10.5px] px-1.5 py-0.5 rounded-md font-mono-code font-normal shrink-0 whitespace-nowrap ${
                   isRoomNodeReady
-                    ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400'
+                    ? isFloatingRoom
+                      ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                      : 'bg-blue-500/10 text-blue-600 dark:text-blue-400'
                     : 'bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30 animate-pulse'
                 }`}
               >
@@ -175,8 +179,12 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                     isRoomNodeReady ? 'bg-emerald-500' : 'bg-rose-500'
                   }`}
                 />
-                <Server className="w-3 h-3 shrink-0" />
-                <span>{roomNodeId}</span>
+                {isFloatingRoom ? (
+                  <Globe className="w-3 h-3 shrink-0" />
+                ) : (
+                  <Server className="w-3 h-3 shrink-0" />
+                )}
+                <span>{isFloatingRoom ? `Floating · ${roomNodeId}` : roomNodeId}</span>
                 {!isRoomNodeReady && <span className="font-semibold">· 断联</span>}
               </span>
             ) : (
@@ -394,12 +402,44 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
 
           {/* Node & Workspace Cards */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
-            <div className="p-2.5 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] space-y-1">
-              <div className="text-[11px] text-[var(--text-muted)] flex items-center gap-1">
-                <Server className="w-3 h-3 text-blue-500" />
-                <span>所在节点 (Node)</span>
+            <div className="p-2.5 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] space-y-1.5">
+              <div className="text-[11px] text-[var(--text-muted)] flex items-center justify-between gap-1">
+                <span className="flex items-center gap-1">
+                  {isFloatingRoom ? (
+                    <Globe className="w-3 h-3 text-emerald-500" />
+                  ) : (
+                    <Server className="w-3 h-3 text-blue-500" />
+                  )}
+                  <span>
+                    {isFloatingRoom ? 'Floating 驻留节点 (可漂移)' : '固定节点 (Pinned Node)'}
+                  </span>
+                </span>
               </div>
-              {roomNodeId ? (
+              {isFloatingRoom ? (
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={roomNodeId || ''}
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          onUpdateRoomControls({ node_id: e.target.value });
+                        }
+                      }}
+                      className="flex-1 px-2 py-1 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] font-mono-code text-xs text-[var(--text-primary)] cursor-pointer"
+                    >
+                      {!roomNodeId && <option value="">待首次调度自动固化节点</option>}
+                      {clusterNodes.map((n) => (
+                        <option key={n.metadata.id} value={n.metadata.id}>
+                          {n.metadata.id} ({n.status.os}/{n.status.arch} · {n.status.phase})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="text-[10.5px] text-[var(--text-muted)] leading-snug">
+                    节点离线时自动故障漂移，也可手动切换节点（在新节点创建全新同名临时目录，旧文件不迁移）。
+                  </div>
+                </div>
+              ) : roomNodeId ? (
                 <div className="flex items-center flex-wrap gap-1.5">
                   <span className="font-mono-code font-semibold text-[var(--text-primary)]">
                     {roomNodeId}
@@ -412,7 +452,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                 </div>
               ) : (
                 <div className="font-mono-code text-[var(--text-secondary)]">
-                  Floating (未固定节点 / 浮动调度)
+                  Floating (待首次调度固化)
                 </div>
               )}
             </div>
@@ -420,11 +460,33 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
             <div className="p-2.5 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] space-y-1 md:col-span-2">
               <div className="text-[11px] text-[var(--text-muted)] flex items-center gap-1">
                 <FolderGit2 className="w-3 h-3 text-emerald-500" />
-                <span>工作区目录 (Workspace Directory)</span>
+                <span>
+                  {isFloatingRoom
+                    ? '工作目录 & 房间共享临时目录 (Floating Mode)'
+                    : '工作目录 & 房间共享临时目录 (Pinned Mode)'}
+                </span>
               </div>
-              <div className="font-mono-code text-[var(--text-primary)] break-all">
-                {roomWorkspacePath || '未绑定固定目录（按节点默认临时目录动态隔离）'}
-              </div>
+              {isFloatingRoom ? (
+                <div className="space-y-0.5">
+                  <div className="font-mono-code text-[var(--text-primary)] break-all">
+                    {roomTmpDir}
+                  </div>
+                  <div className="text-[10.5px] text-[var(--text-muted)]">
+                    未绑定外部项目目录，直接将该房间共享临时目录作为所有 Agent 的当前工作目录 (.)
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <div className="font-mono-code text-[var(--text-primary)] break-all">
+                    <span className="text-[10.5px] text-[var(--text-muted)] mr-1.5">项目工作目录 (.):</span>
+                    {roomWorkspacePath}
+                  </div>
+                  <div className="font-mono-code text-[11px] text-[var(--text-secondary)] break-all">
+                    <span className="text-[10.5px] text-[var(--text-muted)] mr-1.5">房间共享临时目录:</span>
+                    {roomTmpDir}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

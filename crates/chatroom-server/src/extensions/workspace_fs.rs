@@ -105,7 +105,7 @@ impl WorkspaceFsExtension {
         }
 
         // Floating room: check if the primary agent's session is already bound to a node,
-        // otherwise pick the first Ready node in the cluster.
+        // otherwise pick the first Ready node in the cluster and solidify the binding.
         if let Some(first_ag) = agents.first() {
             if let Ok(Some(sess)) = self
                 .coordinator
@@ -114,6 +114,10 @@ impl WorkspaceFsExtension {
                 .await
             {
                 if let Some(bound_nid) = sess.status.bound_node_id {
+                    let _ = self
+                        .coordinator
+                        .sync_floating_room_node(room_id, bound_nid.as_str(), None)
+                        .await;
                     return Ok((bound_nid, eff_ws));
                 }
             }
@@ -135,7 +139,13 @@ impl WorkspaceFsExtension {
                 )
             })?;
 
-        Ok((NodeId::new(chosen.metadata.id), eff_ws))
+        let chosen_nid = NodeId::new(chosen.metadata.id);
+        let _ = self
+            .coordinator
+            .sync_floating_room_node(room_id, chosen_nid.as_str(), None)
+            .await;
+
+        Ok((chosen_nid, eff_ws))
     }
 
     pub async fn handle_http(
@@ -177,9 +187,19 @@ impl WorkspaceFsExtension {
         };
 
         let (node_id, workspace_path) = self.resolve_room_node_and_workspace(room_id, p).await?;
-        let zone = match query.get("zone").map(|s| s.as_str()) {
-            Some("tmp") => NodeFsZone::Tmp,
-            _ => NodeFsZone::Workspace,
+        let room_tmp_dir = RoomCoordinator::room_tmp_dir(room_id);
+        let zone = if workspace_path.is_none() {
+            NodeFsZone::Tmp
+        } else {
+            match query.get("zone").map(|s| s.as_str()) {
+                Some("tmp") => NodeFsZone::Tmp,
+                _ => NodeFsZone::Workspace,
+            }
+        };
+        let tmp_dir_for_zone = if zone == NodeFsZone::Tmp {
+            Some(room_tmp_dir.clone())
+        } else {
+            None
         };
         let rel_path = query.get("path").cloned().unwrap_or_default();
 
@@ -193,6 +213,7 @@ impl WorkspaceFsExtension {
                         &NodeFsRequest {
                             zone,
                             workspace_path,
+                            tmp_dir: tmp_dir_for_zone,
                             op: NodeFsOp::ListDir { rel_path },
                         },
                     )
@@ -209,6 +230,7 @@ impl WorkspaceFsExtension {
                         &NodeFsRequest {
                             zone,
                             workspace_path,
+                            tmp_dir: tmp_dir_for_zone,
                             op: NodeFsOp::ReadFile {
                                 rel_path,
                                 max_bytes: Some(2 * 1024 * 1024),
@@ -228,6 +250,7 @@ impl WorkspaceFsExtension {
                         &NodeFsRequest {
                             zone,
                             workspace_path,
+                            tmp_dir: tmp_dir_for_zone,
                             op: NodeFsOp::ReadFile {
                                 rel_path: rel_path.clone(),
                                 max_bytes: Some(50 * 1024 * 1024),
@@ -325,6 +348,7 @@ impl WorkspaceFsExtension {
                         &NodeFsRequest {
                             zone: NodeFsZone::Tmp,
                             workspace_path,
+                            tmp_dir: Some(room_tmp_dir),
                             op: NodeFsOp::WriteTempFile {
                                 rel_path: target_rel_path.clone(),
                                 data_base64: req.data_base64,

@@ -34,16 +34,23 @@ export async function mount(container, ctx) {
         </button>
       </div>
 
-      <!-- Zone Tabs (Workspace vs Temp) -->
+      <!-- Zone Tabs (Pinned: Workspace vs Room Temp; Floating: Single Unified Directory) -->
       <div class="p-2.5 border-b border-[var(--border-subtle)] bg-[var(--bg-sidebar)] space-y-2 shrink-0">
-        <div class="grid grid-cols-2 gap-1 p-0.5 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)]">
-          <button id="fs-tab-ws" type="button" ${!hasWorkspace ? 'disabled' : ''} class="py-1.5 px-2 rounded-md text-[11px] font-semibold cursor-pointer transition-colors ${!hasWorkspace ? 'opacity-40 cursor-not-allowed' : ''}">
-            📂 工作区
-          </button>
-          <button id="fs-tab-tmp" type="button" class="py-1.5 px-2 rounded-md text-[11px] font-semibold cursor-pointer transition-colors">
-            🗂️ 临时区 (可上传)
-          </button>
-        </div>
+        ${
+          hasWorkspace
+            ? `<div class="grid grid-cols-2 gap-1 p-0.5 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)]">
+                <button id="fs-tab-ws" type="button" class="py-1.5 px-2 rounded-md text-[11px] font-semibold cursor-pointer transition-colors">
+                  📂 工作目录
+                </button>
+                <button id="fs-tab-tmp" type="button" class="py-1.5 px-2 rounded-md text-[11px] font-semibold cursor-pointer transition-colors">
+                  🗂️ 房间临时目录 (可上传)
+                </button>
+              </div>`
+            : `<div class="px-2.5 py-1.5 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] flex items-center justify-between text-[11px]">
+                <span class="font-semibold text-[var(--text-primary)]">🗂️ 房间共享临时工作目录</span>
+                <span class="text-[10px] text-[var(--text-muted)]">Agent 工作目录 · 支持上传</span>
+              </div>`
+        }
 
         <!-- Path Bar & Actions -->
         <div class="flex items-center justify-between gap-1.5">
@@ -81,32 +88,38 @@ export async function mount(container, ctx) {
   function syncTabs() {
     const activeCls = 'bg-[var(--bg-main)] text-[var(--text-primary)] shadow-2xs';
     const inactiveCls = 'text-[var(--text-muted)] hover:text-[var(--text-primary)]';
-    tabWs.className = `py-1.5 px-2 rounded-md text-[11px] font-semibold transition-colors ${
-      !hasWorkspace ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'
-    } ${currentZone === 'workspace' ? activeCls : inactiveCls}`;
-    tabTmp.className = `py-1.5 px-2 rounded-md text-[11px] font-semibold cursor-pointer transition-colors ${
-      currentZone === 'tmp' ? activeCls : inactiveCls
-    }`;
+    if (tabWs && tabTmp) {
+      tabWs.className = `py-1.5 px-2 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
+        currentZone === 'workspace' ? activeCls : inactiveCls
+      }`;
+      tabTmp.className = `py-1.5 px-2 rounded-md text-[11px] font-semibold cursor-pointer transition-colors ${
+        currentZone === 'tmp' ? activeCls : inactiveCls
+      }`;
+    }
     uploadLabel.style.display = currentZone === 'tmp' ? 'inline-flex' : 'none';
     pathLabel.textContent = currentPath ? `/${currentPath}` : '/';
   }
 
-  tabWs.addEventListener('click', () => {
-    if (!hasWorkspace) return;
-    currentZone = 'workspace';
-    currentPath = '';
-    previewData = null;
-    syncTabs();
-    loadDir();
-  });
+  if (tabWs) {
+    tabWs.addEventListener('click', () => {
+      if (!hasWorkspace) return;
+      currentZone = 'workspace';
+      currentPath = '';
+      previewData = null;
+      syncTabs();
+      loadDir();
+    });
+  }
 
-  tabTmp.addEventListener('click', () => {
-    currentZone = 'tmp';
-    currentPath = '';
-    previewData = null;
-    syncTabs();
-    loadDir();
-  });
+  if (tabTmp) {
+    tabTmp.addEventListener('click', () => {
+      currentZone = 'tmp';
+      currentPath = '';
+      previewData = null;
+      syncTabs();
+      loadDir();
+    });
+  }
 
   upBtn.addEventListener('click', () => {
     if (!currentPath) return;

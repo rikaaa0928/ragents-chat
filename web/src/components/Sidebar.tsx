@@ -110,7 +110,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       const rawWorkspacePath =
         item.room.workspace_path || pinnedAgent?.scheduling?.workspace_path || null;
 
-      if (!rawNodeId) {
+      if (!rawWorkspacePath && !pinnedAgent) {
         const key = '__floating__';
         let grp = map.get(key);
         if (!grp) {

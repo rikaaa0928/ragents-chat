@@ -904,7 +904,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
     assert_eq!(upload_resp["is_image"], true);
     assert_eq!(
         upload_resp["agent_path"],
-        ".ragents-tmp/uploads/screenshot.png"
+        format!("/tmp/ragents/rooms/{alice_room_id}/uploads/screenshot.png")
     );
 
     // Verify listing `zone=tmp` shows `uploads/screenshot.png`

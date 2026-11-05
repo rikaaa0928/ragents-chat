@@ -431,11 +431,40 @@ async fn handle_patch_room(
 ) -> Result<Json<Room>, ChatApiError> {
     let principal = verify_user_auth(&state, &headers)?;
     verify_room_access(&state, &principal, &room_id)?;
-    let updated = state.coordinator.store.patch_room(&room_id, patch)?;
-    state.coordinator.emit_room_event(ChatroomEvent::RoomUpdated {
-        room_id: room_id.clone(),
-        room: updated.clone(),
-    });
+    let requested_node_drift = patch
+        .node_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if let Some(ref target_nid) = requested_node_drift {
+        if !principal.can_access_node(Some(target_nid.as_str())) {
+            return Err(ChatApiError::Http(
+                StatusCode::FORBIDDEN,
+                format!("当前 Token 无权将聊天室切换至节点 '{target_nid}'"),
+            ));
+        }
+    }
+    let mut updated = state.coordinator.store.patch_room(&room_id, patch)?;
+    if let Some(target_nid) = requested_node_drift {
+        updated = state
+            .coordinator
+            .sync_floating_room_node(
+                &room_id,
+                &target_nid,
+                Some(format!(
+                    "[🔄 手动切换节点] Floating 房间已手动切换至节点 {target_nid}，将在该节点初始化房间临时目录 {}",
+                    crate::coordinator::RoomCoordinator::room_tmp_dir(&room_id)
+                )),
+            )
+            .await
+            .map_err(|e| ChatApiError::Http(StatusCode::BAD_REQUEST, e.to_string()))?;
+    } else {
+        state.coordinator.emit_room_event(ChatroomEvent::RoomUpdated {
+            room_id: room_id.clone(),
+            room: updated.clone(),
+        });
+    }
     if updated.peek_enabled {
         state.coordinator.schedule_room_peek_if_ready(&room_id);
     }

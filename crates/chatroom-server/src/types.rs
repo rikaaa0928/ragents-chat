@@ -173,6 +173,8 @@ pub struct PatchRoomRequest {
     pub mute_probability: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_agent_relay_depth: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
