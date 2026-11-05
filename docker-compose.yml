@@ -51,6 +51,7 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./bundle:/etc/ragents:ro
+      - ./data/daemon-tmp:/tmp/ragents
     restart: unless-stopped
 
   ragents-chat:
