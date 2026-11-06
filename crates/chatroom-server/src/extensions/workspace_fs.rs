@@ -233,6 +233,7 @@ impl WorkspaceFsExtension {
                             tmp_dir: tmp_dir_for_zone,
                             op: NodeFsOp::ReadFile {
                                 rel_path,
+                                offset: None,
                                 max_bytes: Some(2 * 1024 * 1024),
                             },
                         },
@@ -242,6 +243,7 @@ impl WorkspaceFsExtension {
                 Ok(Json(fs_resp).into_response())
             }
             (Method::GET, "raw") => {
+                const STREAM_CHUNK_BYTES: usize = 2 * 1024 * 1024;
                 let fs_resp = self
                     .coordinator
                     .ragents_client
@@ -249,11 +251,12 @@ impl WorkspaceFsExtension {
                         &node_id,
                         &NodeFsRequest {
                             zone,
-                            workspace_path,
-                            tmp_dir: tmp_dir_for_zone,
+                            workspace_path: workspace_path.clone(),
+                            tmp_dir: tmp_dir_for_zone.clone(),
                             op: NodeFsOp::ReadFile {
                                 rel_path: rel_path.clone(),
-                                max_bytes: Some(50 * 1024 * 1024),
+                                offset: Some(0),
+                                max_bytes: Some(STREAM_CHUNK_BYTES),
                             },
                         },
                     )
@@ -268,9 +271,10 @@ impl WorkspaceFsExtension {
                 }
 
                 let b64 = fs_resp.data_base64.unwrap_or_default();
-                let raw_bytes = base64::engine::general_purpose::STANDARD
+                let first_bytes = base64::engine::general_purpose::STANDARD
                     .decode(b64)
                     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                let total_size = fs_resp.size.unwrap_or(first_bytes.len() as u64);
                 let mime = fs_resp
                     .mime_type
                     .unwrap_or_else(|| "application/octet-stream".to_string());
@@ -287,12 +291,92 @@ impl WorkspaceFsExtension {
                     format!("inline; filename=\"{filename}\"")
                 };
 
+                if (first_bytes.len() as u64) >= total_size {
+                    return Ok((
+                        [
+                            (header::CONTENT_TYPE, mime),
+                            (header::CONTENT_DISPOSITION, disposition),
+                            (header::CONTENT_LENGTH, first_bytes.len().to_string()),
+                        ],
+                        first_bytes,
+                    )
+                        .into_response());
+                }
+
+                let client = self.coordinator.ragents_client.clone();
+                let stream = futures::stream::unfold(
+                    (Some(Bytes::from(first_bytes.clone())), first_bytes.len() as u64),
+                    move |(pending_first, next_offset)| {
+                        let client = client.clone();
+                        let node_id = node_id.clone();
+                        let workspace_path = workspace_path.clone();
+                        let tmp_dir_for_zone = tmp_dir_for_zone.clone();
+                        let rel_path = rel_path.clone();
+                        async move {
+                            if let Some(first) = pending_first {
+                                return Some((Ok::<Bytes, std::io::Error>(first), (None, next_offset)));
+                            }
+                            if next_offset >= total_size {
+                                return None;
+                            }
+                            let chunk_resp = match client
+                                .node_fs_query(
+                                    &node_id,
+                                    &NodeFsRequest {
+                                        zone,
+                                        workspace_path,
+                                        tmp_dir: tmp_dir_for_zone,
+                                        op: NodeFsOp::ReadFile {
+                                            rel_path,
+                                            offset: Some(next_offset),
+                                            max_bytes: Some(STREAM_CHUNK_BYTES),
+                                        },
+                                    },
+                                )
+                                .await
+                            {
+                                Ok(r) if r.ok => r,
+                                Ok(r) => {
+                                    return Some((
+                                        Err(std::io::Error::other(
+                                            r.error.unwrap_or_else(|| "chunk read failed".into()),
+                                        )),
+                                        (None, total_size),
+                                    ));
+                                }
+                                Err(e) => {
+                                    return Some((
+                                        Err(std::io::Error::other(e.to_string())),
+                                        (None, total_size),
+                                    ));
+                                }
+                            };
+                            let b64 = chunk_resp.data_base64.unwrap_or_default();
+                            let bytes = match base64::engine::general_purpose::STANDARD.decode(b64) {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    return Some((
+                                        Err(std::io::Error::other(e.to_string())),
+                                        (None, total_size),
+                                    ));
+                                }
+                            };
+                            if bytes.is_empty() {
+                                return None;
+                            }
+                            let new_offset = next_offset + bytes.len() as u64;
+                            Some((Ok(Bytes::from(bytes)), (None, new_offset)))
+                        }
+                    },
+                );
+
                 Ok((
                     [
                         (header::CONTENT_TYPE, mime),
                         (header::CONTENT_DISPOSITION, disposition),
+                        (header::CONTENT_LENGTH, total_size.to_string()),
                     ],
-                    raw_bytes,
+                    axum::body::Body::from_stream(stream),
                 )
                     .into_response())
             }
