@@ -3,6 +3,11 @@ export async function mount(container, ctx) {
   let currentPath = '';
   let previewData = null;
   let uploading = false;
+  let currentEntries = [];
+  let currentDirAgentPath = '';
+  let stagedMap = {};
+  const activeStagePolls = new Set();
+  const STAGE_THRESHOLD_BYTES = 2 * 1024 * 1024;
 
   const room = ctx.room;
   if (!room) {
@@ -177,10 +182,112 @@ export async function mount(container, ctx) {
       }
       rootHint.textContent = `节点路径: ${res.root_dir || ''}`;
       rootHint.title = res.root_dir || '';
-      renderEntries(res.entries || [], res.agent_path || '');
+      currentEntries = res.entries || [];
+      currentDirAgentPath = res.agent_path || '';
+      stagedMap = res.staged_files || {};
+      renderEntries(currentEntries, currentDirAgentPath);
+      Object.values(stagedMap).forEach((st) => {
+        if (st && st.phase === 'uploading' && st.stage_id) {
+          pollStageUntilReady(st.rel_path, st.stage_id, false);
+        }
+      });
     } catch (err) {
       contentEl.innerHTML = `<div class="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-500 font-mono-code text-[11px]">${escapeHtml(err?.message || String(err))}</div>`;
     }
+  }
+
+  function triggerBrowserDownload(url) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => a.remove(), 1000);
+  }
+
+  async function startStageAndDownload(relPath, autoDownload) {
+    try {
+      const q = `?zone=${encodeURIComponent(currentZone)}&path=${encodeURIComponent(relPath)}`;
+      const st = await ctx.extFetch(`/rooms/${encodeURIComponent(room.room_id)}/stage${q}`, {
+        method: 'POST',
+      });
+      stagedMap[relPath] = st;
+      renderEntries(currentEntries, currentDirAgentPath);
+      if (st.phase === 'ready') {
+        if (autoDownload) {
+          const dlUrl = `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(room.room_id)}/raw?zone=${encodeURIComponent(currentZone)}&path=${encodeURIComponent(relPath)}&download=1`;
+          triggerBrowserDownload(dlUrl);
+        }
+        return;
+      }
+      if (st.stage_id) {
+        await pollStageUntilReady(relPath, st.stage_id, autoDownload);
+      }
+    } catch (err) {
+      ctx.showError(err?.message || String(err));
+    }
+  }
+
+  async function pollStageUntilReady(relPath, stageId, autoDownload) {
+    if (activeStagePolls.has(stageId)) return;
+    activeStagePolls.add(stageId);
+    try {
+      while (true) {
+        await new Promise((r) => setTimeout(r, 450));
+        const st = await ctx.extFetch(
+          `/rooms/${encodeURIComponent(room.room_id)}/stage-status?stage_id=${encodeURIComponent(stageId)}`
+        );
+        stagedMap[relPath] = st;
+        renderEntries(currentEntries, currentDirAgentPath);
+        if (st.phase === 'ready') {
+          if (autoDownload) {
+            const dlUrl = `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(room.room_id)}/raw?zone=${encodeURIComponent(currentZone)}&path=${encodeURIComponent(relPath)}&download=1`;
+            triggerBrowserDownload(dlUrl);
+          }
+          break;
+        }
+        if (st.phase === 'failed') {
+          ctx.showError(st.error || '文件预载到服务器失败');
+          break;
+        }
+      }
+    } catch (err) {
+      ctx.showError(err?.message || String(err));
+    } finally {
+      activeStagePolls.delete(stageId);
+    }
+  }
+
+  function renderFileDownloadAction(relPath, fileSize, isPreviewCard) {
+    const dlUrl = `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(room.room_id)}/raw?zone=${encodeURIComponent(currentZone)}&path=${encodeURIComponent(relPath)}&download=1`;
+    const isLarge = (fileSize || 0) > STAGE_THRESHOLD_BYTES;
+    const st = stagedMap[relPath];
+
+    if (!isLarge) {
+      return isPreviewCard
+        ? `<a href="${dlUrl}" target="_blank" rel="noopener" class="px-2 py-1 rounded-md bg-[var(--bg-surface)] border border-[var(--border-subtle)] hover:bg-[var(--bg-hover)] text-[10.5px]">⬇️ 下载</a>`
+        : `<a href="${dlUrl}" target="_blank" rel="noopener" class="px-1.5 py-0.5 rounded bg-[var(--bg-surface)] hover:bg-[var(--bg-active)] text-[10px] text-[var(--text-secondary)]" title="下载文件">⬇️</a>`;
+    }
+
+    if (st && st.phase === 'uploading') {
+      const total = st.total_bytes || fileSize || 1;
+      const done = st.uploaded_bytes || 0;
+      const pct = Math.min(99, Math.round((done / total) * 100));
+      return `<span class="px-2 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 font-mono-code text-[10px] font-semibold" title="正在从节点流式上传至服务器中转缓存 (${formatBytes(done)} / ${formatBytes(total)})，完成后将自动开始下载">⏳ 预载 ${pct}%</span>`;
+    }
+
+    if (st && st.phase === 'ready') {
+      const mins = Math.max(1, Math.round((st.expires_in_secs || 7200) / 60));
+      return isPreviewCard
+        ? `<a href="${dlUrl}" target="_blank" rel="noopener" class="px-2 py-1 rounded-md bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/25 text-[10.5px] font-semibold" title="已预载至服务器缓存（有效期剩余约 ${mins} 分钟），点击从服务器高速下载">⚡ 高速下载 (已预载)</a>`
+        : `<a href="${dlUrl}" target="_blank" rel="noopener" class="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/25 text-[10px] font-semibold" title="已预载至服务器缓存（有效期剩余约 ${mins} 分钟），点击从服务器高速下载">⚡ 下载</a>`;
+    }
+
+    return isPreviewCard
+      ? `<button type="button" data-stage-dl="${escapeAttr(relPath)}" class="px-2 py-1 rounded-md bg-sky-500/15 text-sky-600 dark:text-sky-400 hover:bg-sky-500/25 text-[10.5px] font-semibold cursor-pointer" title="大文件先预载上传至服务器临时缓存（2小时有效），预载完成后自动触发下载">☁️ 预载并下载</button>`
+      : `<button type="button" data-stage-dl="${escapeAttr(relPath)}" class="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-600 dark:text-sky-400 hover:bg-sky-500/25 text-[10px] font-semibold cursor-pointer" title="大文件先预载上传至服务器临时缓存（2小时有效），预载完成后自动触发下载">☁️ 预载</button>`;
   }
 
   function renderEntries(entries, dirAgentPath) {
@@ -204,11 +311,7 @@ export async function mount(container, ctx) {
                     </button>
                     <div class="flex items-center gap-1.5 shrink-0">
                       <span class="text-[10px] font-mono-code text-[var(--text-muted)]">${sizeText}</span>
-                      ${
-                        !ent.is_dir
-                          ? `<a href="/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(room.room_id)}/raw?zone=${encodeURIComponent(currentZone)}&path=${encodeURIComponent(ent.rel_path)}&download=1" target="_blank" rel="noopener" class="px-1.5 py-0.5 rounded bg-[var(--bg-surface)] hover:bg-[var(--bg-active)] text-[10px] text-[var(--text-secondary)]" title="下载文件">⬇️</a>`
-                          : ''
-                      }
+                      ${!ent.is_dir ? renderFileDownloadAction(ent.rel_path, ent.size || 0, false) : ''}
                     </div>
                   </div>
                 `;
@@ -235,9 +338,7 @@ export async function mount(container, ctx) {
               <button id="fs-insert-path" type="button" class="px-2 py-1 rounded-md bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/25 text-[10.5px] font-semibold cursor-pointer" title="将此文件路径插入聊天输入框供 Agent 读取">
                 + 引用到对话
               </button>
-              <a href="${rawUrl}&download=1" target="_blank" rel="noopener" class="px-2 py-1 rounded-md bg-[var(--bg-surface)] border border-[var(--border-subtle)] hover:bg-[var(--bg-hover)] text-[10.5px]">
-                ⬇️ 下载
-              </a>
+              ${renderFileDownloadAction(previewData.resolved_rel_path, previewData.size || 0, true)}
             </div>
           </div>
           ${
@@ -247,13 +348,23 @@ export async function mount(container, ctx) {
                  </div>`
               : previewData.is_text
               ? `<pre class="text-[11px] font-mono-code leading-relaxed text-[var(--text-secondary)] whitespace-pre-wrap break-words max-h-[340px] overflow-y-auto">${escapeHtml(previewData.text_preview || '')}${previewData.truncated ? '\n\n[文件较大，仅展示前 512KB 预览]' : ''}</pre>`
-              : `<div class="py-4 text-center text-[11px] text-[var(--text-muted)]">二进制文件，请点击右上角「⬇️ 下载」查看</div>`
+              : `<div class="py-4 text-center text-[11px] text-[var(--text-muted)]">二进制文件，请点击右上角「☁️ 预载并下载 / ⚡ 高速下载」查看</div>`
           }
         </div>
       `;
     }
 
     contentEl.innerHTML = listHtml + previewHtml;
+
+    contentEl.querySelectorAll('[data-stage-dl]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const p = btn.getAttribute('data-stage-dl') || '';
+        if (p) {
+          await startStageAndDownload(p, true);
+        }
+      });
+    });
 
     contentEl.querySelectorAll('[data-entry-path]').forEach((btn) => {
       btn.addEventListener('click', async () => {

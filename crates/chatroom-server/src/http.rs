@@ -52,7 +52,7 @@ pub fn build_chat_router(state: ChatServerState) -> Router {
         .route("/api/v1/extensions/manifest", get(handle_extensions_manifest))
         .route(
             "/api/v1/ext/{plugin_id}/{*subpath}",
-            any(handle_extension_gateway),
+            any(handle_extension_gateway).layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .route(
             "/api/v1/settings/manager",
@@ -294,12 +294,20 @@ async fn handle_extension_gateway(
     headers: HeaderMap,
     Path((plugin_id, subpath)): Path<(String, String)>,
     Query(query): Query<HashMap<String, String>>,
-    body: Bytes,
+    body: axum::body::Body,
 ) -> Result<Response, ChatApiError> {
     let principal = verify_user_auth(&state, &headers).ok();
     state
         .extensions
-        .dispatch_http(&plugin_id, method, &subpath, &query, principal.as_ref(), body)
+        .dispatch_http(
+            &plugin_id,
+            method,
+            &subpath,
+            &query,
+            &headers,
+            principal.as_ref(),
+            body,
+        )
         .await
         .map_err(|(code, msg)| ChatApiError::Http(code, msg))
 }

@@ -3,7 +3,6 @@ pub mod workspace_fs;
 
 use crate::coordinator::RoomCoordinator;
 use crate::types::{Room, RoomAgent};
-use axum::body::Bytes;
 use axum::http::{Method, StatusCode};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
@@ -213,11 +212,15 @@ impl ChatExtensionHost {
         method: Method,
         subpath: &str,
         query: &HashMap<String, String>,
+        headers: &axum::http::HeaderMap,
         principal: Option<&ChatPrincipal>,
-        body: Bytes,
+        body: axum::body::Body,
     ) -> Result<Response, (StatusCode, String)> {
         match plugin_id {
             "token_acl" => {
+                let bytes = axum::body::to_bytes(body, 4 * 1024 * 1024)
+                    .await
+                    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
                 self.token_acl
                     .handle_http(
                         &self.coordinator,
@@ -225,13 +228,13 @@ impl ChatExtensionHost {
                         subpath,
                         query,
                         principal,
-                        body,
+                        bytes,
                     )
                     .await
             }
             "workspace_fs" => {
                 self.workspace_fs
-                    .handle_http(method, subpath, query, principal, body)
+                    .handle_http(method, subpath, query, headers, principal, body)
                     .await
             }
             other => Err((
