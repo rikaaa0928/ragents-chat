@@ -68,6 +68,7 @@ impl ChatroomStore {
                  default_reasoning_effort  TEXT,
                  default_reasoning_summary TEXT,
                  default_web_search        INTEGER NOT NULL DEFAULT 0,
+                 default_prompt_hint       INTEGER NOT NULL DEFAULT 0,
                  default_extensions_json   TEXT NOT NULL,
                  idle_peek_debounce_ms     INTEGER NOT NULL DEFAULT 800,
                  max_agent_relay_depth     INTEGER NOT NULL DEFAULT 0,
@@ -104,6 +105,7 @@ impl ChatroomStore {
                  reasoning_effort        TEXT,
                  reasoning_summary       TEXT,
                  web_search              INTEGER NOT NULL DEFAULT 0,
+                 prompt_hint             INTEGER NOT NULL DEFAULT 0,
                  scheduling_json         TEXT NOT NULL,
                  root_session_id         TEXT NOT NULL,
                  active_session_id       TEXT NOT NULL,
@@ -192,7 +194,7 @@ You manage the room's specialist agent roster using your tools:\n\
         let row = conn.query_row(
             "SELECT manager_model, manager_system_prompt, default_node_id, default_workspace_root,
                     default_agent_model, default_reasoning_effort, default_reasoning_summary,
-                    default_web_search, default_extensions_json, idle_peek_debounce_ms, max_agent_relay_depth, updated_at
+                    default_web_search, default_prompt_hint, default_extensions_json, idle_peek_debounce_ms, max_agent_relay_depth, updated_at
              FROM manager_settings WHERE id = 1",
             [],
             |r| {
@@ -205,10 +207,11 @@ You manage the room's specialist agent roster using your tools:\n\
                     r.get::<_, Option<String>>(5)?,
                     r.get::<_, Option<String>>(6)?,
                     r.get::<_, i64>(7)? != 0,
-                    r.get::<_, String>(8)?,
-                    r.get::<_, i64>(9)?,
+                    r.get::<_, i64>(8)? != 0,
+                    r.get::<_, String>(9)?,
                     r.get::<_, i64>(10)?,
-                    r.get::<_, String>(11)?,
+                    r.get::<_, i64>(11)?,
+                    r.get::<_, String>(12)?,
                 ))
             },
         )?;
@@ -222,10 +225,11 @@ You manage the room's specialist agent roster using your tools:\n\
             default_reasoning_effort: row.5,
             default_reasoning_summary: row.6,
             default_web_search: row.7,
-            default_extensions: serde_json::from_str(&row.8).unwrap_or_default(),
-            idle_peek_debounce_ms: row.9 as u64,
-            max_agent_relay_depth: row.10 as u32,
-            updated_at: parse_dt(&row.11),
+            default_prompt_hint: row.8,
+            default_extensions: serde_json::from_str(&row.9).unwrap_or_default(),
+            idle_peek_debounce_ms: row.10 as u64,
+            max_agent_relay_depth: row.11 as u32,
+            updated_at: parse_dt(&row.12),
         })
     }
 
@@ -258,6 +262,9 @@ You manage the room's specialist agent roster using your tools:\n\
         if let Some(ws) = patch.default_web_search {
             current.default_web_search = ws;
         }
+        if let Some(ph) = patch.default_prompt_hint {
+            current.default_prompt_hint = ph;
+        }
         if let Some(exts) = patch.default_extensions {
             current.default_extensions = exts;
         }
@@ -280,10 +287,11 @@ You manage the room's specialist agent roster using your tools:\n\
                 default_reasoning_effort = ?6,
                 default_reasoning_summary = ?7,
                 default_web_search = ?8,
-                default_extensions_json = ?9,
-                idle_peek_debounce_ms = ?10,
-                max_agent_relay_depth = ?11,
-                updated_at = ?12
+                default_prompt_hint = ?9,
+                default_extensions_json = ?10,
+                idle_peek_debounce_ms = ?11,
+                max_agent_relay_depth = ?12,
+                updated_at = ?13
              WHERE id = 1",
             params![
                 &current.manager_model,
@@ -294,6 +302,7 @@ You manage the room's specialist agent roster using your tools:\n\
                 &current.default_reasoning_effort,
                 &current.default_reasoning_summary,
                 i64::from(current.default_web_search),
+                i64::from(current.default_prompt_hint),
                 serde_json::to_string(&current.default_extensions)?,
                 current.idle_peek_debounce_ms as i64,
                 current.max_agent_relay_depth as i64,
@@ -540,12 +549,12 @@ You manage the room's specialist agent roster using your tools:\n\
         tx.execute(
             "INSERT INTO room_agents (
                 agent_id, room_id, name, role_title, avatar, persona_prompt,
-                model, reasoning_effort, reasoning_summary, web_search, scheduling_json,
+                model, reasoning_effort, reasoning_summary, web_search, prompt_hint, scheduling_json,
                 root_session_id, active_session_id,
                 session_chain_json, last_delivered_seq, last_roster_version,
                 allow_speak_in_turn, runtime_state, active_activation_id,
                 agent_secret_token, created_by, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 &agent.agent_id,
                 &agent.room_id,
@@ -557,6 +566,7 @@ You manage the room's specialist agent roster using your tools:\n\
                 &agent.reasoning_effort,
                 &agent.reasoning_summary,
                 i64::from(agent.web_search),
+                i64::from(agent.prompt_hint),
                 serde_json::to_string(&agent.scheduling)?,
                 agent.root_session_id.as_str(),
                 agent.active_session_id.as_str(),
@@ -577,11 +587,11 @@ You manage the room's specialist agent roster using your tools:\n\
     }
 
     fn row_to_agent(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoomAgent> {
-        let scheduling_str: String = r.get(10)?;
-        let chain_str: String = r.get(13)?;
-        let state_str: String = r.get(17)?;
-        let act_opt: Option<String> = r.get(18)?;
-        let created_str: String = r.get(21)?;
+        let scheduling_str: String = r.get(11)?;
+        let chain_str: String = r.get(14)?;
+        let state_str: String = r.get(18)?;
+        let act_opt: Option<String> = r.get(19)?;
+        let created_str: String = r.get(22)?;
         Ok(RoomAgent {
             agent_id: r.get(0)?,
             room_id: r.get(1)?,
@@ -593,19 +603,20 @@ You manage the room's specialist agent roster using your tools:\n\
             reasoning_effort: r.get(7)?,
             reasoning_summary: r.get(8)?,
             web_search: r.get::<_, i64>(9)? != 0,
+            prompt_hint: r.get::<_, i64>(10)? != 0,
             scheduling: serde_json::from_str(&scheduling_str).unwrap_or(SchedulingMode::Floating {
                 node_selector: Default::default(),
             }),
-            root_session_id: SessionId::new(r.get::<_, String>(11)?),
-            active_session_id: SessionId::new(r.get::<_, String>(12)?),
+            root_session_id: SessionId::new(r.get::<_, String>(12)?),
+            active_session_id: SessionId::new(r.get::<_, String>(13)?),
             session_chain: serde_json::from_str(&chain_str).unwrap_or_default(),
-            last_delivered_seq: r.get::<_, i64>(14)? as u64,
-            last_roster_version: r.get::<_, i64>(15)? as u64,
-            allow_speak_in_turn: r.get::<_, i64>(16)? != 0,
+            last_delivered_seq: r.get::<_, i64>(15)? as u64,
+            last_roster_version: r.get::<_, i64>(16)? as u64,
+            allow_speak_in_turn: r.get::<_, i64>(17)? != 0,
             runtime_state: AgentRuntimeState::from_str(&state_str),
             active_activation_id: act_opt.map(ActivationId::new),
-            agent_secret_token: r.get(19)?,
-            created_by: r.get(20)?,
+            agent_secret_token: r.get(20)?,
+            created_by: r.get(21)?,
             created_at: parse_dt(&created_str),
         })
     }
@@ -614,7 +625,7 @@ You manage the room's specialist agent roster using your tools:\n\
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT agent_id, room_id, name, role_title, avatar, persona_prompt,
-                    model, reasoning_effort, reasoning_summary, web_search, scheduling_json,
+                    model, reasoning_effort, reasoning_summary, web_search, prompt_hint, scheduling_json,
                     root_session_id, active_session_id,
                     session_chain_json, last_delivered_seq, last_roster_version,
                     allow_speak_in_turn, runtime_state, active_activation_id,
@@ -636,7 +647,7 @@ You manage the room's specialist agent roster using your tools:\n\
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.query_row(
             "SELECT agent_id, room_id, name, role_title, avatar, persona_prompt,
-                    model, reasoning_effort, reasoning_summary, web_search, scheduling_json,
+                    model, reasoning_effort, reasoning_summary, web_search, prompt_hint, scheduling_json,
                     root_session_id, active_session_id,
                     session_chain_json, last_delivered_seq, last_roster_version,
                     allow_speak_in_turn, runtime_state, active_activation_id,
@@ -653,7 +664,7 @@ You manage the room's specialist agent roster using your tools:\n\
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.query_row(
             "SELECT agent_id, room_id, name, role_title, avatar, persona_prompt,
-                    model, reasoning_effort, reasoning_summary, web_search, scheduling_json,
+                    model, reasoning_effort, reasoning_summary, web_search, prompt_hint, scheduling_json,
                     root_session_id, active_session_id,
                     session_chain_json, last_delivered_seq, last_roster_version,
                     allow_speak_in_turn, runtime_state, active_activation_id,
@@ -673,7 +684,7 @@ You manage the room's specialist agent roster using your tools:\n\
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.query_row(
             "SELECT agent_id, room_id, name, role_title, avatar, persona_prompt,
-                    model, reasoning_effort, reasoning_summary, web_search, scheduling_json,
+                    model, reasoning_effort, reasoning_summary, web_search, prompt_hint, scheduling_json,
                     root_session_id, active_session_id,
                     session_chain_json, last_delivered_seq, last_roster_version,
                     allow_speak_in_turn, runtime_state, active_activation_id,
@@ -716,9 +727,12 @@ You manage the room's specialist agent roster using your tools:\n\
         if let Some(ws) = patch.web_search {
             agent.web_search = ws;
         }
+        if let Some(ph) = patch.prompt_hint {
+            agent.prompt_hint = ph;
+        }
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
-            "UPDATE room_agents SET role_title = ?1, persona_prompt = ?2, model = ?3, reasoning_effort = ?4, reasoning_summary = ?5, web_search = ?6 WHERE agent_id = ?7",
+            "UPDATE room_agents SET role_title = ?1, persona_prompt = ?2, model = ?3, reasoning_effort = ?4, reasoning_summary = ?5, web_search = ?6, prompt_hint = ?7 WHERE agent_id = ?8",
             params![
                 &agent.role_title,
                 &agent.persona_prompt,
@@ -726,6 +740,7 @@ You manage the room's specialist agent roster using your tools:\n\
                 &agent.reasoning_effort,
                 &agent.reasoning_summary,
                 i64::from(agent.web_search),
+                i64::from(agent.prompt_hint),
                 agent_id,
             ],
         )?;

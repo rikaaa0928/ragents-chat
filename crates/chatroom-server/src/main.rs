@@ -111,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
         default_reasoning_effort: None,
         default_reasoning_summary: None,
         default_web_search: None,
+        default_prompt_hint: None,
         default_extensions: Some(default_extensions),
         default_node_id: None,
         default_workspace_root: None,

@@ -107,6 +107,7 @@ interface RightInspectorPaneProps {
       reasoning_effort?: string | null;
       reasoning_summary?: string | null;
       web_search?: boolean;
+      prompt_hint?: boolean;
       role_title?: string | null;
       persona_prompt?: string | null;
     }
@@ -1190,6 +1191,25 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                         onChange={(e) =>
                           onUpdateAgentConfig(inspectedAgent.agent_id, {
                             web_search: e.target.checked,
+                          })
+                        }
+                        className="w-3.5 h-3.5 accent-emerald-500 cursor-pointer"
+                      />
+                    </label>
+
+                    <label
+                      className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] cursor-pointer select-none"
+                      title="默认关闭（完整规则已在房间 System Prompt 中）；开启后每次输入末尾附加简化版 chatroom_speak 提示，适合小模型"
+                    >
+                      <span className="text-[11px] font-medium text-[var(--text-primary)]">
+                        💡 输入附加发言提示 (适合小模型)
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(inspectedAgent.prompt_hint)}
+                        onChange={(e) =>
+                          onUpdateAgentConfig(inspectedAgent.agent_id, {
+                            prompt_hint: e.target.checked,
                           })
                         }
                         className="w-3.5 h-3.5 accent-emerald-500 cursor-pointer"

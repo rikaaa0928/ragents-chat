@@ -55,6 +55,8 @@ pub struct ManagerSettings {
     pub default_reasoning_summary: Option<String>,
     #[serde(default)]
     pub default_web_search: bool,
+    #[serde(default)]
+    pub default_prompt_hint: bool,
     pub default_extensions: Vec<ExtensionSpec>,
     pub idle_peek_debounce_ms: u64,
     pub max_agent_relay_depth: u32,
@@ -75,6 +77,8 @@ pub struct UpdateManagerSettingsRequest {
     pub default_reasoning_summary: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_web_search: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_prompt_hint: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_extensions: Option<Vec<ExtensionSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -149,6 +153,8 @@ pub struct CreateRoomRequest {
     pub reasoning_summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_hint: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -229,6 +235,8 @@ pub struct RoomAgent {
     pub reasoning_summary: Option<String>,
     #[serde(default)]
     pub web_search: bool,
+    #[serde(default)]
+    pub prompt_hint: bool,
     pub scheduling: SchedulingMode,
     pub root_session_id: SessionId,
     pub active_session_id: SessionId,
@@ -293,6 +301,8 @@ pub struct RoomAgentPublic {
     pub reasoning_summary: Option<String>,
     #[serde(default)]
     pub web_search: bool,
+    #[serde(default)]
+    pub prompt_hint: bool,
     pub scheduling: SchedulingMode,
     pub root_session_id: SessionId,
     pub active_session_id: SessionId,
@@ -321,6 +331,7 @@ impl From<RoomAgent> for RoomAgentPublic {
             reasoning_effort: a.reasoning_effort,
             reasoning_summary: a.reasoning_summary,
             web_search: a.web_search,
+            prompt_hint: a.prompt_hint,
             scheduling: a.scheduling,
             root_session_id: a.root_session_id,
             active_session_id: a.active_session_id,
@@ -352,6 +363,8 @@ pub struct CreateAgentRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_hint: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
@@ -369,6 +382,8 @@ pub struct PatchAgentRequest {
     pub reasoning_summary: Option<Option<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_hint: Option<bool>,
 }
 
 fn default_avatar() -> String {

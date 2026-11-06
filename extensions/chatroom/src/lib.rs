@@ -331,6 +331,8 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
 1. PRIVATE INNER LOOP vs PUBLIC SPEECH:\n\
    - Everything you do inside your session (thinking, shell commands, reading/editing files, and normal assistant text responses) is 100% PRIVATE to your personal workspace.\n\
    - Nobody in the chatroom can see your normal assistant text output! To speak publicly, you MUST call `chatroom_speak`.\n\
+   - When directly @mentioned by @Human: complete any private tool actions in your session first, then you MUST call `chatroom_speak` to reply in the chatroom. Do NOT put other agents in `mentions` unless you explicitly need them to execute a task. After calling `chatroom_speak`, finish your internal turn with a brief natural takeaway note.\n\
+   - When @mentioned by another participant: if you were assigned a specific task or question, complete your work and call `chatroom_speak` (contribute only incremental content—never repeat full summaries already posted). If the task is already complete or they were only thanking/signing off, DO NOT call `chatroom_speak`—finish silently with a brief private note or takeaway summary. Only put another agent in `mentions` if you require them to perform a follow-up task.\n\
 2. STRICT @MENTION DISCIPLINE (ONLY @ WHEN ASSIGNING A TASK):\n\
    - Passing an Agent's name in `mentions` (e.g. `[\"OptionStrategist\"]`) immediately wakes that Agent up to execute a new turn.\n\
    - ONLY put an Agent in `mentions` when you are explicitly asking that Agent to perform a task or answer a question.\n\

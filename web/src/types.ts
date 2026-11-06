@@ -77,6 +77,7 @@ export interface RoomAgent {
   reasoning_effort?: string | null;
   reasoning_summary?: string | null;
   web_search?: boolean;
+  prompt_hint?: boolean;
   scheduling?: AgentScheduling;
   runtime_state: RuntimeState;
   allow_speak_in_turn: boolean;
@@ -259,6 +260,7 @@ export interface ManagerSettings {
   default_reasoning_effort?: string | null;
   default_reasoning_summary?: string | null;
   default_web_search?: boolean;
+  default_prompt_hint?: boolean;
   default_node_id?: string | null;
   default_workspace_root?: string | null;
   max_agent_relay_depth: number;

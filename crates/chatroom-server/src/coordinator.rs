@@ -1728,6 +1728,7 @@ impl RoomCoordinator {
                     reasoning_effort: req.reasoning_effort.or(mgr.default_reasoning_effort),
                     reasoning_summary: req.reasoning_summary.or(mgr.default_reasoning_summary),
                     web_search: req.web_search.or(Some(mgr.default_web_search)),
+                    prompt_hint: req.prompt_hint.or(Some(mgr.default_prompt_hint)),
                     node_id: req.node_id.or(mgr.default_node_id),
                     workspace_path: req.workspace_path.or(mgr.default_workspace_root),
                 },
@@ -1859,6 +1860,7 @@ impl RoomCoordinator {
             reasoning_effort,
             reasoning_summary,
             web_search: mgr.default_web_search,
+            prompt_hint: mgr.default_prompt_hint,
             scheduling,
             root_session_id: sess_id.clone(),
             active_session_id: sess_id.clone(),
@@ -1925,6 +1927,7 @@ impl RoomCoordinator {
             reasoning_summary.as_deref(),
         );
         let web_search = req.web_search.unwrap_or(mgr.default_web_search);
+        let prompt_hint = req.prompt_hint.unwrap_or(mgr.default_prompt_hint);
 
         let room_tmp_dir = Self::room_tmp_dir(&room.room_id);
         let extra_tmp_dirs = vec![PathBuf::from(&room_tmp_dir)];
@@ -2101,6 +2104,7 @@ impl RoomCoordinator {
             reasoning_effort,
             reasoning_summary,
             web_search,
+            prompt_hint,
             scheduling,
             root_session_id: sess_id.clone(),
             active_session_id: sess_id.clone(),
@@ -2359,6 +2363,7 @@ impl RoomCoordinator {
                     reasoning_effort: mgr_settings.default_reasoning_effort,
                     reasoning_summary: mgr_settings.default_reasoning_summary,
                     web_search: Some(mgr_settings.default_web_search),
+                    prompt_hint: Some(mgr_settings.default_prompt_hint),
                     node_id: None,
                     workspace_path: None,
                 },
@@ -3462,14 +3467,16 @@ fn format_delivery_payload(
                 target_agent.name
             ));
             out.push_str(&format_single_room_message(last_msg));
-            if last_msg.sender_kind == SenderKind::Human {
-                out.push_str(
-                    "\n\n(Hint: Complete any private tool actions in your session, then you MUST call `chatroom_speak` to reply in the chatroom. Do NOT put other agents in `mentions` unless you explicitly need them to execute a task. After calling `chatroom_speak`, finish your internal turn with a brief natural takeaway note.)",
-                );
-            } else {
-                out.push_str(
-                    "\n\n(Hint: You were @mentioned by another participant. If you were assigned a specific task or question, complete your work and call `chatroom_speak` (contribute only incremental content—never repeat full summaries already posted). If the task is already complete or they were only thanking/signing off, DO NOT call `chatroom_speak`—finish silently with a brief private note or takeaway summary. Only put another agent in `mentions` if you require them to perform a follow-up task.)",
-                );
+            if target_agent.prompt_hint {
+                if last_msg.sender_kind == SenderKind::Human {
+                    out.push_str(
+                        "\n\n(Hint: Complete your tool actions, then call `chatroom_speak` to reply; only `mentions` agents who must act next.)",
+                    );
+                } else {
+                    out.push_str(
+                        "\n\n(Hint: Call `chatroom_speak` only if you have new task output to add; otherwise finish silently.)",
+                    );
+                }
             }
         }
         DeliveryMode::PeekAllowed { roll } => {
@@ -3481,25 +3488,26 @@ fn format_delivery_payload(
                 out.push_str(&format_single_room_message(m));
                 out.push('\n');
             }
-            out.push_str(
-                "\n(System Note: You were NOT directly @mentioned. You are peeking at unread chatroom messages while idle.\n\
-                 - If you have valuable input, a correction, or domain insight to add, call `chatroom_speak` to chime in.\n\
-                 - If no response is needed, DO NOT call `chatroom_speak` and simply finish your turn with a brief private note or takeaway summary.)",
-            );
+            if target_agent.prompt_hint {
+                out.push_str(
+                    "\n(Hint: Idle peek turn. Call `chatroom_speak` only if you have high-value incremental insight; otherwise finish silently.)",
+                );
+            }
         }
         DeliveryMode::PeekMuted { roll } => {
             out.push_str(&format!(
-                "=== [Chatroom Unread Peek | Room: {} | Roll: {} (Muted)] ===\n",
+                "=== [Chatroom Unread Peek | Room: {} | Roll: {} (Muted - chatroom_speak disabled)] ===\n",
                 room.name, roll
             ));
             for m in unread_messages {
                 out.push_str(&format_single_room_message(m));
                 out.push('\n');
             }
-            out.push_str(
-                "\n(System Note: You are in read-only observation mode for this peek turn (`chatroom_speak` tool is disabled). \
-                 Absorb the context into your memory and finish your turn with a brief private note or takeaway summary of what you observed.)",
-            );
+            if target_agent.prompt_hint {
+                out.push_str(
+                    "\n(Hint: Read-only observation turn (`chatroom_speak` disabled); absorb context and finish with a brief private note.)",
+                );
+            }
         }
     }
 
