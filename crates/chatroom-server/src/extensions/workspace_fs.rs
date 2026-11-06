@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
@@ -472,26 +472,56 @@ impl WorkspaceFsExtension {
                 .into_response());
         }
 
-        // Internal Node -> Server raw binary stage upload endpoint: PUT /internal-stage/{stage_id}
-        if method == Method::PUT {
-            if let Some(stage_id) = path.strip_prefix("internal-stage/") {
-                let entry = self
-                    .staged_by_id
-                    .lock()
-                    .unwrap()
-                    .get(stage_id)
-                    .cloned()
-                    .ok_or_else(|| (StatusCode::NOT_FOUND, "stage_id not found".to_string()))?;
+        // Internal Node -> Server raw binary stage upload endpoint: PUT/POST /internal-stage/{stage_id}
+        if let Some(stage_id) = path.strip_prefix("internal-stage/") {
+            let entry = self
+                .staged_by_id
+                .lock()
+                .unwrap()
+                .get(stage_id)
+                .cloned()
+                .ok_or_else(|| (StatusCode::NOT_FOUND, "stage_id not found".to_string()))?;
 
-                let provided_tok = headers
-                    .get("x-upload-token")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or_default();
-                if provided_tok != entry.upload_token {
-                    return Err((StatusCode::FORBIDDEN, "invalid upload token".to_string()));
+            let provided_tok = headers
+                .get("x-upload-token")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            if provided_tok != entry.upload_token {
+                return Err((StatusCode::FORBIDDEN, "invalid upload token".to_string()));
+            }
+
+            if method == Method::POST {
+                if query.get("failed").map(|s| s == "1").unwrap_or(false) {
+                    *entry.phase.lock().unwrap() = StagePhase::Failed;
+                    *entry.error.lock().unwrap() =
+                        Some("节点分块上传文件到服务器缓存失败".to_string());
+                    entry.notify.notify_waiters();
+                    let _ = tokio::fs::remove_file(&entry.part_path).await;
+                    return Ok(Json(json!({ "ok": false, "stage_id": stage_id })).into_response());
                 }
+                if query.get("complete").map(|s| s == "1").unwrap_or(false) {
+                    if let Err(e) = tokio::fs::rename(&entry.part_path, &entry.bin_path).await {
+                        *entry.phase.lock().unwrap() = StagePhase::Failed;
+                        *entry.error.lock().unwrap() = Some(e.to_string());
+                        entry.notify.notify_waiters();
+                        return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+                    }
+                    let new_exp = (Utc::now().timestamp() + STAGE_TTL_SECS) as u64;
+                    entry.expires_at_unix.store(new_exp, Ordering::Relaxed);
+                    *entry.phase.lock().unwrap() = StagePhase::Ready;
+                    entry.notify.notify_waiters();
+                    return Ok(Json(json!({ "ok": true, "stage_id": stage_id })).into_response());
+                }
+            }
 
-                let mut file = match tokio::fs::File::create(&entry.part_path).await {
+            if method == Method::PUT {
+                let offset_opt = query.get("offset").and_then(|s| s.parse::<u64>().ok());
+                let mut file = match tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .open(&entry.part_path)
+                    .await
+                {
                     Ok(f) => f,
                     Err(e) => {
                         *entry.phase.lock().unwrap() = StagePhase::Failed;
@@ -501,15 +531,17 @@ impl WorkspaceFsExtension {
                     }
                 };
 
+                if let Some(off) = offset_opt {
+                    if let Err(e) = file.seek(std::io::SeekFrom::Start(off)).await {
+                        return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+                    }
+                }
+
                 let mut stream = body.into_data_stream();
                 while let Some(chunk_res) = stream.next().await {
                     match chunk_res {
                         Ok(chunk) => {
                             if let Err(e) = file.write_all(&chunk).await {
-                                *entry.phase.lock().unwrap() = StagePhase::Failed;
-                                *entry.error.lock().unwrap() = Some(e.to_string());
-                                entry.notify.notify_waiters();
-                                let _ = tokio::fs::remove_file(&entry.part_path).await;
                                 return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
                             }
                             entry
@@ -517,10 +549,6 @@ impl WorkspaceFsExtension {
                                 .fetch_add(chunk.len() as u64, Ordering::Relaxed);
                         }
                         Err(e) => {
-                            *entry.phase.lock().unwrap() = StagePhase::Failed;
-                            *entry.error.lock().unwrap() = Some(e.to_string());
-                            entry.notify.notify_waiters();
-                            let _ = tokio::fs::remove_file(&entry.part_path).await;
                             return Err((StatusCode::BAD_REQUEST, e.to_string()));
                         }
                     }
@@ -529,17 +557,19 @@ impl WorkspaceFsExtension {
                 let _ = file.flush().await;
                 drop(file);
 
-                if let Err(e) = tokio::fs::rename(&entry.part_path, &entry.bin_path).await {
-                    *entry.phase.lock().unwrap() = StagePhase::Failed;
-                    *entry.error.lock().unwrap() = Some(e.to_string());
+                // Single-shot PUT (without ?offset=...) finalizes immediately
+                if offset_opt.is_none() {
+                    if let Err(e) = tokio::fs::rename(&entry.part_path, &entry.bin_path).await {
+                        *entry.phase.lock().unwrap() = StagePhase::Failed;
+                        *entry.error.lock().unwrap() = Some(e.to_string());
+                        entry.notify.notify_waiters();
+                        return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+                    }
+                    let new_exp = (Utc::now().timestamp() + STAGE_TTL_SECS) as u64;
+                    entry.expires_at_unix.store(new_exp, Ordering::Relaxed);
+                    *entry.phase.lock().unwrap() = StagePhase::Ready;
                     entry.notify.notify_waiters();
-                    return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
                 }
-
-                let new_exp = (Utc::now().timestamp() + STAGE_TTL_SECS) as u64;
-                entry.expires_at_unix.store(new_exp, Ordering::Relaxed);
-                *entry.phase.lock().unwrap() = StagePhase::Ready;
-                entry.notify.notify_waiters();
 
                 return Ok(Json(json!({ "ok": true, "stage_id": stage_id })).into_response());
             }
