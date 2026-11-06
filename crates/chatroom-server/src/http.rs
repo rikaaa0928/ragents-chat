@@ -224,17 +224,27 @@ struct LoginRequest {
 async fn handle_auth_status(
     State(state): State<ChatServerState>,
     headers: HeaderMap,
-) -> Json<serde_json::Value> {
+) -> Response {
     let required = state.extensions.auth_required;
     let principal = verify_user_auth(&state, &headers).ok();
     let authenticated = principal.is_some();
     let manifest = state.extensions.manifest();
-    Json(json!({
+    let body = Json(json!({
         "auth_required": required,
         "authenticated": authenticated,
         "principal": principal,
         "manifest": manifest,
-    }))
+    }));
+    if authenticated {
+        if let Some(tok) = extract_bearer_or_cookie_token(&headers) {
+            let cookie = format!(
+                "{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000",
+                AUTH_COOKIE_NAME, tok
+            );
+            return ([(header::SET_COOKIE, cookie)], body).into_response();
+        }
+    }
+    body.into_response()
 }
 
 async fn handle_auth_login(
@@ -256,7 +266,7 @@ async fn handle_auth_login(
             .unwrap_or_else(ChatPrincipal::anonymous_admin)
     };
     let cookie = format!(
-        "{}={}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000",
+        "{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000",
         AUTH_COOKIE_NAME, trimmed
     );
     Ok((
@@ -272,7 +282,7 @@ async fn handle_auth_login(
 
 async fn handle_auth_logout() -> Response {
     let clear_cookie = format!(
-        "{}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+        "{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
         AUTH_COOKIE_NAME
     );
     (

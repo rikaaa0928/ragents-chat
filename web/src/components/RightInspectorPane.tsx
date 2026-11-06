@@ -311,12 +311,101 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
 
   const inspectedAgent = inspector?.agent || null;
   const items = inspector?.context?.effective_items || [];
+  const localBatches = inspector?.context?.local_batches || [];
   const realtimeQueue: QueuedMessageEntry[] =
     inspector?.message_queues?.realtime_messages || [];
   const normalQueue: QueuedMessageEntry[] =
     inspector?.message_queues?.normal_messages || [];
   const rtQueuedCount = realtimeQueue.length;
   const normQueuedCount = normalQueue.length;
+
+  // Resolve per-item timestamp (`created_at`) from `local_batches`, live SSE items, and session lineage
+  const itemTimestampMap = (() => {
+    const byId = new Map<string, string>();
+    const byCallKey = new Map<string, string>();
+    const positionalTimes: string[] = [];
+
+    for (const b of localBatches) {
+      const ts = b.created_at || '';
+      for (const bItem of b.items || []) {
+        positionalTimes.push(ts);
+        if (bItem.id && ts && !byId.has(bItem.id)) {
+          byId.set(bItem.id, ts);
+        }
+        if (bItem.call_id && ts) {
+          const prefix =
+            bItem.type === 'function_call_output' ? 'fco:' : 'fc:';
+          const key = `${prefix}${bItem.call_id}`;
+          if (!byCallKey.has(key)) {
+            byCallKey.set(key, ts);
+          }
+        }
+      }
+    }
+
+    for (const env of inspector?.events || []) {
+      const ts = env.created_at || env.timestamp || '';
+      if (!ts) continue;
+      for (const evItem of env.event?.items || []) {
+        if (evItem.id && !byId.has(evItem.id)) {
+          byId.set(evItem.id, ts);
+        }
+        if (evItem.call_id) {
+          const prefix =
+            evItem.type === 'function_call_output' ? 'fco:' : 'fc:';
+          const key = `${prefix}${evItem.call_id}`;
+          if (!byCallKey.has(key)) {
+            byCallKey.set(key, ts);
+          }
+        }
+      }
+    }
+
+    const sessionChainEntry = (inspectedAgent?.session_chain || []).find(
+      (c) => c.working_session_id === inspector?.selected_session_id
+    );
+    const sessionCreatedAt = sessionChainEntry?.created_at || '';
+    const offset = Math.max(0, items.length - positionalTimes.length);
+
+    return items.map((it, idx) => {
+      if (it.created_at) return it.created_at;
+      if (it.id && byId.has(it.id)) return byId.get(it.id)!;
+      if (it.call_id) {
+        const prefix = it.type === 'function_call_output' ? 'fco:' : 'fc:';
+        const key = `${prefix}${it.call_id}`;
+        if (byCallKey.has(key)) return byCallKey.get(key)!;
+      }
+      if (idx >= offset && positionalTimes[idx - offset]) {
+        return positionalTimes[idx - offset];
+      }
+      if (idx === 0 && sessionCreatedAt) {
+        return sessionCreatedAt;
+      }
+      return '';
+    });
+  })();
+
+  const formatItemTimestamp = (iso: string): { short: string; full: string } | null => {
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return null;
+    const short = d.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+    const full = d.toLocaleString([], {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+    return { short, full };
+  };
 
   const getAlertKey = (env: {
     event_id?: string;
@@ -2222,6 +2311,20 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                               )}
                             </div>
                             <div className="flex items-center gap-1.5 shrink-0">
+                              {(() => {
+                                const ts = formatItemTimestamp(
+                                  itemTimestampMap[idx] || ''
+                                );
+                                if (!ts) return null;
+                                return (
+                                  <span
+                                    title={ts.full}
+                                    className="text-[10px] font-mono-code text-[var(--text-muted)] px-1 py-0.2 rounded bg-[var(--bg-surface)]/70"
+                                  >
+                                    {ts.short}
+                                  </span>
+                                );
+                              })()}
                               {rawJsonForCopy !== null && (
                                 <button
                                   type="button"

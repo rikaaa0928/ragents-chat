@@ -133,6 +133,8 @@ export interface PendingPermission {
 
 export interface ContextItem {
   id?: string;
+  call_id?: string;
+  created_at?: string;
   type:
     | 'message'
     | 'reasoning'
@@ -153,6 +155,9 @@ export interface ContextItem {
 
 export interface InspectorEventEnvelope {
   seq?: number;
+  event_seq?: number;
+  event_id?: string;
+  created_at?: string;
   timestamp?: string;
   event: {
     type?: string;
@@ -203,6 +208,11 @@ export interface InspectorSnapshot {
   pending_permissions: PendingPermission[];
   context: {
     effective_items: ContextItem[];
+    local_batches?: Array<{
+      batch_seq?: number;
+      created_at?: string;
+      items?: ContextItem[];
+    }>;
   };
   events: InspectorEventEnvelope[];
   message_queues?: AgentMessageQueueSnapshot;

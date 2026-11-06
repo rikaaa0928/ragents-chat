@@ -690,25 +690,40 @@ impl RoomCoordinator {
         }
 
         let mut rules = Vec::new();
+        let room_tmp_dir = Self::room_tmp_dir(&agent.room_id);
+        let sess_id_str = session
+            .map(|s| s.metadata.id.as_str())
+            .unwrap_or_else(|| agent.active_session_id.as_str());
+        let sess_tmp_dir = format!("$TMPDIR (sessions/{sess_id_str})");
         let ws_display = workspace_path
             .as_deref()
             .map(|p| format!(". ({p})"))
-            .unwrap_or_else(|| ". (当前临时工作目录)".to_string());
+            .unwrap_or_else(|| format!(". ({room_tmp_dir})"));
         for cat in ["file_read", "file_write", "command_work_dir"] {
             rules.push(PermissionRuleEntry {
                 category: cat.to_string(),
                 list_kind: "allow".to_string(),
                 rule: ws_display.clone(),
                 scope: "builtin".to_string(),
-                scope_label: "内置默认 · 工作区".to_string(),
+                scope_label: "内置默认 · 工作目录".to_string(),
                 can_delete: false,
             });
+            if workspace_path.is_some() {
+                rules.push(PermissionRuleEntry {
+                    category: cat.to_string(),
+                    list_kind: "allow".to_string(),
+                    rule: room_tmp_dir.clone(),
+                    scope: "builtin".to_string(),
+                    scope_label: "内置默认 · 附加临时目录".to_string(),
+                    can_delete: false,
+                });
+            }
             rules.push(PermissionRuleEntry {
                 category: cat.to_string(),
                 list_kind: "allow".to_string(),
-                rule: "/tmp".to_string(),
+                rule: sess_tmp_dir.clone(),
                 scope: "builtin".to_string(),
-                scope_label: "内置默认 · 临时目录".to_string(),
+                scope_label: "内置默认 · Session临时目录".to_string(),
                 can_delete: false,
             });
         }

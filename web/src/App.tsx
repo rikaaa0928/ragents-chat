@@ -266,6 +266,7 @@ export const App: React.FC = () => {
         pending_permissions: snap.pending_permissions || [],
         context: {
           effective_items: snap.context?.effective_items || [],
+          local_batches: snap.context?.local_batches || [],
         },
         events: snap.events || [],
         message_queues: snap.message_queues || {
@@ -299,21 +300,26 @@ export const App: React.FC = () => {
       const es = new EventSource(`/api/v1/agents/${agentId}/inspector/stream${q}`);
       inspectorEsRef.current = es;
 
-      const appendContextItems = (items: InspectorSnapshot['context']['effective_items']) => {
+      const appendContextItems = (
+        items: InspectorSnapshot['context']['effective_items'],
+        ts?: string
+      ) => {
         if (!items || items.length === 0) return;
+        const stamp = ts || new Date().toISOString();
         setInspectorSnap((prev) => {
           if (!prev) return prev;
           const existing = prev.context?.effective_items || [];
           const existingIds = new Set(
             existing.map((it) => it.id).filter(Boolean)
           );
-          const filtered = items.filter(
-            (it) => !it.id || !existingIds.has(it.id)
-          );
+          const filtered = items
+            .filter((it) => !it.id || !existingIds.has(it.id))
+            .map((it) => (it.created_at ? it : { ...it, created_at: stamp }));
           if (filtered.length === 0) return prev;
           return {
             ...prev,
             context: {
+              ...prev.context,
               effective_items: [...existing, ...filtered],
             },
           };
@@ -579,7 +585,14 @@ export const App: React.FC = () => {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch('/api/v1/auth/status');
+        const savedTok = localStorage.getItem('ragents_chat_token') || authToken;
+        const statusHeaders: Record<string, string> = {};
+        if (savedTok) {
+          statusHeaders['Authorization'] = `Bearer ${savedTok}`;
+        }
+        const res = await fetch('/api/v1/auth/status', {
+          headers: statusHeaders,
+        });
         if (!res.ok) {
           const text = await res.text().catch(() => res.statusText);
           pushApiError('GET', '/api/v1/auth/status', res.status, text);
