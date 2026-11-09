@@ -89,11 +89,109 @@ impl StagedFileEntry {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DistributePhase {
+    Distributing,
+    Completed,
+    Failed,
+}
+
+pub struct DistributingFileEntry {
+    pub dist_id: String,
+    pub room_id: String,
+    pub node_id: NodeId,
+    pub workspace_path: Option<String>,
+    pub room_tmp_dir: String,
+    pub rel_path: String,
+    pub filename: String,
+    pub agent_path: String,
+    pub mime_type: String,
+    pub total_bytes: u64,
+    pub distributed_bytes: AtomicU64,
+    pub phase: Mutex<DistributePhase>,
+    pub error: Mutex<Option<String>>,
+    pub distribute_token: String,
+    pub staged_path: PathBuf,
+    pub completed_at_unix: AtomicU64,
+    pub expires_at_unix: AtomicU64,
+    pub notify: Notify,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DistributingFileDto {
+    pub dist_id: String,
+    pub room_id: String,
+    pub node_id: String,
+    pub rel_path: String,
+    pub filename: String,
+    pub agent_path: String,
+    pub mime_type: String,
+    pub phase: DistributePhase,
+    pub distributed_bytes: u64,
+    pub total_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl DistributingFileEntry {
+    fn to_dto(&self) -> DistributingFileDto {
+        let phase = self.phase.lock().unwrap().clone();
+        let error = self.error.lock().unwrap().clone();
+        DistributingFileDto {
+            dist_id: self.dist_id.clone(),
+            room_id: self.room_id.clone(),
+            node_id: self.node_id.as_str().to_string(),
+            rel_path: self.rel_path.clone(),
+            filename: self.filename.clone(),
+            agent_path: self.agent_path.clone(),
+            mime_type: self.mime_type.clone(),
+            phase,
+            distributed_bytes: self.distributed_bytes.load(Ordering::Relaxed),
+            total_bytes: self.total_bytes,
+            error,
+        }
+    }
+}
+
+fn infer_mime_type_from_name(name: &str) -> String {
+    let ext = name
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "m4a" => "audio/mp4",
+        "flac" => "audio/flac",
+        "aac" => "audio/aac",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "pdf" => "application/pdf",
+        "json" => "application/json",
+        "txt" | "md" | "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "toml" | "yaml" | "yml"
+        | "sh" | "css" | "html" | "log" | "csv" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
 pub struct WorkspaceFsExtension {
     coordinator: RoomCoordinator,
     stage_dir: PathBuf,
     staged_by_id: Arc<Mutex<HashMap<String, Arc<StagedFileEntry>>>>,
     staged_by_key: Arc<Mutex<HashMap<String, Arc<StagedFileEntry>>>>,
+    distributing_by_id: Arc<Mutex<HashMap<String, Arc<DistributingFileEntry>>>>,
 }
 
 impl WorkspaceFsExtension {
@@ -104,15 +202,18 @@ impl WorkspaceFsExtension {
             Arc::new(Mutex::new(HashMap::new()));
         let staged_by_key: Arc<Mutex<HashMap<String, Arc<StagedFileEntry>>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let distributing_by_id: Arc<Mutex<HashMap<String, Arc<DistributingFileEntry>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         let by_id_bg = staged_by_id.clone();
         let by_key_bg = staged_by_key.clone();
+        let dist_bg = distributing_by_id.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
                 loop {
                     interval.tick().await;
-                    Self::purge_expired_maps(&by_id_bg, &by_key_bg);
+                    Self::purge_expired_maps(&by_id_bg, &by_key_bg, &dist_bg);
                 }
             });
         }
@@ -122,12 +223,14 @@ impl WorkspaceFsExtension {
             stage_dir,
             staged_by_id,
             staged_by_key,
+            distributing_by_id,
         }
     }
 
     fn purge_expired_maps(
         by_id: &Mutex<HashMap<String, Arc<StagedFileEntry>>>,
         by_key: &Mutex<HashMap<String, Arc<StagedFileEntry>>>,
+        dist_by_id: &Mutex<HashMap<String, Arc<DistributingFileEntry>>>,
     ) {
         let now = Utc::now().timestamp() as u64;
         let mut expired = Vec::new();
@@ -155,10 +258,28 @@ impl WorkspaceFsExtension {
                 let _ = std::fs::remove_file(&entry.bin_path);
             }
         }
+        {
+            let mut dmap = dist_by_id.lock().unwrap();
+            dmap.retain(|_, entry| {
+                let exp = entry.expires_at_unix.load(Ordering::Relaxed);
+                if exp <= now {
+                    return false;
+                }
+                let comp = entry.completed_at_unix.load(Ordering::Relaxed);
+                if comp > 0 && now.saturating_sub(comp) > 15 {
+                    return false;
+                }
+                true
+            });
+        }
     }
 
     fn purge_expired(&self) {
-        Self::purge_expired_maps(&self.staged_by_id, &self.staged_by_key);
+        Self::purge_expired_maps(
+            &self.staged_by_id,
+            &self.staged_by_key,
+            &self.distributing_by_id,
+        );
     }
 
     fn make_cache_key(node_id: &NodeId, zone: NodeFsZone, rel_path: &str) -> (String, String) {
@@ -330,6 +451,221 @@ impl WorkspaceFsExtension {
             axum::body::Body::from_stream(stream),
         )
             .into_response())
+    }
+
+    fn list_room_distributing(
+        &self,
+        room_id: &str,
+        include_recent_completed: bool,
+    ) -> Vec<DistributingFileDto> {
+        self.purge_expired();
+        let mut items: Vec<DistributingFileDto> = self
+            .distributing_by_id
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|e| e.room_id == room_id)
+            .map(|e| e.to_dto())
+            .filter(|dto| include_recent_completed || dto.phase != DistributePhase::Completed)
+            .collect();
+        items.sort_by(|a, b| a.dist_id.cmp(&b.dist_id));
+        items
+    }
+
+    async fn trigger_node_download(&self, entry: &Arc<DistributingFileEntry>) -> Result<(), String> {
+        let download_url = format!(
+            "{}/api/v1/ext/workspace_fs/internal-distribute/{}",
+            self.coordinator.callback_base_url.trim_end_matches('/'),
+            entry.dist_id
+        );
+        entry.distributed_bytes.store(0, Ordering::Relaxed);
+        *entry.phase.lock().unwrap() = DistributePhase::Distributing;
+        *entry.error.lock().unwrap() = None;
+
+        let resp = self
+            .coordinator
+            .ragents_client
+            .node_fs_query(
+                &entry.node_id,
+                &NodeFsRequest {
+                    zone: NodeFsZone::Tmp,
+                    workspace_path: entry.workspace_path.clone(),
+                    tmp_dir: Some(entry.room_tmp_dir.clone()),
+                    op: NodeFsOp::DownloadFileFromHttp {
+                        rel_path: entry.rel_path.clone(),
+                        download_url,
+                        download_token: Some(entry.distribute_token.clone()),
+                        expected_size: Some(entry.total_bytes),
+                    },
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if !resp.ok {
+            let err = resp
+                .error
+                .unwrap_or_else(|| "节点拒绝接收分发文件".to_string());
+            *entry.phase.lock().unwrap() = DistributePhase::Failed;
+            *entry.error.lock().unwrap() = Some(err.clone());
+            entry.notify.notify_waiters();
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    async fn finalize_server_staged_upload(
+        &self,
+        room_id: &str,
+        node_id: &NodeId,
+        workspace_path: Option<String>,
+        room_tmp_dir: String,
+        raw_filename: &str,
+        raw_sub_dir: Option<&str>,
+        dedupe: bool,
+        stage_id: String,
+        bin_path: PathBuf,
+        part_path: PathBuf,
+        total_bytes: u64,
+    ) -> Result<Response, (StatusCode, String)> {
+        let clean_name: String = raw_filename
+            .trim()
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("upload.bin")
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let clean_name = if clean_name.is_empty() || clean_name == "." || clean_name == ".." {
+            "upload.bin".to_string()
+        } else {
+            clean_name
+        };
+
+        let final_name = if dedupe {
+            let short_id = &Uuid::now_v7().simple().to_string()[24..];
+            if let Some((stem, ext)) = clean_name.rsplit_once('.') {
+                format!("{stem}_{short_id}.{ext}")
+            } else {
+                format!("{clean_name}_{short_id}")
+            }
+        } else {
+            clean_name
+        };
+
+        let sub_dir = raw_sub_dir
+            .map(|s| s.trim().trim_matches('/'))
+            .filter(|s| !s.is_empty())
+            .unwrap_or("uploads");
+        let target_rel_path = format!("{sub_dir}/{final_name}");
+        let agent_path = format!("{}/{target_rel_path}", room_tmp_dir.trim_end_matches('/'));
+        let mime = infer_mime_type_from_name(&final_name);
+        let is_image = mime.starts_with("image/");
+        let expires_at = (Utc::now().timestamp() + STAGE_TTL_SECS) as u64;
+
+        // 1. Register in staged_by_id & staged_by_key as Ready immediately so /raw serves from local disk
+        let (cache_key, zone_str) =
+            Self::make_cache_key(node_id, NodeFsZone::Tmp, &target_rel_path);
+        let staged_entry = Arc::new(StagedFileEntry {
+            stage_id: stage_id.clone(),
+            cache_key: cache_key.clone(),
+            node_id: node_id.as_str().to_string(),
+            zone_str,
+            rel_path: target_rel_path.clone(),
+            mime_type: Mutex::new(mime.clone()),
+            total_bytes: AtomicU64::new(total_bytes),
+            uploaded_bytes: AtomicU64::new(total_bytes),
+            phase: Mutex::new(StagePhase::Ready),
+            error: Mutex::new(None),
+            upload_token: String::new(),
+            part_path,
+            bin_path: bin_path.clone(),
+            expires_at_unix: AtomicU64::new(expires_at),
+            notify: Notify::new(),
+        });
+        {
+            self.staged_by_id
+                .lock()
+                .unwrap()
+                .insert(stage_id, staged_entry.clone());
+            self.staged_by_key
+                .lock()
+                .unwrap()
+                .insert(cache_key, staged_entry);
+        }
+
+        // 2. Register in distributing_by_id and trigger background distribution to the node
+        let dist_id = format!("dst_{}", Uuid::now_v7().simple());
+        let distribute_token = format!(
+            "dsttok_{}{}",
+            Uuid::now_v7().simple(),
+            Uuid::new_v4().simple()
+        );
+        let dist_entry = Arc::new(DistributingFileEntry {
+            dist_id: dist_id.clone(),
+            room_id: room_id.to_string(),
+            node_id: node_id.clone(),
+            workspace_path,
+            room_tmp_dir,
+            rel_path: target_rel_path.clone(),
+            filename: final_name.clone(),
+            agent_path: agent_path.clone(),
+            mime_type: mime.clone(),
+            total_bytes,
+            distributed_bytes: AtomicU64::new(0),
+            phase: Mutex::new(DistributePhase::Distributing),
+            error: Mutex::new(None),
+            distribute_token,
+            staged_path: bin_path,
+            completed_at_unix: AtomicU64::new(0),
+            expires_at_unix: AtomicU64::new(expires_at),
+            notify: Notify::new(),
+        });
+        {
+            self.distributing_by_id
+                .lock()
+                .unwrap()
+                .insert(dist_id.clone(), dist_entry.clone());
+        }
+
+        if let Err(err) = self.trigger_node_download(&dist_entry).await {
+            *dist_entry.phase.lock().unwrap() = DistributePhase::Failed;
+            *dist_entry.error.lock().unwrap() = Some(err);
+        } else if total_bytes <= DIRECT_READ_THRESHOLD_BYTES as u64 {
+            // For small files (<= 2MB, e.g. composer image pastes), wait up to 2.5s so they land on node before send
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(2500),
+                dist_entry.notify.notified(),
+            )
+            .await;
+        }
+
+        let dto = dist_entry.to_dto();
+        let raw_url = format!(
+            "/api/v1/ext/workspace_fs/rooms/{room_id}/raw?zone=tmp&path={}",
+            target_rel_path
+        );
+
+        Ok(Json(json!({
+            "ok": true,
+            "dist_id": dist_id,
+            "distribute_phase": dto.phase,
+            "distributed_bytes": dto.distributed_bytes,
+            "filename": final_name,
+            "rel_path": target_rel_path,
+            "agent_path": agent_path,
+            "raw_url": raw_url,
+            "size": total_bytes,
+            "mime_type": mime,
+            "is_image": is_image,
+        }))
+        .into_response())
     }
 
     pub fn ui_contributions(&self) -> Vec<UiContribution> {
@@ -575,6 +911,89 @@ impl WorkspaceFsExtension {
             }
         }
 
+        // Internal Server -> Node raw binary distribution endpoint: GET/POST /internal-distribute/{dist_id}
+        if let Some(dist_id) = path.strip_prefix("internal-distribute/") {
+            let entry = self
+                .distributing_by_id
+                .lock()
+                .unwrap()
+                .get(dist_id)
+                .cloned()
+                .ok_or_else(|| (StatusCode::NOT_FOUND, "dist_id not found".to_string()))?;
+
+            let provided_tok = headers
+                .get("x-distribute-token")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            if provided_tok != entry.distribute_token {
+                return Err((StatusCode::FORBIDDEN, "invalid distribute token".to_string()));
+            }
+
+            if method == Method::POST {
+                if query.get("failed").map(|s| s == "1").unwrap_or(false) {
+                    let bytes = axum::body::to_bytes(body, 64 * 1024)
+                        .await
+                        .unwrap_or_default();
+                    let err_msg = String::from_utf8_lossy(&bytes).trim().to_string();
+                    let err_msg = if err_msg.is_empty() {
+                        "节点拉取缓存文件失败".to_string()
+                    } else {
+                        err_msg
+                    };
+                    *entry.phase.lock().unwrap() = DistributePhase::Failed;
+                    *entry.error.lock().unwrap() = Some(err_msg);
+                    entry.notify.notify_waiters();
+                    return Ok(Json(json!({ "ok": false, "dist_id": dist_id })).into_response());
+                }
+                if query.get("complete").map(|s| s == "1").unwrap_or(false) {
+                    entry
+                        .distributed_bytes
+                        .store(entry.total_bytes, Ordering::Relaxed);
+                    entry
+                        .completed_at_unix
+                        .store(Utc::now().timestamp() as u64, Ordering::Relaxed);
+                    *entry.phase.lock().unwrap() = DistributePhase::Completed;
+                    *entry.error.lock().unwrap() = None;
+                    entry.notify.notify_waiters();
+                    return Ok(Json(json!({ "ok": true, "dist_id": dist_id })).into_response());
+                }
+            }
+
+            if method == Method::GET {
+                let file = tokio::fs::File::open(&entry.staged_path)
+                    .await
+                    .map_err(|e| (StatusCode::NOT_FOUND, format!("staged file missing: {e}")))?;
+                entry.distributed_bytes.store(0, Ordering::Relaxed);
+                *entry.phase.lock().unwrap() = DistributePhase::Distributing;
+                let entry_for_stream = entry.clone();
+
+                let stream = futures::stream::unfold(
+                    (file, entry_for_stream),
+                    |(mut f, ent)| async move {
+                        let mut buf = vec![0u8; 128 * 1024];
+                        match f.read(&mut buf).await {
+                            Ok(0) => None,
+                            Ok(n) => {
+                                buf.truncate(n);
+                                ent.distributed_bytes.fetch_add(n as u64, Ordering::Relaxed);
+                                Some((Ok::<Bytes, std::io::Error>(Bytes::from(buf)), (f, ent)))
+                            }
+                            Err(e) => Some((Err(e), (f, ent))),
+                        }
+                    },
+                );
+
+                return Ok((
+                    [
+                        (header::CONTENT_TYPE, entry.mime_type.clone()),
+                        (header::CONTENT_LENGTH, entry.total_bytes.to_string()),
+                    ],
+                    axum::body::Body::from_stream(stream),
+                )
+                    .into_response());
+            }
+        }
+
         let Some(p) = principal else {
             return Err((StatusCode::UNAUTHORIZED, "Unauthorized".to_string()));
         };
@@ -647,6 +1066,7 @@ impl WorkspaceFsExtension {
                     }
                 }
 
+                let distributing_files = self.list_room_distributing(room_id, false);
                 let mut val = serde_json::to_value(&fs_resp)
                     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
                 if let Some(obj) = val.as_object_mut() {
@@ -654,8 +1074,37 @@ impl WorkspaceFsExtension {
                         "staged_files".to_string(),
                         serde_json::to_value(staged_files).unwrap_or_else(|_| json!({})),
                     );
+                    obj.insert(
+                        "distributing_files".to_string(),
+                        serde_json::to_value(distributing_files).unwrap_or_else(|_| json!([])),
+                    );
                 }
                 Ok(Json(val).into_response())
+            }
+            (Method::GET, "distribute-status") => {
+                let distributing_files = self.list_room_distributing(room_id, true);
+                Ok(Json(json!({
+                    "ok": true,
+                    "distributing_files": distributing_files,
+                }))
+                .into_response())
+            }
+            (Method::POST, "distribute-retry") => {
+                let dist_id = query
+                    .get("dist_id")
+                    .cloned()
+                    .unwrap_or_default();
+                let entry = self
+                    .distributing_by_id
+                    .lock()
+                    .unwrap()
+                    .get(&dist_id)
+                    .cloned()
+                    .ok_or_else(|| (StatusCode::NOT_FOUND, "分发任务不存在或已过期".to_string()))?;
+                self.trigger_node_download(&entry)
+                    .await
+                    .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+                Ok(Json(entry.to_dto()).into_response())
             }
             (Method::POST, "stage") => {
                 let entry = self
@@ -818,98 +1267,93 @@ impl WorkspaceFsExtension {
                     }
                 }
             }
+            (Method::PUT, "upload-raw") => {
+                let filename = query
+                    .get("filename")
+                    .cloned()
+                    .unwrap_or_else(|| "upload.bin".to_string());
+                let sub_dir = query.get("sub_dir").map(|s| s.as_str());
+                let dedupe = query.get("dedupe").map(|s| s == "1").unwrap_or(false);
+
+                let stage_id = format!("stg_{}", Uuid::now_v7().simple());
+                let part_path = self.stage_dir.join(format!("{stage_id}.part"));
+                let bin_path = self.stage_dir.join(format!("{stage_id}.bin"));
+
+                let mut file = tokio::fs::File::create(&part_path)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                let mut stream = body.into_data_stream();
+                let mut total_bytes = 0u64;
+                while let Some(chunk_res) = stream.next().await {
+                    match chunk_res {
+                        Ok(chunk) => {
+                            if let Err(e) = file.write_all(&chunk).await {
+                                let _ = tokio::fs::remove_file(&part_path).await;
+                                return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+                            }
+                            total_bytes += chunk.len() as u64;
+                        }
+                        Err(e) => {
+                            let _ = tokio::fs::remove_file(&part_path).await;
+                            return Err((StatusCode::BAD_REQUEST, e.to_string()));
+                        }
+                    }
+                }
+                let _ = file.flush().await;
+                drop(file);
+
+                tokio::fs::rename(&part_path, &bin_path)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+                self.finalize_server_staged_upload(
+                    room_id,
+                    &node_id,
+                    workspace_path,
+                    room_tmp_dir,
+                    &filename,
+                    sub_dir,
+                    dedupe,
+                    stage_id,
+                    bin_path,
+                    part_path,
+                    total_bytes,
+                )
+                .await
+            }
             (Method::POST, "upload") => {
                 let bytes = axum::body::to_bytes(body, 64 * 1024 * 1024)
                     .await
                     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
                 let req: UploadTempFileRequest = serde_json::from_slice(&bytes)
                     .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid json: {e}")))?;
-                let clean_name: String = req
-                    .filename
-                    .trim()
-                    .rsplit(['/', '\\'])
-                    .next()
-                    .unwrap_or("upload.bin")
-                    .chars()
-                    .map(|c| {
-                        if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                            c
-                        } else {
-                            '_'
-                        }
-                    })
-                    .collect();
-                let clean_name = if clean_name.is_empty() || clean_name == "." || clean_name == ".."
-                {
-                    "upload.bin".to_string()
-                } else {
-                    clean_name
-                };
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(req.data_base64.trim())
+                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid base64: {e}")))?;
 
-                let final_name = if req.dedupe {
-                    let short_id = &Uuid::now_v7().simple().to_string()[24..];
-                    if let Some((stem, ext)) = clean_name.rsplit_once('.') {
-                        format!("{stem}_{short_id}.{ext}")
-                    } else {
-                        format!("{clean_name}_{short_id}")
-                    }
-                } else {
-                    clean_name
-                };
+                let stage_id = format!("stg_{}", Uuid::now_v7().simple());
+                let part_path = self.stage_dir.join(format!("{stage_id}.part"));
+                let bin_path = self.stage_dir.join(format!("{stage_id}.bin"));
+                let total_bytes = decoded.len() as u64;
 
-                let sub_dir = req
-                    .sub_dir
-                    .as_deref()
-                    .map(|s| s.trim().trim_matches('/'))
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("uploads");
-                let target_rel_path = format!("{sub_dir}/{final_name}");
-
-                let fs_resp = self
-                    .coordinator
-                    .ragents_client
-                    .node_fs_query(
-                        &node_id,
-                        &NodeFsRequest {
-                            zone: NodeFsZone::Tmp,
-                            workspace_path,
-                            tmp_dir: Some(room_tmp_dir),
-                            op: NodeFsOp::WriteTempFile {
-                                rel_path: target_rel_path.clone(),
-                                data_base64: req.data_base64,
-                            },
-                        },
-                    )
+                tokio::fs::write(&bin_path, &decoded)
                     .await
-                    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-                if !fs_resp.ok {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        fs_resp
-                            .error
-                            .unwrap_or_else(|| "上传文件到节点临时目录失败".to_string()),
-                    ));
-                }
-
-                let mime = fs_resp.mime_type.clone().unwrap_or_default();
-                let is_image = mime.starts_with("image/");
-                let raw_url = format!(
-                    "/api/v1/ext/workspace_fs/rooms/{room_id}/raw?zone=tmp&path={}",
-                    fs_resp.resolved_rel_path
-                );
-
-                Ok(Json(json!({
-                    "ok": true,
-                    "filename": final_name,
-                    "rel_path": fs_resp.resolved_rel_path,
-                    "agent_path": fs_resp.agent_path,
-                    "raw_url": raw_url,
-                    "size": fs_resp.size,
-                    "mime_type": mime,
-                    "is_image": is_image,
-                }))
-                .into_response())
+                self.finalize_server_staged_upload(
+                    room_id,
+                    &node_id,
+                    workspace_path,
+                    room_tmp_dir,
+                    &req.filename,
+                    req.sub_dir.as_deref(),
+                    req.dedupe,
+                    stage_id,
+                    bin_path,
+                    part_path,
+                    total_bytes,
+                )
+                .await
             }
             _ => Err((
                 StatusCode::NOT_FOUND,

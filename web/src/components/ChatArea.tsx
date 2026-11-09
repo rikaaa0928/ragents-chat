@@ -23,10 +23,28 @@ import {
 import { Room, RoomAgent, ChatMessage, SendShortcutMode } from '../types';
 
 export interface UploadedTempAttachment {
+  dist_id?: string;
+  distribute_phase?: 'distributing' | 'completed' | 'failed';
+  distributed_bytes?: number;
+  size?: number;
+  filename?: string;
   agent_path: string;
   rel_path: string;
   raw_url: string;
   is_image: boolean;
+}
+
+interface DistributingFileStatus {
+  dist_id: string;
+  room_id: string;
+  node_id: string;
+  rel_path: string;
+  filename: string;
+  agent_path: string;
+  phase: 'distributing' | 'completed' | 'failed';
+  distributed_bytes: number;
+  total_bytes: number;
+  error?: string;
 }
 
 interface PendingAttachmentItem {
@@ -34,6 +52,11 @@ interface PendingAttachmentItem {
   file: File;
   previewUrl: string | null;
   isImage: boolean;
+  status: 'uploading_server' | 'distributing_node' | 'ready' | 'failed';
+  uploaded?: UploadedTempAttachment;
+  distributedBytes?: number;
+  totalBytes?: number;
+  error?: string;
 }
 
 interface ChatAreaProps {
@@ -161,6 +184,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [mentionBarOpen, setMentionBarOpen] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachmentItem[]>([]);
   const [uploadingAttachments, setUploadingAttachments] = useState(false);
+  const [roomDistributingFiles, setRoomDistributingFiles] = useState<DistributingFileStatus[]>([]);
   const [expandedMetaSeqs, setExpandedMetaSeqs] = useState<Set<number>>(new Set());
   const [dismissedSystemKeys, setDismissedSystemKeys] = useState<Set<string>>(() => {
     try {
@@ -263,6 +287,137 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     });
   };
 
+  const startUploadForPendingItem = async (item: PendingAttachmentItem) => {
+    if (!onUploadTempFile) return;
+    setPendingAttachments((prev) =>
+      prev.map((x) =>
+        x.id === item.id ? { ...x, status: 'uploading_server', error: undefined } : x
+      )
+    );
+    try {
+      const uploaded = await onUploadTempFile(item.file);
+      const isReady = uploaded.distribute_phase === 'completed';
+      const isFailed = uploaded.distribute_phase === 'failed';
+      setPendingAttachments((prev) =>
+        prev.map((x) =>
+          x.id === item.id
+            ? {
+                ...x,
+                uploaded,
+                status: isReady ? 'ready' : isFailed ? 'failed' : 'distributing_node',
+                distributedBytes: uploaded.distributed_bytes ?? 0,
+                totalBytes: uploaded.size ?? item.file.size,
+              }
+            : x
+        )
+      );
+    } catch (err: any) {
+      setPendingAttachments((prev) =>
+        prev.map((x) =>
+          x.id === item.id
+            ? { ...x, status: 'failed', error: err?.message || '上传失败' }
+            : x
+        )
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (!room?.room_id) {
+      setRoomDistributingFiles([]);
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const fetchStatus = async () => {
+      try {
+        const headers: Record<string, string> = {};
+        const tok = localStorage.getItem('ragents_auth_token');
+        if (tok) headers['Authorization'] = `Bearer ${tok}`;
+        const res = await fetch(
+          `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(room.room_id)}/distribute-status`,
+          { headers }
+        );
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        const list: DistributingFileStatus[] = data.distributing_files || [];
+        if (cancelled) return;
+        setRoomDistributingFiles(list.filter((d) => d.phase !== 'completed'));
+
+        if (list.length > 0) {
+          const byId = new Map(list.map((d) => [d.dist_id, d]));
+          setPendingAttachments((prev) =>
+            prev.map((item) => {
+              const distId = item.uploaded?.dist_id;
+              if (!distId) return item;
+              const st = byId.get(distId);
+              if (!st) {
+                return item.status === 'distributing_node'
+                  ? { ...item, status: 'ready', distributedBytes: item.totalBytes }
+                  : item;
+              }
+              return {
+                ...item,
+                status:
+                  st.phase === 'completed'
+                    ? 'ready'
+                    : st.phase === 'failed'
+                    ? 'failed'
+                    : 'distributing_node',
+                distributedBytes: st.distributed_bytes,
+                totalBytes: st.total_bytes || item.file.size,
+                error: st.error,
+              };
+            })
+          );
+        }
+
+        const hasActive = list.some((d) => d.phase === 'distributing');
+        if (!hasActive && timer) {
+          clearInterval(timer);
+          timer = null;
+        }
+      } catch (_) {}
+    };
+
+    const ensurePolling = () => {
+      fetchStatus();
+      if (!timer) {
+        timer = setInterval(fetchStatus, 450);
+      }
+    };
+
+    fetchStatus();
+    const onUploaded = (ev: any) => {
+      if (!ev?.detail?.roomId || ev.detail.roomId === room.room_id) {
+        ensurePolling();
+      }
+    };
+    window.addEventListener('ragents-workspace-fs-uploaded', onUploaded);
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+      window.removeEventListener('ragents-workspace-fs-uploaded', onUploaded);
+    };
+  }, [room?.room_id]);
+
+  const retryDistributeOnNode = async (distId: string) => {
+    if (!room?.room_id || !distId) return;
+    const headers: Record<string, string> = {};
+    const tok = localStorage.getItem('ragents_auth_token');
+    if (tok) headers['Authorization'] = `Bearer ${tok}`;
+    await fetch(
+      `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(room.room_id)}/distribute-retry?dist_id=${encodeURIComponent(distId)}`,
+      { method: 'POST', headers }
+    );
+    window.dispatchEvent(
+      new CustomEvent('ragents-workspace-fs-uploaded', {
+        detail: { roomId: room.room_id, dist_id: distId },
+      })
+    );
+  };
+
   const addFilesToPending = (files: File[]) => {
     if (!files || files.length === 0) return;
     const items: PendingAttachmentItem[] = files.map((file) => {
@@ -281,9 +436,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
         file: normalizedFile,
         previewUrl: isImage ? URL.createObjectURL(normalizedFile) : null,
         isImage,
+        status: 'uploading_server',
+        totalBytes: normalizedFile.size,
+        distributedBytes: 0,
       };
     });
     setPendingAttachments((prev) => [...prev, ...items]);
+    items.forEach((item) => {
+      startUploadForPendingItem(item);
+    });
   };
 
   const removePendingAttachment = (id: string) => {
@@ -324,7 +485,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       setUploadingAttachments(true);
       try {
         for (const item of pendingAttachments) {
-          const uploaded = await onUploadTempFile(item.file);
+          const uploaded = item.uploaded ?? (await onUploadTempFile(item.file));
           const tagKind = uploaded.is_image || item.isImage ? 'Image' : 'File';
           attachmentLines.push(`[Attached ${tagKind}: ${uploaded.agent_path}]`);
         }
@@ -755,43 +916,131 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               </div>
             )}
 
-            {/* Pending Image / File Attachments Strip (Uploaded to Temp Dir on Send) */}
+            {/* Active Server -> Node File Distribution Banner */}
+            {roomDistributingFiles.length > 0 && (
+              <div className="px-3.5 py-2 border-b border-[var(--border-subtle)] bg-sky-500/5 flex flex-col gap-1.5">
+                <div className="flex items-center justify-between text-[11px] font-semibold text-sky-600 dark:text-sky-400">
+                  <span>📡 正在将文件从服务器分发至节点 ({roomDistributingFiles.length})</span>
+                  <span className="text-[10px] font-normal text-[var(--text-muted)]">已暂存服务器 · 节点后台拉取</span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {roomDistributingFiles.map((df) => {
+                    const pct = Math.min(
+                      99,
+                      Math.round(((df.distributed_bytes || 0) / (df.total_bytes || 1)) * 100)
+                    );
+                    const isFailed = df.phase === 'failed';
+                    return (
+                      <div
+                        key={df.dist_id}
+                        className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-[var(--bg-main)] border border-[var(--border-subtle)] text-[11px]"
+                      >
+                        <span className="font-mono-code truncate max-w-[180px] text-[var(--text-primary)]">
+                          {df.filename}
+                        </span>
+                        {isFailed ? (
+                          <>
+                            <span className="text-rose-500 font-semibold text-[10px]" title={df.error || ''}>
+                              ❌ 分发失败
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => retryDistributeOnNode(df.dist_id)}
+                              className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 text-[10px] font-semibold cursor-pointer"
+                            >
+                              重试分发
+                            </button>
+                          </>
+                        ) : (
+                          <span className="font-mono-code text-[10px] text-sky-600 dark:text-sky-400 font-semibold">
+                            {pct}%
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Pending Image / File Attachments Strip (Immediately Staged to Server & Distributed to Node) */}
             {pendingAttachments.length > 0 && (
               <div className="px-3.5 pt-2.5 pb-1.5 flex items-center flex-wrap gap-2 border-b border-[var(--border-subtle)] bg-[var(--bg-main)]/40">
-                {pendingAttachments.map((item) => (
-                  <div
-                    key={item.id}
-                    className="relative group/pending flex items-center gap-2 p-1.5 pr-6 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] text-xs"
-                  >
-                    {item.previewUrl ? (
-                      <img
-                        src={item.previewUrl}
-                        alt={item.file.name}
-                        className="w-10 h-10 rounded-lg object-cover border border-[var(--border-subtle)] shrink-0"
-                      />
-                    ) : (
-                      <div className="w-10 h-10 rounded-lg bg-[var(--bg-surface)] flex items-center justify-center shrink-0">
-                        <FileText className="w-4 h-4 text-blue-500" />
-                      </div>
-                    )}
-                    <div className="min-w-0 max-w-[140px]">
-                      <div className="font-medium text-[11px] text-[var(--text-primary)] truncate">
-                        {item.file.name}
-                      </div>
-                      <div className="text-[9.5px] text-[var(--text-muted)]">
-                        发送时上传至临时区并传递路径
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => removePendingAttachment(item.id)}
-                      className="absolute top-1 right-1 w-4 h-4 rounded-full bg-[var(--bg-surface)] hover:bg-rose-500 hover:text-white text-[var(--text-muted)] flex items-center justify-center cursor-pointer"
-                      title="移除附件"
+                {pendingAttachments.map((item) => {
+                  const pct = Math.min(
+                    99,
+                    Math.round(
+                      ((item.distributedBytes || 0) / (item.totalBytes || item.file.size || 1)) *
+                        100
+                    )
+                  );
+                  return (
+                    <div
+                      key={item.id}
+                      className="relative group/pending flex items-center gap-2 p-1.5 pr-6 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] text-xs"
                     >
-                      <X className="w-2.5 h-2.5" />
-                    </button>
-                  </div>
-                ))}
+                      {item.previewUrl ? (
+                        <img
+                          src={item.previewUrl}
+                          alt={item.file.name}
+                          className="w-10 h-10 rounded-lg object-cover border border-[var(--border-subtle)] shrink-0"
+                        />
+                      ) : (
+                        <div className="w-10 h-10 rounded-lg bg-[var(--bg-surface)] flex items-center justify-center shrink-0">
+                          <FileText className="w-4 h-4 text-blue-500" />
+                        </div>
+                      )}
+                      <div className="min-w-0 max-w-[175px]">
+                        <div className="font-medium text-[11px] text-[var(--text-primary)] truncate">
+                          {item.file.name}
+                        </div>
+                        <div className="text-[9.5px] flex items-center gap-1.5">
+                          {item.status === 'uploading_server' && (
+                            <span className="text-amber-600 dark:text-amber-400 font-medium">
+                              📤 正在上传至服务器暂存区...
+                            </span>
+                          )}
+                          {item.status === 'distributing_node' && (
+                            <span className="text-sky-600 dark:text-sky-400 font-mono-code font-medium">
+                              📡 分发至节点中 {pct}%
+                            </span>
+                          )}
+                          {item.status === 'ready' && (
+                            <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                              ✅ 已分发至节点临时区
+                            </span>
+                          )}
+                          {item.status === 'failed' && (
+                            <>
+                              <span className="text-rose-500 font-medium" title={item.error || ''}>
+                                ❌ 分发失败
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  item.uploaded?.dist_id
+                                    ? retryDistributeOnNode(item.uploaded.dist_id)
+                                    : startUploadForPendingItem(item)
+                                }
+                                className="px-1 py-0.2 rounded bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 font-semibold cursor-pointer"
+                              >
+                                重试
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => removePendingAttachment(item.id)}
+                        className="absolute top-1 right-1 w-4 h-4 rounded-full bg-[var(--bg-surface)] hover:bg-rose-500 hover:text-white text-[var(--text-muted)] flex items-center justify-center cursor-pointer"
+                        title="移除附件"
+                      >
+                        <X className="w-2.5 h-2.5" />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
 

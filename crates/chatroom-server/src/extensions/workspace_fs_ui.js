@@ -6,6 +6,8 @@ export async function mount(container, ctx) {
   let currentEntries = [];
   let currentDirAgentPath = '';
   let stagedMap = {};
+  let distributingFiles = [];
+  let distributePollTimer = null;
   const activeStagePolls = new Set();
   const STAGE_THRESHOLD_BYTES = 2 * 1024 * 1024;
 
@@ -142,19 +144,29 @@ export async function mount(container, ctx) {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
     uploading = true;
-    renderLoading('正在上传文件到临时目录...');
     try {
-      for (const file of files) {
-        const base64 = await readFileAsBase64(file);
-        await ctx.extFetch(`/rooms/${encodeURIComponent(room.room_id)}/upload`, {
-          method: 'POST',
-          body: JSON.stringify({
-            filename: file.name,
-            sub_dir: currentPath || 'uploads',
-            data_base64: base64,
-            dedupe: false,
-          }),
-        });
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        renderLoading(
+          `📤 正在上传至服务器暂存区 (${i + 1}/${files.length}): ${file.name} (${formatBytes(file.size)})...`
+        );
+        const subDir = currentPath || 'uploads';
+        const q = `?filename=${encodeURIComponent(file.name)}&sub_dir=${encodeURIComponent(subDir)}&dedupe=0`;
+        const headers = { 'Content-Type': file.type || 'application/octet-stream' };
+        const tok = localStorage.getItem('ragents_auth_token');
+        if (tok) headers['Authorization'] = `Bearer ${tok}`;
+        const resp = await fetch(
+          `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(room.room_id)}/upload-raw${q}`,
+          {
+            method: 'PUT',
+            headers,
+            body: file,
+          }
+        );
+        if (!resp.ok) {
+          const errText = await resp.text();
+          throw new Error(errText || `HTTP ${resp.status}`);
+        }
       }
       uploadInput.value = '';
       await loadDir();
@@ -166,8 +178,46 @@ export async function mount(container, ctx) {
     }
   });
 
+  const onExternalUpload = (ev) => {
+    if (ev?.detail?.roomId === room.room_id) {
+      ensureDistributePolling();
+      loadDir();
+    }
+  };
+  window.addEventListener('ragents-workspace-fs-uploaded', onExternalUpload);
+
   function renderLoading(msg) {
     contentEl.innerHTML = `<div class="py-10 text-center text-[var(--text-muted)]">${escapeHtml(msg)}</div>`;
+  }
+
+  function ensureDistributePolling() {
+    if (distributePollTimer) return;
+    distributePollTimer = setInterval(async () => {
+      try {
+        const res = await ctx.extFetch(
+          `/rooms/${encodeURIComponent(room.room_id)}/distribute-status`
+        );
+        const list = res.distributing_files || [];
+        const hadActive = distributingFiles.some((f) => f.phase === 'distributing');
+        const hasActive = list.some((f) => f.phase === 'distributing');
+        const newlyCompleted = list.some((f) => f.phase === 'completed');
+        distributingFiles = list.filter((f) => f.phase !== 'completed');
+        renderEntries(currentEntries, currentDirAgentPath);
+        if ((hadActive && !hasActive) || newlyCompleted) {
+          clearInterval(distributePollTimer);
+          distributePollTimer = null;
+          await loadDir();
+          return;
+        }
+        if (!hasActive) {
+          clearInterval(distributePollTimer);
+          distributePollTimer = null;
+        }
+      } catch (_) {
+        clearInterval(distributePollTimer);
+        distributePollTimer = null;
+      }
+    }, 450);
   }
 
   async function loadDir() {
@@ -185,7 +235,11 @@ export async function mount(container, ctx) {
       currentEntries = res.entries || [];
       currentDirAgentPath = res.agent_path || '';
       stagedMap = res.staged_files || {};
+      distributingFiles = (res.distributing_files || []).filter((f) => f.phase !== 'completed');
       renderEntries(currentEntries, currentDirAgentPath);
+      if (distributingFiles.some((f) => f.phase === 'distributing')) {
+        ensureDistributePolling();
+      }
       Object.values(stagedMap).forEach((st) => {
         if (st && st.phase === 'uploading' && st.stage_id) {
           pollStageUntilReady(st.rel_path, st.stage_id, false);
@@ -290,17 +344,80 @@ export async function mount(container, ctx) {
       : `<button type="button" data-stage-dl="${escapeAttr(relPath)}" class="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-600 dark:text-sky-400 hover:bg-sky-500/25 text-[10px] font-semibold cursor-pointer" title="大文件先预载上传至服务器临时缓存（2小时有效），预载完成后自动触发下载">☁️ 预载</button>`;
   }
 
+  function renderDistributingBanner() {
+    if (!distributingFiles || distributingFiles.length === 0) return '';
+    return `
+      <div class="rounded-xl border border-sky-500/30 bg-sky-500/5 p-2.5 space-y-2">
+        <div class="flex items-center justify-between text-[11px] font-semibold text-sky-600 dark:text-sky-400">
+          <span>📡 正在从服务器分发至节点 (${distributingFiles.length})</span>
+          <span class="text-[10px] font-normal text-[var(--text-muted)]">已暂存服务器 · 节点后台拉取</span>
+        </div>
+        <div class="space-y-1.5">
+          ${distributingFiles
+            .map((df) => {
+              const total = df.total_bytes || 1;
+              const done = df.distributed_bytes || 0;
+              const pct = Math.min(99, Math.round((done / total) * 100));
+              const isFailed = df.phase === 'failed';
+              return `
+                <div class="px-2.5 py-1.5 rounded-lg bg-[var(--bg-main)] border border-[var(--border-subtle)] space-y-1">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="font-mono-code text-[11px] font-medium truncate text-[var(--text-primary)]" title="${escapeAttr(df.agent_path || df.rel_path)}">
+                      ${escapeHtml(df.filename || df.rel_path)}
+                    </span>
+                    ${
+                      isFailed
+                        ? `<div class="flex items-center gap-1.5 shrink-0">
+                            <span class="text-[10px] text-rose-500 font-semibold" title="${escapeAttr(df.error || '')}">❌ 分发失败</span>
+                            <button type="button" data-dist-retry="${escapeAttr(df.dist_id)}" class="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-600 dark:text-rose-400 hover:bg-rose-500/25 text-[10px] font-semibold cursor-pointer">🔄 重试</button>
+                           </div>`
+                        : `<span class="text-[10px] font-mono-code text-sky-600 dark:text-sky-400 font-semibold shrink-0">
+                            📡 分发中 ${pct}% · ${formatBytes(done)} / ${formatBytes(total)}
+                           </span>`
+                    }
+                  </div>
+                  ${
+                    !isFailed
+                      ? `<div class="w-full h-1.5 rounded-full bg-[var(--bg-surface)] overflow-hidden">
+                          <div class="h-full bg-sky-500 transition-all duration-300" style="width: ${Math.max(4, pct)}%"></div>
+                         </div>`
+                      : df.error
+                      ? `<div class="text-[10px] text-rose-500 font-mono-code truncate">${escapeHtml(df.error)}</div>`
+                      : ''
+                  }
+                  <div class="text-[9.5px] font-mono-code text-[var(--text-muted)] truncate">
+                    目标节点: ${escapeHtml(df.node_id)} · /${escapeHtml(df.rel_path)}
+                  </div>
+                </div>
+              `;
+            })
+            .join('')}
+        </div>
+      </div>
+    `;
+  }
+
   function renderEntries(entries, dirAgentPath) {
+    const distBannerHtml = renderDistributingBanner();
     const listHtml =
       entries.length === 0
         ? `<div class="py-8 text-center text-[var(--text-muted)] text-[11px]">
-            ${currentZone === 'tmp' ? '临时目录为空，点击右上角「📤 上传」可将文件上传至此目录' : '当前目录为空'}
+            ${currentZone === 'tmp' ? '临时目录为空，点击右上角「📤 上传」可将文件先上传至服务器再自动分发到节点' : '当前目录为空'}
            </div>`
         : `<div class="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-main)] divide-y divide-[var(--border-subtle)] overflow-hidden">
             ${entries
               .map((ent) => {
                 const icon = ent.is_dir ? '📁' : isImageName(ent.name) ? '🖼️' : '📄';
                 const sizeText = ent.is_dir ? '目录' : formatBytes(ent.size || 0);
+                const distItem =
+                  currentZone === 'tmp'
+                    ? distributingFiles.find((d) => d.rel_path === ent.rel_path)
+                    : null;
+                const distBadge = distItem
+                  ? distItem.phase === 'failed'
+                    ? `<span class="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-500 text-[9.5px] font-semibold">❌ 分发失败</span>`
+                    : `<span class="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-600 dark:text-sky-400 font-mono-code text-[9.5px] font-semibold">📡 分发中 ${Math.min(99, Math.round(((distItem.distributed_bytes || 0) / (distItem.total_bytes || 1)) * 100))}%</span>`
+                  : '';
                 return `
                   <div class="px-2.5 py-1.5 flex items-center justify-between gap-2 hover:bg-[var(--bg-hover)] group">
                     <button type="button" data-entry-path="${escapeAttr(ent.rel_path)}" data-entry-dir="${ent.is_dir ? '1' : '0'}" class="flex items-center gap-1.5 min-w-0 flex-1 text-left cursor-pointer">
@@ -310,6 +427,7 @@ export async function mount(container, ctx) {
                       </span>
                     </button>
                     <div class="flex items-center gap-1.5 shrink-0">
+                      ${distBadge}
                       <span class="text-[10px] font-mono-code text-[var(--text-muted)]">${sizeText}</span>
                       ${!ent.is_dir ? renderFileDownloadAction(ent.rel_path, ent.size || 0, false) : ''}
                     </div>
@@ -354,7 +472,25 @@ export async function mount(container, ctx) {
       `;
     }
 
-    contentEl.innerHTML = listHtml + previewHtml;
+    contentEl.innerHTML = distBannerHtml + listHtml + previewHtml;
+
+    contentEl.querySelectorAll('[data-dist-retry]').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const distId = btn.getAttribute('data-dist-retry') || '';
+        if (!distId) return;
+        try {
+          await ctx.extFetch(
+            `/rooms/${encodeURIComponent(room.room_id)}/distribute-retry?dist_id=${encodeURIComponent(distId)}`,
+            { method: 'POST' }
+          );
+          ensureDistributePolling();
+          await loadDir();
+        } catch (err) {
+          ctx.showError(err?.message || String(err));
+        }
+      });
+    });
 
     contentEl.querySelectorAll('[data-stage-dl]').forEach((btn) => {
       btn.addEventListener('click', async (e) => {

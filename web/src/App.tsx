@@ -692,28 +692,34 @@ export const App: React.FC = () => {
     if (!currentRoomId) {
       throw new Error('请先选择聊天室');
     }
-    const base64Data: string = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const res = String(reader.result || '');
-        const idx = res.indexOf(',');
-        resolve(idx >= 0 ? res.slice(idx + 1) : res);
-      };
-      reader.onerror = () => reject(reader.error || new Error('Failed to read file'));
-      reader.readAsDataURL(file);
-    });
-    return await apiFetch(
-      `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(currentRoomId)}/upload`,
+    const fname = file.name || `upload-${Date.now()}.bin`;
+    const q = `?filename=${encodeURIComponent(fname)}&sub_dir=uploads&dedupe=1`;
+    const headers: Record<string, string> = {
+      'Content-Type': file.type || 'application/octet-stream',
+    };
+    if (authToken) {
+      headers['Authorization'] = `Bearer ${authToken}`;
+    }
+    const res = await fetch(
+      `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(currentRoomId)}/upload-raw${q}`,
       {
-        method: 'POST',
-        body: JSON.stringify({
-          sub_dir: 'uploads',
-          filename: file.name || `upload-${Date.now()}.bin`,
-          data_base64: base64Data,
-          dedupe: true,
-        }),
+        method: 'PUT',
+        headers,
+        body: file,
       }
     );
+    if (!res.ok) {
+      const errText = await res.text();
+      pushBackendError(`上传文件失败: ${errText || `HTTP ${res.status}`}`);
+      throw new Error(errText || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    window.dispatchEvent(
+      new CustomEvent('ragents-workspace-fs-uploaded', {
+        detail: { roomId: currentRoomId, ...data },
+      })
+    );
+    return data;
   };
 
   const handleUpdateRoomControls = async (patch: Partial<Room>) => {
