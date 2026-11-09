@@ -886,19 +886,13 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
     // 15. Test `workspace_fs` extension: upload image to bound temporary directory (`zone=tmp`),
     //     list `zone=tmp`, and download/preview via `/raw`.
     let fake_png_bytes: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
-    use base64::Engine as _;
-    let b64_png = base64::engine::general_purpose::STANDARD.encode(fake_png_bytes);
     let upload_resp: serde_json::Value = http
-        .post(format!(
-            "{chat_base}/api/v1/ext/workspace_fs/rooms/{alice_room_id}/upload"
+        .put(format!(
+            "{chat_base}/api/v1/ext/workspace_fs/rooms/{alice_room_id}/upload-raw?filename=screenshot.png&sub_dir=uploads&dedupe=0"
         ))
         .bearer_auth(&alice_token)
-        .json(&serde_json::json!({
-            "sub_dir": "uploads",
-            "filename": "screenshot.png",
-            "data_base64": b64_png,
-            "dedupe": false
-        }))
+        .header("content-type", "image/png")
+        .body(fake_png_bytes.to_vec())
         .send()
         .await
         .unwrap()

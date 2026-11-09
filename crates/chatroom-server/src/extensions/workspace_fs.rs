@@ -4,11 +4,10 @@ use axum::body::Bytes;
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use base64::Engine;
 use chrono::Utc;
 use futures::StreamExt;
 use ragents_protocol::{NodeFsOp, NodeFsRequest, NodeFsZone, NodeId, NodePhase, SchedulingMode};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -21,16 +20,6 @@ use uuid::Uuid;
 const WORKSPACE_FS_UI_JS: &str = include_str!("workspace_fs_ui.js");
 const STAGE_TTL_SECS: i64 = 2 * 3600;
 const DIRECT_READ_THRESHOLD_BYTES: usize = 2 * 1024 * 1024;
-
-#[derive(Debug, Deserialize)]
-struct UploadTempFileRequest {
-    filename: String,
-    #[serde(default)]
-    sub_dir: Option<String>,
-    data_base64: String,
-    #[serde(default)]
-    dedupe: bool,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1141,8 +1130,7 @@ impl WorkspaceFsExtension {
                             tmp_dir: tmp_dir_for_zone,
                             op: NodeFsOp::ReadFile {
                                 rel_path,
-                                offset: None,
-                                max_bytes: Some(DIRECT_READ_THRESHOLD_BYTES),
+                                max_bytes: Some(512 * 1024),
                             },
                         },
                     )
@@ -1164,68 +1152,7 @@ impl WorkspaceFsExtension {
                     format!("inline; filename=\"{filename}\"")
                 };
 
-                // 1. If already staged on local server disk, serve directly from local SSD at full speed!
-                if let Some(staged) = self.find_valid_staged(&node_id, zone, &rel_path) {
-                    if *staged.phase.lock().unwrap() == StagePhase::Ready {
-                        let staged_mime = staged.mime_type.lock().unwrap().clone();
-                        return Self::stream_local_file_response(
-                            staged.bin_path.clone(),
-                            staged_mime,
-                            disposition,
-                        )
-                        .await;
-                    }
-                }
-
-                // 2. Probe first 2MB chunk; if file <= 2MB, return immediately without staging
-                let fs_resp = self
-                    .coordinator
-                    .ragents_client
-                    .node_fs_query(
-                        &node_id,
-                        &NodeFsRequest {
-                            zone,
-                            workspace_path: workspace_path.clone(),
-                            tmp_dir: tmp_dir_for_zone.clone(),
-                            op: NodeFsOp::ReadFile {
-                                rel_path: rel_path.clone(),
-                                offset: Some(0),
-                                max_bytes: Some(DIRECT_READ_THRESHOLD_BYTES),
-                            },
-                        },
-                    )
-                    .await
-                    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-                if !fs_resp.ok {
-                    return Err((
-                        StatusCode::NOT_FOUND,
-                        fs_resp.error.unwrap_or_else(|| "file not found".to_string()),
-                    ));
-                }
-
-                let b64 = fs_resp.data_base64.unwrap_or_default();
-                let first_bytes = base64::engine::general_purpose::STANDARD
-                    .decode(b64)
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                let total_size = fs_resp.size.unwrap_or(first_bytes.len() as u64);
-                let mime = fs_resp
-                    .mime_type
-                    .unwrap_or_else(|| "application/octet-stream".to_string());
-
-                if (first_bytes.len() as u64) >= total_size {
-                    return Ok((
-                        [
-                            (header::CONTENT_TYPE, mime),
-                            (header::CONTENT_DISPOSITION, disposition),
-                            (header::CONTENT_LENGTH, first_bytes.len().to_string()),
-                        ],
-                        first_bytes,
-                    )
-                        .into_response());
-                }
-
-                // 3. Large file (> 2MB): stage to server local disk via raw binary HTTP PUT, then stream from disk
+                // All file downloads/previews stage directly to ragents-chat Server disk over HTTP
                 let entry = self
                     .start_or_get_stage(&node_id, zone, workspace_path, tmp_dir_for_zone, &rel_path)
                     .await?;
@@ -1235,9 +1162,10 @@ impl WorkspaceFsExtension {
                     let phase = entry.phase.lock().unwrap().clone();
                     match phase {
                         StagePhase::Ready => {
+                            let staged_mime = entry.mime_type.lock().unwrap().clone();
                             return Self::stream_local_file_response(
                                 entry.bin_path.clone(),
-                                mime,
+                                staged_mime,
                                 disposition,
                             )
                             .await;
@@ -1314,40 +1242,6 @@ impl WorkspaceFsExtension {
                     &filename,
                     sub_dir,
                     dedupe,
-                    stage_id,
-                    bin_path,
-                    part_path,
-                    total_bytes,
-                )
-                .await
-            }
-            (Method::POST, "upload") => {
-                let bytes = axum::body::to_bytes(body, 64 * 1024 * 1024)
-                    .await
-                    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-                let req: UploadTempFileRequest = serde_json::from_slice(&bytes)
-                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid json: {e}")))?;
-                let decoded = base64::engine::general_purpose::STANDARD
-                    .decode(req.data_base64.trim())
-                    .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid base64: {e}")))?;
-
-                let stage_id = format!("stg_{}", Uuid::now_v7().simple());
-                let part_path = self.stage_dir.join(format!("{stage_id}.part"));
-                let bin_path = self.stage_dir.join(format!("{stage_id}.bin"));
-                let total_bytes = decoded.len() as u64;
-
-                tokio::fs::write(&bin_path, &decoded)
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-                self.finalize_server_staged_upload(
-                    room_id,
-                    &node_id,
-                    workspace_path,
-                    room_tmp_dir,
-                    &req.filename,
-                    req.sub_dir.as_deref(),
-                    req.dedupe,
                     stage_id,
                     bin_path,
                     part_path,
