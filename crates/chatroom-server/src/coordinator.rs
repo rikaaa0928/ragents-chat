@@ -1,3 +1,4 @@
+use crate::schedule::*;
 use crate::store::ChatroomStore;
 use crate::types::*;
 use chrono::Utc;
@@ -89,6 +90,10 @@ impl RoomCoordinator {
             .unwrap_or_default();
         let mut pub_agent: RoomAgentPublic = agent.into();
         pub_agent.token_usage = usage;
+        pub_agent.active_schedule_count = self
+            .store
+            .count_active_agent_schedules(&pub_agent.agent_id)
+            .unwrap_or(0);
         pub_agent
     }
 
@@ -1148,6 +1153,19 @@ impl RoomCoordinator {
             coord_init.sync_existing_rooms_on_startup().await;
         });
 
+        let coord_sched = self.clone();
+        let cancel_sched = cancel.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                        coord_sched.poll_due_agent_schedules().await;
+                    }
+                    _ = cancel_sched.cancelled() => return,
+                }
+            }
+        });
+
         let coord = self.clone();
         tokio::spawn(async move {
             let mut after_rv = 0u64;
@@ -2033,12 +2051,17 @@ impl RoomCoordinator {
             "{}/api/v1/internal/agent-speak",
             self.callback_base_url.trim_end_matches('/')
         );
+        let schedule_url = format!(
+            "{}/api/v1/internal/agent-schedule",
+            self.callback_base_url.trim_end_matches('/')
+        );
         extensions.push(ExtensionSpec {
             name: "chatroom".to_string(),
             path: String::new(),
             enabled: true,
             config: serde_json::json!({
                 "chatroom_callback_url": callback_url,
+                "chatroom_schedule_url": schedule_url,
                 "room_id": room.room_id,
                 "room_name": room.name,
                 "workspace_path": pinned_workspace_str,
@@ -2550,6 +2573,524 @@ impl RoomCoordinator {
         });
 
         Ok(msg)
+    }
+
+    pub async fn handle_internal_agent_schedule(
+        &self,
+        bearer_token: Option<&str>,
+        req: InternalAgentScheduleRequest,
+    ) -> Result<serde_json::Value, (u16, String)> {
+        let agent = self
+            .store
+            .get_agent(&req.agent_id)
+            .map_err(|e| (500, e.to_string()))?
+            .ok_or_else(|| (404, format!("agent {} not found", req.agent_id)))?;
+
+        if agent.room_id != req.room_id {
+            return Err((403, "agent does not belong to target room".to_string()));
+        }
+
+        let provided = bearer_token.unwrap_or("");
+        if !constant_time_eq(provided, &agent.agent_secret_token) {
+            return Err((401, "invalid agent_secret_token".to_string()));
+        }
+
+        let action = req.action.trim().to_ascii_lowercase();
+        let now = Utc::now();
+        let now_ms = now.timestamp_millis();
+
+        match action.as_str() {
+            "list" => {
+                let schedules = self
+                    .store
+                    .list_agent_schedules(&agent.agent_id)
+                    .map_err(|e| (500, e.to_string()))?;
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "action": "list",
+                    "schedules": schedules,
+                }))
+            }
+            "create" => {
+                let existing = self
+                    .store
+                    .list_agent_schedules(&agent.agent_id)
+                    .map_err(|e| (500, e.to_string()))?;
+                if existing.len() >= MAX_SCHEDULES_PER_AGENT {
+                    return Err((
+                        400,
+                        format!(
+                            "maximum number of schedules per agent ({MAX_SCHEDULES_PER_AGENT}) reached; please delete or update an existing schedule"
+                        ),
+                    ));
+                }
+                let title = req
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| (400, "missing `title` for schedule".to_string()))?
+                    .to_string();
+                let task_prompt = req
+                    .task_prompt
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| (400, "missing `task_prompt` for schedule".to_string()))?
+                    .to_string();
+                let (spec, max_runs) =
+                    parse_schedule_spec_from_request(&req, now_ms).map_err(|e| (400, e))?;
+                let next_ms = compute_next_run_at_ms(&spec, now_ms, 0, max_runs)
+                    .map_err(|e| (400, e))?;
+                let summary = format_schedule_summary(&spec);
+                let schedule = AgentSchedule {
+                    schedule_id: format!("sched_{}", Uuid::now_v7().simple()),
+                    room_id: agent.room_id.clone(),
+                    agent_id: agent.agent_id.clone(),
+                    title: title.clone(),
+                    task_prompt,
+                    spec,
+                    schedule_summary: summary.clone(),
+                    enabled: true,
+                    max_runs,
+                    run_count: 0,
+                    last_run_at: None,
+                    next_run_at: next_ms.and_then(chrono::DateTime::from_timestamp_millis),
+                    last_status: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                let created = self
+                    .store
+                    .insert_agent_schedule(schedule)
+                    .map_err(|e| (500, e.to_string()))?;
+                self.broadcast_agent_schedules_updated(&agent.room_id, &agent.agent_id);
+                self.emit_flow_status(
+                    &agent.room_id,
+                    format!(
+                        "[⏰ 定时任务创建] @{} 创建了定时任务「{}」({})",
+                        agent.name, title, summary
+                    ),
+                );
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "action": "create",
+                    "schedule": created,
+                }))
+            }
+            "pause" | "resume" | "update" => {
+                let schedule_id = req
+                    .schedule_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| (400, format!("missing `schedule_id` for action='{action}'")))?;
+                let mut sched = self
+                    .store
+                    .get_agent_schedule(schedule_id)
+                    .map_err(|e| (500, e.to_string()))?
+                    .ok_or_else(|| (404, format!("schedule '{schedule_id}' not found")))?;
+                if sched.agent_id != agent.agent_id {
+                    return Err((403, "schedule belongs to another agent".to_string()));
+                }
+
+                if action == "pause" {
+                    sched.enabled = false;
+                } else if action == "resume" {
+                    sched.enabled = true;
+                } else {
+                    if let Some(ref t) = req.title {
+                        if !t.trim().is_empty() {
+                            sched.title = t.trim().to_string();
+                        }
+                    }
+                    if let Some(ref p) = req.task_prompt {
+                        if !p.trim().is_empty() {
+                            sched.task_prompt = p.trim().to_string();
+                        }
+                    }
+                    if req.kind.is_some() {
+                        let (new_spec, new_max) =
+                            parse_schedule_spec_from_request(&req, now_ms).map_err(|e| (400, e))?;
+                        sched.spec = new_spec;
+                        sched.schedule_summary = format_schedule_summary(&sched.spec);
+                        sched.max_runs = new_max;
+                        if matches!(sched.spec, AgentScheduleSpec::Once { .. }) {
+                            sched.run_count = 0;
+                            sched.enabled = true;
+                        }
+                    } else if req.max_runs.is_some() {
+                        sched.max_runs = req.max_runs;
+                    }
+                }
+
+                if sched.enabled {
+                    let next_ms = compute_next_run_at_ms(
+                        &sched.spec,
+                        now_ms,
+                        sched.run_count,
+                        sched.max_runs,
+                    )
+                    .map_err(|e| (400, e))?;
+                    sched.next_run_at = next_ms.and_then(chrono::DateTime::from_timestamp_millis);
+                    if sched.next_run_at.is_none() {
+                        sched.enabled = false;
+                    }
+                }
+                sched.updated_at = now;
+                let updated = self
+                    .store
+                    .update_agent_schedule(&sched)
+                    .map_err(|e| (500, e.to_string()))?;
+                self.broadcast_agent_schedules_updated(&agent.room_id, &agent.agent_id);
+                self.emit_flow_status(
+                    &agent.room_id,
+                    format!(
+                        "[⏰ 定时任务更新] @{} {}了定时任务「{}」({})",
+                        agent.name,
+                        if action == "pause" {
+                            "暂停"
+                        } else if action == "resume" {
+                            "恢复"
+                        } else {
+                            "修改"
+                        },
+                        updated.title,
+                        updated.schedule_summary
+                    ),
+                );
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "action": action,
+                    "schedule": updated,
+                }))
+            }
+            "delete" => {
+                let schedule_id = req
+                    .schedule_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| (400, "missing `schedule_id` for action='delete'".to_string()))?;
+                let deleted = self
+                    .store
+                    .delete_agent_schedule(schedule_id, &agent.agent_id)
+                    .map_err(|e| (500, e.to_string()))?
+                    .ok_or_else(|| (404, format!("schedule '{schedule_id}' not found")))?;
+                self.broadcast_agent_schedules_updated(&agent.room_id, &agent.agent_id);
+                self.emit_flow_status(
+                    &agent.room_id,
+                    format!(
+                        "[⏰ 定时任务删除] @{} 删除了定时任务「{}」",
+                        agent.name, deleted.title
+                    ),
+                );
+                Ok(serde_json::json!({
+                    "ok": true,
+                    "action": "delete",
+                    "deleted_schedule_id": deleted.schedule_id,
+                }))
+            }
+            other => Err((
+                400,
+                format!(
+                    "unsupported action '{other}' (expected 'create', 'list', 'update', 'pause', 'resume', or 'delete')"
+                ),
+            )),
+        }
+    }
+
+    pub fn broadcast_agent_schedules_updated(&self, room_id: &str, agent_id: &str) {
+        if let Ok(schedules) = self.store.list_agent_schedules(agent_id) {
+            self.emit_room_event(ChatroomEvent::AgentSchedulesUpdated {
+                room_id: room_id.to_string(),
+                agent_id: agent_id.to_string(),
+                schedules,
+            });
+        }
+        if let Ok(Some(agent)) = self.store.get_agent(agent_id) {
+            self.emit_room_event(ChatroomEvent::AgentUpdated {
+                room_id: room_id.to_string(),
+                agent: self.to_agent_public(agent),
+            });
+        }
+    }
+
+    pub fn patch_agent_schedule_by_user(
+        &self,
+        agent_id: &str,
+        schedule_id: &str,
+        patch: PatchAgentScheduleRequest,
+    ) -> anyhow::Result<AgentSchedule> {
+        let mut sched = self
+            .store
+            .get_agent_schedule(schedule_id)?
+            .ok_or_else(|| anyhow::anyhow!("schedule not found"))?;
+        if sched.agent_id != agent_id {
+            anyhow::bail!("schedule does not belong to target agent");
+        }
+        let now = Utc::now();
+        let now_ms = now.timestamp_millis();
+        if let Some(en) = patch.enabled {
+            sched.enabled = en;
+            if en && matches!(sched.spec, AgentScheduleSpec::Once { .. }) && sched.run_count > 0 {
+                // Re-enabling a completed one-shot schedule runs it in 10 seconds
+                sched.run_count = 0;
+                sched.spec = AgentScheduleSpec::Once {
+                    run_at_ms: now_ms + 10_000,
+                };
+            }
+        }
+        if let Some(t) = patch.title {
+            if !t.trim().is_empty() {
+                sched.title = t.trim().to_string();
+            }
+        }
+        if let Some(p) = patch.task_prompt {
+            if !p.trim().is_empty() {
+                sched.task_prompt = p.trim().to_string();
+            }
+        }
+        if sched.enabled {
+            let next_ms =
+                compute_next_run_at_ms(&sched.spec, now_ms, sched.run_count, sched.max_runs)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+            sched.next_run_at = next_ms.and_then(chrono::DateTime::from_timestamp_millis);
+        }
+        sched.updated_at = now;
+        let updated = self.store.update_agent_schedule(&sched)?;
+        self.broadcast_agent_schedules_updated(&sched.room_id, &sched.agent_id);
+        Ok(updated)
+    }
+
+    pub fn delete_agent_schedule_by_user(
+        &self,
+        agent_id: &str,
+        schedule_id: &str,
+    ) -> anyhow::Result<Vec<AgentSchedule>> {
+        let deleted = self
+            .store
+            .delete_agent_schedule(schedule_id, agent_id)?
+            .ok_or_else(|| anyhow::anyhow!("schedule not found"))?;
+        self.broadcast_agent_schedules_updated(&deleted.room_id, &deleted.agent_id);
+        Ok(self.store.list_agent_schedules(agent_id)?)
+    }
+
+    pub async fn poll_due_agent_schedules(&self) {
+        let now_ms = Utc::now().timestamp_millis();
+        let Ok(due_list) = self.store.list_due_agent_schedules(now_ms) else {
+            return;
+        };
+        for sched in due_list {
+            let _ = self
+                .trigger_agent_schedule(&sched.agent_id, &sched.schedule_id, false)
+                .await;
+        }
+    }
+
+    pub async fn trigger_agent_schedule(
+        &self,
+        agent_id: &str,
+        schedule_id: &str,
+        manual: bool,
+    ) -> anyhow::Result<AgentSchedule> {
+        let mut sched = self
+            .store
+            .get_agent_schedule(schedule_id)?
+            .ok_or_else(|| anyhow::anyhow!("schedule not found"))?;
+        if sched.agent_id != agent_id {
+            anyhow::bail!("schedule does not belong to target agent");
+        }
+        let agent = self
+            .store
+            .get_agent(agent_id)?
+            .ok_or_else(|| anyhow::anyhow!("agent not found"))?;
+        let room = self
+            .store
+            .get_room(&agent.room_id)?
+            .ok_or_else(|| anyhow::anyhow!("room not found"))?;
+        let all_agents = self.store.list_room_agents(&room.room_id)?;
+
+        let now = Utc::now();
+        let now_ms = now.timestamp_millis();
+        let is_busy =
+            agent.runtime_state != AgentRuntimeState::Idle || agent.active_activation_id.is_some();
+
+        if is_busy && !manual {
+            // Automatic timer fired while agent is busy: avoid piling up duplicate scheduled activations
+            if matches!(sched.spec, AgentScheduleSpec::Once { .. }) {
+                // Defer one-shot schedule by 15s until agent finishes current turn
+                sched.next_run_at = chrono::DateTime::from_timestamp_millis(now_ms + 15_000);
+                sched.last_status = Some("deferred_busy".to_string());
+            } else {
+                let next_ms = compute_next_run_at_ms(
+                    &sched.spec,
+                    now_ms,
+                    sched.run_count,
+                    sched.max_runs,
+                )
+                .ok()
+                .flatten();
+                sched.next_run_at = next_ms.and_then(chrono::DateTime::from_timestamp_millis);
+                sched.last_status = Some("skipped_busy".to_string());
+                self.emit_flow_status(
+                    &room.room_id,
+                    format!(
+                        "[⏰ 定时任务跳过] @{} 当前正在执行其他任务，本轮跳过「{}」",
+                        agent.name, sched.title
+                    ),
+                );
+            }
+            sched.updated_at = now;
+            let updated = self.store.update_agent_schedule(&sched)?;
+            self.broadcast_agent_schedules_updated(&room.room_id, &agent.agent_id);
+            return Ok(updated);
+        }
+
+        sched.run_count += 1;
+        sched.last_run_at = Some(now);
+        sched.last_status = Some("triggered".to_string());
+        let next_ms =
+            compute_next_run_at_ms(&sched.spec, now_ms, sched.run_count, sched.max_runs)
+                .ok()
+                .flatten();
+        sched.next_run_at = next_ms.and_then(chrono::DateTime::from_timestamp_millis);
+        if sched.next_run_at.is_none() {
+            sched.enabled = false;
+            sched.last_status = Some("completed".to_string());
+        }
+        sched.updated_at = now;
+        let updated_sched = self.store.update_agent_schedule(&sched)?;
+        self.broadcast_agent_schedules_updated(&room.room_id, &agent.agent_id);
+
+        self.emit_flow_status(
+            &room.room_id,
+            format!(
+                "[⏰ 定时任务触发 #{}] 唤醒 @{} 执行「{}」({})",
+                updated_sched.run_count,
+                agent.name,
+                updated_sched.title,
+                if manual { "手动立即触发" } else { &updated_sched.schedule_summary }
+            ),
+        );
+
+        // Include any unread room messages since `agent.last_delivered_seq` + the scheduled task prompt
+        let unread = self
+            .store
+            .list_room_messages_for_agent(&room.room_id, agent.last_delivered_seq, &agent.name)
+            .unwrap_or_default();
+        let max_seq = room.last_msg_seq;
+        let unread_seqs: Vec<u64> = unread.iter().map(|m| m.msg_seq).collect();
+
+        let mut payload_text = if !unread.is_empty() {
+            let mut s = format_delivery_payload(
+                &room,
+                &all_agents,
+                &agent,
+                &unread,
+                DeliveryMode::PeekAllowed { roll: 100 },
+            );
+            s.push_str("\n\n");
+            s
+        } else {
+            String::new()
+        };
+
+        let cst_offset = chrono::FixedOffset::east_opt(DEFAULT_TZ_OFFSET_MINUTES * 60)
+            .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).unwrap());
+        let local_time_str = now
+            .with_timezone(&cst_offset)
+            .format("%Y-%m-%d %H:%M:%S UTC+8")
+            .to_string();
+
+        payload_text.push_str(&format!(
+            "<scheduled_task_trigger schedule_id=\"{}\" title=\"{}\" schedule=\"{}\" run_count=\"{}\" triggered_at=\"{}\">\n\
+Task Instructions:\n\
+{}\n\
+\n\
+(Note: This turn was triggered by your scheduled task above. Execute any required tools or inspections in your private session. If your task instructions or findings require reporting to @Human or the chatroom, call `chatroom_speak`; if no public message is needed, finish your turn silently.)\n\
+</scheduled_task_trigger>",
+            updated_sched.schedule_id,
+            updated_sched.title,
+            updated_sched.schedule_summary,
+            updated_sched.run_count,
+            local_time_str,
+            updated_sched.task_prompt
+        ));
+
+        let updated_agent = self.store.prepare_agent_delivery(
+            &agent.agent_id,
+            max_seq,
+            room.roster_version,
+            true,
+        )?;
+
+        if is_busy {
+            // Manual trigger while busy -> push into RealtimeQueue
+            let _ = self
+                .ragents_client
+                .push_realtime_message(
+                    &updated_agent.active_session_id,
+                    PushRealtimeMessageRequest {
+                        content: vec![MessageContent::InputText { text: payload_text }],
+                        disabled_tools: vec![],
+                    },
+                )
+                .await?;
+        } else {
+            let act = self
+                .ragents_client
+                .create_activation(CreateActivationRequest {
+                    activation_id: None,
+                    labels: BTreeMap::new(),
+                    spec: ActivationSpec {
+                        session_id: updated_agent.active_session_id.clone(),
+                        submission_kind: SubmissionKind::Normal,
+                        input: vec![Item::user_message(payload_text)],
+                        model_override: None,
+                        disabled_tools: vec![],
+                        desired_phase: DesiredActivationPhase::Running,
+                        interaction_responses: BTreeMap::new(),
+                    },
+                })
+                .await?;
+
+            let act_id = ActivationId::new(act.metadata.id);
+            if !unread_seqs.is_empty() {
+                let already_started = self
+                    .started_activation_ids
+                    .lock()
+                    .expect("started_activation_ids mutex poisoned")
+                    .contains(&act_id);
+                if !already_started {
+                    self.pending_normal_activations
+                        .lock()
+                        .expect("pending_normal_activations mutex poisoned")
+                        .entry(agent.agent_id.clone())
+                        .or_default()
+                        .push((act_id.clone(), unread_seqs));
+                }
+            }
+
+            let mut final_agent = updated_agent.clone();
+            if act.status.phase.is_active()
+                && updated_agent.runtime_state == AgentRuntimeState::Idle
+            {
+                if let Ok(thinking_agent) = self.store.update_agent_runtime_state(
+                    &agent.agent_id,
+                    AgentRuntimeState::Thinking,
+                    Some(act_id),
+                ) {
+                    final_agent = thinking_agent;
+                }
+            }
+            self.emit_room_event(ChatroomEvent::AgentUpdated {
+                room_id: room.room_id.clone(),
+                agent: self.to_agent_public(final_agent),
+            });
+        }
+
+        Ok(updated_sched)
     }
 
     pub fn dispatch_after_message<'a>(

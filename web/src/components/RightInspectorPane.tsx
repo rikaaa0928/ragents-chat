@@ -125,6 +125,13 @@ interface RightInspectorPaneProps {
     rule: PermissionRuleEntry,
     sessionId?: string
   ) => void;
+  onToggleSchedule?: (
+    agentId: string,
+    scheduleId: string,
+    enabled: boolean
+  ) => void;
+  onRunScheduleNow?: (agentId: string, scheduleId: string) => void;
+  onDeleteSchedule?: (agentId: string, scheduleId: string) => void;
   onWithdrawQueuedMessage: (agentId: string, msgSeq: number) => void;
 }
 
@@ -154,6 +161,9 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   onCancelAgent,
   onRetryAgent,
   onRevokePermissionRule,
+  onToggleSchedule,
+  onRunScheduleNow,
+  onDeleteSchedule,
   onWithdrawQueuedMessage,
 }) => {
   // Inspector Column Width Mode: standard (430px) or wide (580px)
@@ -162,7 +172,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   // Master Collapsible Toggle for Inspector Configuration Section (collapsed by default to maximize content preview space!)
   const [configDrawerOpen, setConfigDrawerOpen] = useState(false);
   // Active tab inside the collapsible config drawer
-  const [activeConfigTab, setActiveConfigTab] = useState<'reasoning' | 'prompt' | 'permissions' | 'lineage'>('reasoning');
+  const [activeConfigTab, setActiveConfigTab] = useState<'reasoning' | 'prompt' | 'permissions' | 'schedules' | 'lineage'>('reasoning');
 
   // Permission Box Collapsible State
   const [permExpanded, setPermExpanded] = useState(true);
@@ -988,6 +998,14 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                         主导
                       </span>
                     )}
+                    {(a.active_schedule_count || 0) > 0 && (
+                      <span
+                        className="px-1.5 py-0.2 rounded bg-emerald-500/12 text-emerald-600 dark:text-emerald-400 text-[9.5px] font-mono-code inline-flex items-center gap-0.5 shrink-0"
+                        title={`该 Agent 拥有 ${a.active_schedule_count} 个启用中的定时任务`}
+                      >
+                        ⏰{a.active_schedule_count}
+                      </span>
+                    )}
                   </div>
 
                   <button
@@ -1177,6 +1195,23 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                           </span>
                         ) : null;
                       })()}
+                    </button>
+
+                    <button
+                      onClick={() => setActiveConfigTab('schedules')}
+                      className={`px-2.5 py-1 rounded-md text-[11px] font-medium flex items-center gap-1 cursor-pointer transition-colors ${
+                        activeConfigTab === 'schedules'
+                          ? 'bg-[var(--bg-main)] text-[var(--text-primary)] shadow-2xs'
+                          : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                      }`}
+                    >
+                      <Clock className="w-3 h-3 text-cyan-500" />
+                      <span>定时任务</span>
+                      {(inspector?.schedules || []).length > 0 && (
+                        <span className="px-1 py-0 rounded bg-cyan-500/20 text-cyan-600 dark:text-cyan-300 text-[9.5px] font-mono-code">
+                          {(inspector?.schedules || []).length}
+                        </span>
+                      )}
                     </button>
 
                     <button
@@ -1645,6 +1680,122 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                         </>
                       );
                     })()}
+                  </div>
+                )}
+
+                {/* Tab 3b: Agent Scheduled Tasks */}
+                {activeConfigTab === 'schedules' && (
+                  <div className="p-2.5 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-[11.5px] text-[var(--text-primary)]">
+                        ⏰ @{inspectedAgent.name} 的自治定时任务
+                      </span>
+                      <span className="text-[10px] text-[var(--text-muted)]">
+                        可直接在对话中让 Agent 调用 chatroom_schedule 创建/修改
+                      </span>
+                    </div>
+
+                    {(inspector?.schedules || []).length === 0 ? (
+                      <div className="py-4 px-3 text-center rounded-lg border border-dashed border-[var(--border-subtle)] text-[11px] text-[var(--text-muted)]">
+                        当前 Agent 暂无定时任务。你可以在群聊中对 @{inspectedAgent.name} 说「每天早上 9 点帮我查看某条消息」让其自动创建。
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5 max-h-60 overflow-y-auto pr-0.5">
+                        {(inspector?.schedules || []).map((sched) => (
+                          <div
+                            key={sched.schedule_id}
+                            className={`rounded-lg border p-2 space-y-1.5 text-[11px] ${
+                              sched.enabled
+                                ? 'border-[var(--border-subtle)] bg-[var(--bg-sidebar)]'
+                                : 'border-[var(--border-subtle)] bg-[var(--bg-surface)] opacity-70'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <span
+                                  className={`px-1.5 py-0.5 rounded text-[9.5px] font-medium shrink-0 ${
+                                    sched.enabled
+                                      ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                                      : 'bg-zinc-500/15 text-zinc-500'
+                                  }`}
+                                >
+                                  {sched.enabled ? '启用中' : '已暂停'}
+                                </span>
+                                <span className="font-semibold text-[var(--text-primary)] truncate">
+                                  {sched.title}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0">
+                                {onRunScheduleNow && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      onRunScheduleNow(
+                                        inspectedAgent.agent_id,
+                                        sched.schedule_id
+                                      )
+                                    }
+                                    className="px-1.5 py-0.5 rounded bg-blue-500/15 hover:bg-blue-500/25 text-blue-600 dark:text-blue-300 text-[10px] font-medium cursor-pointer"
+                                    title="立即唤醒 Agent 执行一次该定时任务"
+                                  >
+                                    ▶ 立即执行
+                                  </button>
+                                )}
+                                {onToggleSchedule && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      onToggleSchedule(
+                                        inspectedAgent.agent_id,
+                                        sched.schedule_id,
+                                        !sched.enabled
+                                      )
+                                    }
+                                    className="px-1.5 py-0.5 rounded bg-[var(--bg-main)] hover:bg-[var(--bg-hover)] border border-[var(--border-subtle)] text-[10px] cursor-pointer"
+                                  >
+                                    {sched.enabled ? '暂停' : '恢复'}
+                                  </button>
+                                )}
+                                {onDeleteSchedule && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      onDeleteSchedule(
+                                        inspectedAgent.agent_id,
+                                        sched.schedule_id
+                                      )
+                                    }
+                                    className="px-1.5 py-0.5 rounded text-rose-500 hover:bg-rose-500/15 text-[10px] cursor-pointer"
+                                    title="删除该定时任务"
+                                  >
+                                    删除
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] font-mono-code text-[var(--text-muted)]">
+                              <span>规则: {sched.schedule_summary}</span>
+                              <span>已执行: {sched.run_count}次</span>
+                              {sched.next_run_at && sched.enabled && (
+                                <span className="text-cyan-600 dark:text-cyan-400">
+                                  下次: {new Date(sched.next_run_at).toLocaleString()}
+                                </span>
+                              )}
+                              {sched.last_run_at && (
+                                <span>
+                                  上次: {new Date(sched.last_run_at).toLocaleString()}
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="px-2 py-1 rounded bg-[var(--bg-main)] border border-[var(--border-subtle)] text-[10.5px] text-[var(--text-secondary)] whitespace-pre-wrap break-words font-mono-code">
+                              {sched.task_prompt}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
 

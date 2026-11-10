@@ -1,6 +1,7 @@
 use crate::coordinator::RoomCoordinator;
 use crate::extensions::{ChatExtensionHost, ChatPrincipal, ExtensionManifestResponse};
 use crate::manager::recruit_agents_via_manager;
+use crate::schedule::*;
 use crate::types::*;
 use axum::{
     body::Bytes,
@@ -118,8 +119,24 @@ pub fn build_chat_router(state: ChatServerState) -> Router {
             post(handle_withdraw_queued_message),
         )
         .route(
+            "/api/v1/agents/{agent_id}/schedules",
+            get(handle_list_agent_schedules),
+        )
+        .route(
+            "/api/v1/agents/{agent_id}/schedules/{schedule_id}",
+            patch(handle_patch_agent_schedule).delete(handle_delete_agent_schedule),
+        )
+        .route(
+            "/api/v1/agents/{agent_id}/schedules/{schedule_id}/run",
+            post(handle_run_agent_schedule_now),
+        )
+        .route(
             "/api/v1/internal/agent-speak",
             post(handle_internal_agent_speak),
+        )
+        .route(
+            "/api/v1/internal/agent-schedule",
+            post(handle_internal_agent_schedule),
         )
         .route(
             "/api/v1/internal/manager/add-agent",
@@ -561,7 +578,8 @@ async fn handle_room_stream(
                 | ChatroomEvent::RoomUpdated { room_id, .. }
                 | ChatroomEvent::PermissionAlert { room_id, .. }
                 | ChatroomEvent::PeekRoundStatus { room_id, .. }
-                | ChatroomEvent::AgentActivity { room_id, .. } => room_id,
+                | ChatroomEvent::AgentActivity { room_id, .. }
+                | ChatroomEvent::AgentSchedulesUpdated { room_id, .. } => room_id,
             };
             if ev_room_id != &room_id {
                 continue;
@@ -697,6 +715,11 @@ async fn handle_get_inspector(
         .coordinator
         .build_agent_permission_summary(&agent, session.as_ref(), &events)
         .await;
+    let schedules = state
+        .coordinator
+        .store
+        .list_agent_schedules(&agent.agent_id)
+        .unwrap_or_default();
     let agent_pub = state.coordinator.to_agent_public_hydrated(agent).await;
 
     Ok(Json(InspectorResponse {
@@ -709,6 +732,7 @@ async fn handle_get_inspector(
         can_edit_prompt,
         message_queues,
         permission_summary,
+        schedules,
     }))
 }
 
@@ -964,6 +988,100 @@ async fn handle_internal_manager_remove_agent(
             )
         })?;
     Ok((StatusCode::OK, Json(res)))
+}
+
+async fn handle_internal_agent_schedule(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Json(req): Json<InternalAgentScheduleRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ChatApiError> {
+    let bearer = extract_bearer_or_cookie_token(&headers);
+    let res = state
+        .coordinator
+        .handle_internal_agent_schedule(bearer.as_deref(), req)
+        .await
+        .map_err(|(code, err)| {
+            ChatApiError::Http(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST),
+                err,
+            )
+        })?;
+    Ok((StatusCode::OK, Json(res)))
+}
+
+async fn handle_list_agent_schedules(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Vec<AgentSchedule>>, ChatApiError> {
+    let principal = verify_user_auth(&state, &headers)?;
+    let agent = state
+        .coordinator
+        .store
+        .get_agent(&agent_id)?
+        .ok_or_else(|| ChatApiError::Http(StatusCode::NOT_FOUND, "agent not found".into()))?;
+    verify_room_access(&state, &principal, &agent.room_id)?;
+    let schedules = state.coordinator.store.list_agent_schedules(&agent_id)?;
+    Ok(Json(schedules))
+}
+
+async fn handle_patch_agent_schedule(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Path((agent_id, schedule_id)): Path<(String, String)>,
+    Json(patch): Json<PatchAgentScheduleRequest>,
+) -> Result<Json<AgentSchedule>, ChatApiError> {
+    let principal = verify_user_auth(&state, &headers)?;
+    let agent = state
+        .coordinator
+        .store
+        .get_agent(&agent_id)?
+        .ok_or_else(|| ChatApiError::Http(StatusCode::NOT_FOUND, "agent not found".into()))?;
+    verify_room_access(&state, &principal, &agent.room_id)?;
+    let updated = state
+        .coordinator
+        .patch_agent_schedule_by_user(&agent_id, &schedule_id, patch)
+        .map_err(|e| ChatApiError::Http(StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(updated))
+}
+
+async fn handle_delete_agent_schedule(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Path((agent_id, schedule_id)): Path<(String, String)>,
+) -> Result<Json<Vec<AgentSchedule>>, ChatApiError> {
+    let principal = verify_user_auth(&state, &headers)?;
+    let agent = state
+        .coordinator
+        .store
+        .get_agent(&agent_id)?
+        .ok_or_else(|| ChatApiError::Http(StatusCode::NOT_FOUND, "agent not found".into()))?;
+    verify_room_access(&state, &principal, &agent.room_id)?;
+    let remaining = state
+        .coordinator
+        .delete_agent_schedule_by_user(&agent_id, &schedule_id)
+        .map_err(|e| ChatApiError::Http(StatusCode::NOT_FOUND, e.to_string()))?;
+    Ok(Json(remaining))
+}
+
+async fn handle_run_agent_schedule_now(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Path((agent_id, schedule_id)): Path<(String, String)>,
+) -> Result<Json<AgentSchedule>, ChatApiError> {
+    let principal = verify_user_auth(&state, &headers)?;
+    let agent = state
+        .coordinator
+        .store
+        .get_agent(&agent_id)?
+        .ok_or_else(|| ChatApiError::Http(StatusCode::NOT_FOUND, "agent not found".into()))?;
+    verify_room_access(&state, &principal, &agent.room_id)?;
+    let triggered = state
+        .coordinator
+        .trigger_agent_schedule(&agent_id, &schedule_id, true)
+        .await
+        .map_err(|e| ChatApiError::Http(StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(triggered))
 }
 
 pub enum ChatApiError {

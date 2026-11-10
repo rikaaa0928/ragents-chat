@@ -16,6 +16,8 @@ struct ChatroomPluginConfig {
     #[serde(default)]
     chatroom_callback_url: String,
     #[serde(default)]
+    chatroom_schedule_url: String,
+    #[serde(default)]
     chatroom_add_agent_url: String,
     #[serde(default)]
     chatroom_remove_agent_url: String,
@@ -37,6 +39,22 @@ struct ChatroomPluginConfig {
     agent_token: String,
     #[serde(default)]
     node_temp_root_dir: String,
+}
+
+impl ChatroomPluginConfig {
+    fn resolve_schedule_url(&self) -> String {
+        if !self.chatroom_schedule_url.trim().is_empty() {
+            return self.chatroom_schedule_url.trim().to_string();
+        }
+        if let Some(prefix) = self
+            .chatroom_callback_url
+            .trim()
+            .strip_suffix("/api/v1/internal/agent-speak")
+        {
+            return format!("{prefix}/api/v1/internal/agent-schedule");
+        }
+        String::new()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -361,7 +379,11 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
 6. WHEN PEEKING AT UNREAD MESSAGES WHILE IDLE (`[Chatroom Unread Peek]`):\n\
    - Chime in (`chatroom_speak`) ONLY if you spot an error, a critical blind spot, or high-value domain expertise that nobody else has covered.\n\
    - Otherwise (or if `chatroom_speak` is disabled in Muted Observation Mode), DO NOT call `chatroom_speak` and finish with a brief private note or takeaway summary of the discussion.\n\
-{directory_layout_section}</chatroom_protocol>"
+{directory_layout_section}\
+8. SELF-MANAGED SCHEDULED TASKS (`chatroom_schedule`):\n\
+   - When @Human asks you to perform a recurring, daily, or delayed check/task (e.g., \"每天早上 9 点帮我检查某条消息/某个仓库\", \"每小时巡检一次\", \"30 分钟后提醒我\"), call `chatroom_schedule` (`action: \"create\" | \"list\" | \"update\" | \"pause\" | \"resume\" | \"delete\"`) to manage your own scheduled tasks.\n\
+   - When a scheduled task triggers (`<scheduled_task_trigger ...>`), you will be woken up in your private session with the `task_prompt` you configured. Execute the required tools/checks first, and call `chatroom_speak` if you need to report findings to @Human.\n\
+</chatroom_protocol>"
                     )
                 };
 
@@ -411,6 +433,75 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                                 }
                             },
                             "required": ["name"]
+                        }
+                    }));
+                }
+
+                if !cfg.is_manager {
+                    tools.push(json!({
+                        "enabled": true,
+                        "name": "chatroom_schedule",
+                        "description": "Create, list, update, pause, resume, or delete your own scheduled/recurring tasks in this chatroom (e.g. daily fixed-time checks, interval polling, one-shot delayed reminders, or cron jobs). When the scheduled time arrives, you will be automatically woken up with your `task_prompt`.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["create", "list", "update", "pause", "resume", "delete"],
+                                    "description": "Operation to perform on your scheduled tasks."
+                                },
+                                "schedule_id": {
+                                    "type": "string",
+                                    "description": "Target schedule ID (required for 'update', 'pause', 'resume', 'delete')."
+                                },
+                                "title": {
+                                    "type": "string",
+                                    "description": "Concise human-readable title for the scheduled task (required for 'create')."
+                                },
+                                "task_prompt": {
+                                    "type": "string",
+                                    "description": "Detailed instructions that will be sent to your session when the schedule triggers (required for 'create', e.g. 'Check message #12 or run script X, and call chatroom_speak to report to @Human')."
+                                },
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["daily", "interval", "once", "cron"],
+                                    "description": "Schedule type (required for 'create'): 'daily' (fixed time every day or selected weekdays), 'interval' (every N seconds, min 60), 'once' (single delayed/timestamp execution), or 'cron' (5-field cron expression)."
+                                },
+                                "daily_time": {
+                                    "type": "string",
+                                    "description": "24-hour time 'HH:MM' for kind='daily' (e.g. '09:00', '18:30')."
+                                },
+                                "weekdays": {
+                                    "type": "array",
+                                    "items": { "type": "integer" },
+                                    "description": "Optional weekday filter for kind='daily': 1=Monday .. 7=Sunday (e.g. [1,2,3,4,5] for workdays; omit or empty for every day)."
+                                },
+                                "interval_seconds": {
+                                    "type": "integer",
+                                    "description": "Interval in seconds for kind='interval' (minimum 60, e.g. 3600 for hourly)."
+                                },
+                                "delay_seconds": {
+                                    "type": "integer",
+                                    "description": "Relative delay in seconds from now for kind='once' (e.g. 1800 for 30 minutes later)."
+                                },
+                                "once_at": {
+                                    "type": "string",
+                                    "description": "Target datetime for kind='once' (e.g. '2026-11-11T09:00:00+08:00' or '2026-11-11 09:00')."
+                                },
+                                "cron_expr": {
+                                    "type": "string",
+                                    "description": "Standard 5-field cron expression ('min hour dom month dow') for kind='cron' (e.g. '0 9 * * 1-5')."
+                                },
+                                "timezone_offset_minutes": {
+                                    "type": "integer",
+                                    "description": "Timezone offset from UTC in minutes (default 480 = UTC+8 Asia/Shanghai)."
+                                },
+                                "max_runs": {
+                                    "type": "integer",
+                                    "description": "Optional maximum number of executions before auto-disabling."
+                                }
+                            },
+                            "required": ["action"]
                         }
                     }));
                 }
@@ -614,6 +705,51 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                             },
                         };
 
+                        Ok(json!({ "action": "continue", "payload": result }).to_string())
+                    }
+                    "chatroom_schedule" => {
+                        let mut payload = if call.arguments.is_object() {
+                            call.arguments
+                        } else {
+                            json!({})
+                        };
+                        if let Some(obj) = payload.as_object_mut() {
+                            obj.insert("room_id".to_string(), json!(cfg.room_id));
+                            obj.insert("agent_id".to_string(), json!(cfg.agent_id));
+                        }
+                        let schedule_url = cfg.resolve_schedule_url();
+                        if schedule_url.is_empty() {
+                            let res = ToolResult {
+                                success: false,
+                                output: "chatroom_schedule_url is not configured".to_string(),
+                                error: Some("missing_schedule_url".to_string()),
+                            };
+                            return Ok(json!({ "action": "continue", "payload": res }).to_string());
+                        }
+                        let body_bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+                        let result = match post_json_via_wasi_http(
+                            &schedule_url,
+                            &cfg.agent_token,
+                            &body_bytes,
+                        ) {
+                            Ok((status, resp_body)) if (200..300).contains(&status) => ToolResult {
+                                success: true,
+                                output: resp_body,
+                                error: None,
+                            },
+                            Ok((status, resp_body)) => ToolResult {
+                                success: false,
+                                output: format!(
+                                    "Schedule operation failed (HTTP {status}): {resp_body}"
+                                ),
+                                error: Some(format!("HTTP {status}: {resp_body}")),
+                            },
+                            Err(err) => ToolResult {
+                                success: false,
+                                output: format!("Failed to reach chatroom server: {err}"),
+                                error: Some(err),
+                            },
+                        };
                         Ok(json!({ "action": "continue", "payload": result }).to_string())
                     }
                     other => Err(format!("unknown tool: {other}")),
@@ -1133,9 +1269,6 @@ fn wasi_put_file_range(
     headers
         .append("content-type", b"application/octet-stream")
         .map_err(|e| format!("{e:?}"))?;
-    headers
-        .append("content-length", len.to_string().as_bytes())
-        .map_err(|e| format!("{e:?}"))?;
     if !upload_token.is_empty() {
         headers
             .append("x-upload-token", upload_token.as_bytes())
@@ -1196,9 +1329,6 @@ fn wasi_post_empty(
 ) -> Result<(), String> {
     let (scheme, authority, path_with_query) = parse_http_url(url)?;
     let headers = Fields::new();
-    headers
-        .append("content-length", body_bytes.len().to_string().as_bytes())
-        .map_err(|e| format!("{e:?}"))?;
     if !token_val.is_empty() {
         headers
             .append(token_header, token_val.as_bytes())

@@ -523,6 +523,14 @@ export const App: React.FC = () => {
               ...prev,
               [ev.agent_id]: ev.activity || '',
             }));
+          } else if (ev.type === 'agent_schedules_updated') {
+            if (inspectedAgentIdRef.current === ev.agent_id) {
+              setInspectorSnap((prev) =>
+                prev && prev.agent.agent_id === ev.agent_id
+                  ? { ...prev, schedules: ev.schedules || [] }
+                  : prev
+              );
+            }
           }
         } catch (err) {
           console.error(err);
@@ -1134,6 +1142,63 @@ export const App: React.FC = () => {
               ? {
                   ...prev,
                   permission_summary: updatedSummary,
+                }
+              : prev
+          );
+        }}
+        onToggleSchedule={async (agentId, scheduleId, enabled) => {
+          const updated = await apiFetch(
+            `/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`,
+            {
+              method: 'PATCH',
+              body: JSON.stringify({ enabled }),
+            }
+          );
+          setInspectorSnap((prev) =>
+            prev && prev.agent.agent_id === agentId
+              ? {
+                  ...prev,
+                  schedules: (prev.schedules || []).map((s) =>
+                    s.schedule_id === scheduleId ? updated : s
+                  ),
+                }
+              : prev
+          );
+        }}
+        onRunScheduleNow={async (agentId, scheduleId) => {
+          const updated = await apiFetch(
+            `/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}/run`,
+            {
+              method: 'POST',
+            }
+          );
+          setInspectorSnap((prev) =>
+            prev && prev.agent.agent_id === agentId
+              ? {
+                  ...prev,
+                  schedules: (prev.schedules || []).map((s) =>
+                    s.schedule_id === scheduleId ? updated : s
+                  ),
+                }
+              : prev
+          );
+        }}
+        onDeleteSchedule={async (agentId, scheduleId) => {
+          const remaining = await apiFetch(
+            `/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`,
+            {
+              method: 'DELETE',
+            }
+          );
+          setInspectorSnap((prev) =>
+            prev && prev.agent.agent_id === agentId
+              ? {
+                  ...prev,
+                  schedules: Array.isArray(remaining)
+                    ? remaining
+                    : (prev.schedules || []).filter(
+                        (s) => s.schedule_id !== scheduleId
+                      ),
                 }
               : prev
           );

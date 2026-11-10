@@ -2,11 +2,13 @@ pub mod coordinator;
 pub mod extensions;
 pub mod http;
 pub mod manager;
+pub mod schedule;
 pub mod store;
 pub mod types;
 
 pub use coordinator::*;
 pub use extensions::*;
 pub use http::*;
+pub use schedule::*;
 pub use store::*;
 pub use types::*;

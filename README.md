@@ -38,9 +38,10 @@
 ### 1.4 私密内部思考 vs 公开群聊发言 + 协议提示词沉降
 - **1 Agent $\leftrightarrow$ 1 `ragents` `Session`**：Agent 内部的思维链、Shell 命令执行与文件读写完全隔离在其私有 Session 中，仅当显式调用 `chatroom_speak` 时才向聊天室投递公开消息。
 - **发言协议沉降于 `<chatroom_protocol>` System Prompt**：完整的 `@Human` 与 `@Agent` 点名回复/终止规则统一注入在 `<chatroom_protocol>` 系统提示词中，日常消息体保持干净，不重复拼接长串协议指令（仅提供可选 `prompt_hint` 开关，默认关闭，供指令遵循较弱的小模型按需开启单行简短提醒）。
-- **排队消息撤回与纯续跑重试（Pure Continuation Retry）**：
+- **排队消息撤回、纯续跑重试与自治定时任务（`chatroom_schedule`）**：
   - 支持一键撤回尚在排队（未送入模型）的未读消息并自动回填输入框。
   - 当任务因网络或节点中断失败时，点击「直接重试」仅重发未读队列或提交纯 `Continuation` 激活（由 `api-server` 自动闭合未完成的 `FunctionCallOutput`），**绝不向历史上下文注入伪造的人工提示文本**。
+  - 房间内每个工作 Agent 均具备 `chatroom_schedule` 工具，可根据用户自然语言指令自主创建、查看、暂停、恢复或删除定时任务（支持 `daily` 每日固定时间、`interval` 间隔轮询、`once` 单次延时、`cron` 5 段式表达式）；到点后自动携带 `<scheduled_task_trigger>` 唤醒该 Agent 的私有 Session 执行并在透视面板支持人类一键执行/暂停/删除。
 
 ### 1.5 全栈可插拔扩展架构（Backend API Gateway + Frontend UI Slots）
 - 后端提供 `ChatServerExtension` 与 `/api/v1/ext/{plugin_id}/*` 路由网关，前端提供 `ExtensionSlotHost` 动态加载 ES Module 插件：

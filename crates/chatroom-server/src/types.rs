@@ -1,3 +1,4 @@
+use crate::schedule::AgentSchedule;
 use chrono::{DateTime, Utc};
 use openresponses_rust::{ReasoningConfig, ReasoningEffort, ReasoningSummary};
 use ragents_protocol::*;
@@ -314,6 +315,8 @@ pub struct RoomAgentPublic {
     pub active_activation_id: Option<ActivationId>,
     #[serde(default)]
     pub token_usage: AgentTokenUsage,
+    #[serde(default)]
+    pub active_schedule_count: u32,
     pub created_by: String,
     pub created_at: DateTime<Utc>,
 }
@@ -341,6 +344,7 @@ impl From<RoomAgent> for RoomAgentPublic {
             runtime_state: a.runtime_state,
             active_activation_id: a.active_activation_id,
             token_usage: AgentTokenUsage::default(),
+            active_schedule_count: 0,
             created_by: a.created_by,
             created_at: a.created_at,
         }
@@ -539,6 +543,11 @@ pub enum ChatroomEvent {
         agent_id: String,
         activity: String,
     },
+    AgentSchedulesUpdated {
+        room_id: String,
+        agent_id: String,
+        schedules: Vec<AgentSchedule>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -588,6 +597,8 @@ pub struct InspectorResponse {
     pub message_queues: AgentMessageQueueSnapshot,
     #[serde(default)]
     pub permission_summary: AgentPermissionSummary,
+    #[serde(default)]
+    pub schedules: Vec<AgentSchedule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

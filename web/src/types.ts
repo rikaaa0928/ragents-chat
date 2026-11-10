@@ -86,6 +86,7 @@ export interface RoomAgent {
   active_activation_id?: string | null;
   session_chain: SessionChainEntry[];
   token_usage?: AgentTokenUsage;
+  active_schedule_count?: number;
 }
 
 export type SendShortcutMode = 'enter_send' | 'shift_enter_send';
@@ -195,6 +196,23 @@ export interface AgentPermissionSummary {
   rules: PermissionRuleEntry[];
 }
 
+export interface AgentSchedule {
+  schedule_id: string;
+  room_id: string;
+  agent_id: string;
+  title: string;
+  task_prompt: string;
+  schedule_summary: string;
+  enabled: boolean;
+  max_runs?: number | null;
+  run_count: number;
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+  last_status?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface InspectorSnapshot {
   agent: RoomAgent;
   selected_session_id: string;
@@ -217,6 +235,7 @@ export interface InspectorSnapshot {
   events: InspectorEventEnvelope[];
   message_queues?: AgentMessageQueueSnapshot;
   permission_summary?: AgentPermissionSummary;
+  schedules?: AgentSchedule[];
 }
 
 export interface ClusterNode {

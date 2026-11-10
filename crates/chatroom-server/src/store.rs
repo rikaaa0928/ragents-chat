@@ -1,3 +1,4 @@
+use crate::schedule::*;
 use crate::types::*;
 use chrono::{DateTime, Utc};
 use ragents_protocol::*;
@@ -152,7 +153,26 @@ impl ChatroomStore {
                  max_approval_scope      TEXT NOT NULL DEFAULT 'node',
                  created_at              TEXT NOT NULL,
                  updated_at              TEXT NOT NULL
-             );",
+             );
+
+             CREATE TABLE IF NOT EXISTS agent_schedules (
+                 schedule_id             TEXT PRIMARY KEY,
+                 room_id                 TEXT NOT NULL REFERENCES rooms(room_id) ON DELETE CASCADE,
+                 agent_id                TEXT NOT NULL REFERENCES room_agents(agent_id) ON DELETE CASCADE,
+                 title                   TEXT NOT NULL,
+                 task_prompt             TEXT NOT NULL,
+                 schedule_spec_json      TEXT NOT NULL,
+                 enabled                 INTEGER NOT NULL DEFAULT 1,
+                 max_runs                INTEGER,
+                 run_count               INTEGER NOT NULL DEFAULT 0,
+                 last_run_at_ms          INTEGER,
+                 next_run_at_ms          INTEGER,
+                 last_status             TEXT,
+                 created_at              TEXT NOT NULL,
+                 updated_at              TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_agent_schedules_agent ON agent_schedules(agent_id);
+             CREATE INDEX IF NOT EXISTS idx_agent_schedules_due ON agent_schedules(enabled, next_run_at_ms);",
         )?;
 
         let default_mgr_prompt = "You are @Manager, the AI Chatroom Butler and Team Architect. \
@@ -1088,6 +1108,193 @@ You manage the room's specialist agent roster using your tools:\n\
         }
         Ok(existing)
     }
+
+    pub fn insert_agent_schedule(
+        &self,
+        schedule: AgentSchedule,
+    ) -> Result<AgentSchedule, ChatStoreError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let spec_json = serde_json::to_string(&schedule.spec)?;
+        let last_ms = schedule.last_run_at.map(|d| d.timestamp_millis());
+        let next_ms = schedule.next_run_at.map(|d| d.timestamp_millis());
+        conn.execute(
+            "INSERT INTO agent_schedules (
+                schedule_id, room_id, agent_id, title, task_prompt, schedule_spec_json,
+                enabled, max_runs, run_count, last_run_at_ms, next_run_at_ms, last_status,
+                created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                schedule.schedule_id,
+                schedule.room_id,
+                schedule.agent_id,
+                schedule.title,
+                schedule.task_prompt,
+                spec_json,
+                if schedule.enabled { 1i64 } else { 0i64 },
+                schedule.max_runs.map(|v| v as i64),
+                schedule.run_count as i64,
+                last_ms,
+                next_ms,
+                schedule.last_status,
+                schedule.created_at.to_rfc3339(),
+                schedule.updated_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(schedule)
+    }
+
+    pub fn get_agent_schedule(
+        &self,
+        schedule_id: &str,
+    ) -> Result<Option<AgentSchedule>, ChatStoreError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.query_row(
+            "SELECT schedule_id, room_id, agent_id, title, task_prompt, schedule_spec_json,
+                    enabled, max_runs, run_count, last_run_at_ms, next_run_at_ms, last_status,
+                    created_at, updated_at
+             FROM agent_schedules WHERE schedule_id = ?1",
+            params![schedule_id],
+            map_schedule_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn list_agent_schedules(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<AgentSchedule>, ChatStoreError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT schedule_id, room_id, agent_id, title, task_prompt, schedule_spec_json,
+                    enabled, max_runs, run_count, last_run_at_ms, next_run_at_ms, last_status,
+                    created_at, updated_at
+             FROM agent_schedules WHERE agent_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![agent_id], map_schedule_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn count_active_agent_schedules(&self, agent_id: &str) -> Result<u32, ChatStoreError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM agent_schedules WHERE agent_id = ?1 AND enabled = 1",
+            params![agent_id],
+            |r| r.get(0),
+        )?;
+        Ok(count.max(0) as u32)
+    }
+
+    pub fn list_due_agent_schedules(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<AgentSchedule>, ChatStoreError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT schedule_id, room_id, agent_id, title, task_prompt, schedule_spec_json,
+                    enabled, max_runs, run_count, last_run_at_ms, next_run_at_ms, last_status,
+                    created_at, updated_at
+             FROM agent_schedules
+             WHERE enabled = 1 AND next_run_at_ms IS NOT NULL AND next_run_at_ms <= ?1
+             ORDER BY next_run_at_ms ASC",
+        )?;
+        let rows = stmt.query_map(params![now_ms], map_schedule_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn update_agent_schedule(
+        &self,
+        schedule: &AgentSchedule,
+    ) -> Result<AgentSchedule, ChatStoreError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let spec_json = serde_json::to_string(&schedule.spec)?;
+        let last_ms = schedule.last_run_at.map(|d| d.timestamp_millis());
+        let next_ms = schedule.next_run_at.map(|d| d.timestamp_millis());
+        let changed = conn.execute(
+            "UPDATE agent_schedules
+             SET title = ?1, task_prompt = ?2, schedule_spec_json = ?3,
+                 enabled = ?4, max_runs = ?5, run_count = ?6,
+                 last_run_at_ms = ?7, next_run_at_ms = ?8, last_status = ?9, updated_at = ?10
+             WHERE schedule_id = ?11",
+            params![
+                schedule.title,
+                schedule.task_prompt,
+                spec_json,
+                if schedule.enabled { 1i64 } else { 0i64 },
+                schedule.max_runs.map(|v| v as i64),
+                schedule.run_count as i64,
+                last_ms,
+                next_ms,
+                schedule.last_status,
+                schedule.updated_at.to_rfc3339(),
+                schedule.schedule_id,
+            ],
+        )?;
+        if changed == 0 {
+            return Err(ChatStoreError::NotFound(format!(
+                "schedule {}",
+                schedule.schedule_id
+            )));
+        }
+        Ok(schedule.clone())
+    }
+
+    pub fn delete_agent_schedule(
+        &self,
+        schedule_id: &str,
+        agent_id: &str,
+    ) -> Result<Option<AgentSchedule>, ChatStoreError> {
+        let existing = self.get_agent_schedule(schedule_id)?;
+        let Some(sched) = existing else {
+            return Ok(None);
+        };
+        if sched.agent_id != agent_id {
+            return Ok(None);
+        }
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        conn.execute(
+            "DELETE FROM agent_schedules WHERE schedule_id = ?1 AND agent_id = ?2",
+            params![schedule_id, agent_id],
+        )?;
+        Ok(Some(sched))
+    }
+}
+
+fn map_schedule_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentSchedule> {
+    let spec_str: String = r.get(5)?;
+    let spec: AgentScheduleSpec = serde_json::from_str(&spec_str).unwrap_or(
+        AgentScheduleSpec::Interval {
+            interval_seconds: 3600,
+        },
+    );
+    let summary = format_schedule_summary(&spec);
+    let last_ms: Option<i64> = r.get(9)?;
+    let next_ms: Option<i64> = r.get(10)?;
+    Ok(AgentSchedule {
+        schedule_id: r.get(0)?,
+        room_id: r.get(1)?,
+        agent_id: r.get(2)?,
+        title: r.get(3)?,
+        task_prompt: r.get(4)?,
+        spec,
+        schedule_summary: summary,
+        enabled: r.get::<_, i64>(6)? != 0,
+        max_runs: r.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+        run_count: r.get::<_, i64>(8).unwrap_or(0) as u64,
+        last_run_at: last_ms.and_then(DateTime::from_timestamp_millis),
+        next_run_at: next_ms.and_then(DateTime::from_timestamp_millis),
+        last_status: r.get(11)?,
+        created_at: parse_dt(&r.get::<_, String>(12)?),
+        updated_at: parse_dt(&r.get::<_, String>(13)?),
+    })
 }
 
 fn parse_dt(s: &str) -> DateTime<Utc> {

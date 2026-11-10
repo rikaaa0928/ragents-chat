@@ -165,14 +165,76 @@ impl ModelBackend for ChatroomTestModelBackend {
             }
         }
 
-        // 2. If the previous step was a `chatroom_speak` tool call output, finish the turn cleanly
+        // 2. If the previous step was a tool call output:
+        //    - If it was `chatroom_schedule` create output, now call `chatroom_speak` to confirm to @Human!
+        //    - Otherwise finish the turn cleanly.
         if last_item_is_tool_output {
+            if last_tool_output_text.contains("sched_") {
+                return Ok(make_openresponses_resource(
+                    "resp_sched_confirm",
+                    "gpt-4.1-mini",
+                    vec![Item::FunctionCall {
+                        id: Some("fc_sched_speak".into()),
+                        call_id: "call_sched_speak_1".into(),
+                        name: "chatroom_speak".into(),
+                        arguments: json!({
+                            "content": "已为您设置每天 09:00 的定时任务（查看指定消息）！",
+                            "mentions": ["Human"]
+                        })
+                        .to_string(),
+                        status: Some(FunctionCallStatus::Completed),
+                    }],
+                    None,
+                ));
+            }
             return Ok(make_openresponses_resource(
                 "resp_done",
                 "gpt-4.1-mini",
                 vec![Item::assistant_message(
                     "Private inner note: finished speaking to chatroom.",
                 )],
+                None,
+            ));
+        }
+
+        // 2b. Test `chatroom_schedule` creation & scheduled task wakeup execution:
+        if latest_user.contains("CREATE_DAILY_SCHEDULE") {
+            return Ok(make_openresponses_resource(
+                "resp_sched_create",
+                "gpt-4.1-mini",
+                vec![Item::FunctionCall {
+                    id: Some("fc_sched_create".into()),
+                    call_id: "call_sched_create_1".into(),
+                    name: "chatroom_schedule".into(),
+                    arguments: json!({
+                        "action": "create",
+                        "title": "每日09:00查看第1条消息",
+                        "kind": "daily",
+                        "daily_time": "09:00",
+                        "task_prompt": "请查看聊天室第 #1 条消息并调用 chatroom_speak 向 @Human 汇报巡检结果。"
+                    })
+                    .to_string(),
+                    status: Some(FunctionCallStatus::Completed),
+                }],
+                None,
+            ));
+        }
+
+        if latest_user.contains("<scheduled_task_trigger") {
+            return Ok(make_openresponses_resource(
+                "resp_sched_triggered",
+                "gpt-4.1-mini",
+                vec![Item::FunctionCall {
+                    id: Some("fc_sched_run_speak".into()),
+                    call_id: "call_sched_run_speak_1".into(),
+                    name: "chatroom_speak".into(),
+                    arguments: json!({
+                        "content": "⏰ 定时任务已触发执行：已为您查看指定消息，一切正常！",
+                        "mentions": ["Human"]
+                    })
+                    .to_string(),
+                    status: Some(FunctionCallStatus::Completed),
+                }],
                 None,
             ));
         }
@@ -722,6 +784,121 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         .await
         .unwrap();
     assert_eq!(mgr_rm_msg.sender_kind, SenderKind::Manager);
+
+    // 13. Test Agent Self-Managed Scheduled Task (`chatroom_schedule` create -> inspector list -> run now -> agent speaks)
+    let _ = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/messages"))
+        .bearer_auth(chat_auth_token)
+        .json(&PostMessageRequest {
+            sender_name: "Alice".to_string(),
+            content: "CREATE_DAILY_SCHEDULE 每天早上 9 点帮我查看第 1 条消息".to_string(),
+            mentions: vec!["Assistant".to_string()],
+            visible_to: vec![],
+            reply_to_seq: None,
+            is_realtime: false,
+        })
+        .send()
+        .await
+        .unwrap();
+
+    let mut schedule_created = false;
+    for _ in 0..50 {
+        let detail: RoomDetailResponse = http
+            .get(format!("{chat_base}/api/v1/rooms/{room_id}"))
+            .bearer_auth(chat_auth_token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if detail
+            .messages
+            .iter()
+            .any(|m| m.content.contains("已为您设置每天 09:00 的定时任务"))
+        {
+            schedule_created = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        schedule_created,
+        "Agent must create schedule via chatroom_schedule tool and confirm via chatroom_speak"
+    );
+
+    let schedules: Vec<AgentSchedule> = http
+        .get(format!("{chat_base}/api/v1/agents/{assistant_id}/schedules"))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(schedules.len(), 1);
+    assert_eq!(schedules[0].title, "每日09:00查看第1条消息");
+    assert!(schedules[0].enabled);
+
+    // Wait until Assistant is Idle, then trigger the schedule via `/run`
+    for _ in 0..30 {
+        let d: RoomDetailResponse = http
+            .get(format!("{chat_base}/api/v1/rooms/{room_id}"))
+            .bearer_auth(chat_auth_token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if d.agents
+            .iter()
+            .all(|a| a.runtime_state == AgentRuntimeState::Idle)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let triggered_sched: AgentSchedule = http
+        .post(format!(
+            "{chat_base}/api/v1/agents/{assistant_id}/schedules/{}/run",
+            schedules[0].schedule_id
+        ))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(triggered_sched.run_count, 1);
+
+    let mut schedule_fired_msg = false;
+    for _ in 0..50 {
+        let detail: RoomDetailResponse = http
+            .get(format!("{chat_base}/api/v1/rooms/{room_id}"))
+            .bearer_auth(chat_auth_token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if detail
+            .messages
+            .iter()
+            .any(|m| m.content.contains("定时任务已触发执行"))
+        {
+            schedule_fired_msg = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        schedule_fired_msg,
+        "Triggered scheduled task must wake up agent with <scheduled_task_trigger> and post report via chatroom_speak"
+    );
     assert!(mgr_rm_msg.content.contains("移出本群"));
 
     let detail_after_remove: RoomDetailResponse = http
