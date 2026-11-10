@@ -61,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
             enabled: true,
             config: serde_json::json!({}),
             allowed_dirs: vec![],
+            filter_env: vec![],
         },
         ExtensionSpec {
             name: "skills".to_string(),
@@ -68,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
             enabled: true,
             config: serde_json::json!({}),
             allowed_dirs: vec![],
+            filter_env: vec![],
         },
         ExtensionSpec {
             name: "shell".to_string(),
@@ -75,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
             enabled: true,
             config: serde_json::json!({}),
             allowed_dirs: vec![],
+            filter_env: vec![],
         },
         ExtensionSpec {
             name: "file_editor".to_string(),
@@ -82,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
             enabled: true,
             config: serde_json::json!({}),
             allowed_dirs: vec![],
+            filter_env: vec![],
         },
         ExtensionSpec {
             name: "image_viewer".to_string(),
@@ -89,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
             enabled: true,
             config: serde_json::json!({}),
             allowed_dirs: vec![],
+            filter_env: vec![],
         },
         ExtensionSpec {
             name: "compaction".to_string(),
@@ -100,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
                 "keep_recent_tokens": 64000
             }),
             allowed_dirs: vec![],
+            filter_env: vec![],
         },
     ];
 

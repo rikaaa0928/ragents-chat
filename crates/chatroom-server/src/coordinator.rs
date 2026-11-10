@@ -1822,6 +1822,7 @@ impl RoomCoordinator {
                 "agent_token": agent_secret_token,
             }),
             allowed_dirs: vec![],
+            filter_env: vec!["RAGENTS_CHAT_AUTH_TOKEN".to_string()],
         });
 
         let mut labels = BTreeMap::new();
@@ -2072,6 +2073,7 @@ impl RoomCoordinator {
                 "agent_token": agent_secret_token,
             }),
             allowed_dirs: vec![],
+            filter_env: vec!["RAGENTS_CHAT_AUTH_TOKEN".to_string()],
         });
 
         let mut labels = BTreeMap::new();
