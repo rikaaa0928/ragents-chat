@@ -6,7 +6,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::Utc;
 use futures::StreamExt;
-use ragents_protocol::{NodeFsOp, NodeFsRequest, NodeFsZone, NodeId, NodePhase, SchedulingMode};
+use ragents_protocol::{NodeExtensionCallRequest, NodeId, NodePhase, SchedulingMode};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
@@ -271,24 +271,67 @@ impl WorkspaceFsExtension {
         );
     }
 
-    fn make_cache_key(node_id: &NodeId, zone: NodeFsZone, rel_path: &str) -> (String, String) {
-        let zone_str = match zone {
-            NodeFsZone::Workspace => "workspace".to_string(),
-            NodeFsZone::Tmp => "tmp".to_string(),
-        };
+    fn make_cache_key(node_id: &NodeId, zone_str: &str, rel_path: &str) -> (String, String) {
         let clean = rel_path.trim().trim_start_matches('/');
         let key = format!("{}|{}|{}", node_id.as_str(), zone_str, clean);
-        (key, zone_str)
+        (key, zone_str.to_string())
+    }
+
+    async fn call_node_fs_extension(
+        &self,
+        node_id: &NodeId,
+        zone_str: &str,
+        workspace_path: Option<String>,
+        tmp_dir: Option<String>,
+        mut payload: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let primary_root = if zone_str == "workspace" {
+            workspace_path.clone()
+        } else {
+            tmp_dir.clone().or_else(|| workspace_path.clone())
+        };
+        let mut preopen_dirs = Vec::new();
+        if let Some(ref p) = primary_root {
+            preopen_dirs.push(p.clone());
+        }
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("zone".to_string(), json!(zone_str));
+            obj.insert("workspace_path".to_string(), json!(workspace_path));
+            obj.insert("tmp_dir".to_string(), json!(tmp_dir));
+        }
+        let resp = self
+            .coordinator
+            .ragents_client
+            .node_extension_call(
+                node_id,
+                &NodeExtensionCallRequest {
+                    extension: "chatroom".to_string(),
+                    config: json!({
+                        "primary_root": primary_root,
+                        "preopen_dirs": preopen_dirs,
+                        "create_preopen_dirs": zone_str != "workspace",
+                    }),
+                    payload,
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.ok {
+            return Err(resp
+                .error
+                .unwrap_or_else(|| "node extension call failed".to_string()));
+        }
+        Ok(resp.output)
     }
 
     fn find_valid_staged(
         &self,
         node_id: &NodeId,
-        zone: NodeFsZone,
+        zone_str: &str,
         rel_path: &str,
     ) -> Option<Arc<StagedFileEntry>> {
         self.purge_expired();
-        let (key, _) = Self::make_cache_key(node_id, zone, rel_path);
+        let (key, _) = Self::make_cache_key(node_id, zone_str, rel_path);
         let entry = self.staged_by_key.lock().unwrap().get(&key).cloned()?;
         let phase = entry.phase.lock().unwrap().clone();
         match phase {
@@ -307,17 +350,47 @@ impl WorkspaceFsExtension {
     async fn start_or_get_stage(
         &self,
         node_id: &NodeId,
-        zone: NodeFsZone,
+        zone_str: &str,
         workspace_path: Option<String>,
         tmp_dir_for_zone: Option<String>,
         rel_path: &str,
     ) -> Result<Arc<StagedFileEntry>, (StatusCode, String)> {
-        if let Some(existing) = self.find_valid_staged(node_id, zone, rel_path) {
+        if let Some(existing) = self.find_valid_staged(node_id, zone_str, rel_path) {
             return Ok(existing);
         }
 
         let clean_rel = rel_path.trim().trim_start_matches('/').to_string();
-        let (cache_key, zone_str) = Self::make_cache_key(node_id, zone, &clean_rel);
+        let stat_out = self
+            .call_node_fs_extension(
+                node_id,
+                zone_str,
+                workspace_path.clone(),
+                tmp_dir_for_zone.clone(),
+                json!({
+                    "op": "stat_file",
+                    "rel_path": clean_rel,
+                }),
+            )
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+
+        if !stat_out.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let err = stat_out
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("file not found")
+                .to_string();
+            return Err((StatusCode::NOT_FOUND, err));
+        }
+
+        let total_size = stat_out.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+        let mime_type = stat_out
+            .get("mime_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+
+        let (cache_key, zone_label) = Self::make_cache_key(node_id, zone_str, &clean_rel);
         let stage_id = format!("stg_{}", Uuid::now_v7().simple());
         let upload_token = format!(
             "stgtok_{}{}",
@@ -337,10 +410,10 @@ impl WorkspaceFsExtension {
             stage_id: stage_id.clone(),
             cache_key: cache_key.clone(),
             node_id: node_id.as_str().to_string(),
-            zone_str,
+            zone_str: zone_label.clone(),
             rel_path: clean_rel.clone(),
-            mime_type: Mutex::new("application/octet-stream".to_string()),
-            total_bytes: AtomicU64::new(0),
+            mime_type: Mutex::new(mime_type),
+            total_bytes: AtomicU64::new(total_size),
             uploaded_bytes: AtomicU64::new(0),
             phase: Mutex::new(StagePhase::Uploading),
             error: Mutex::new(None),
@@ -362,46 +435,64 @@ impl WorkspaceFsExtension {
                 .insert(cache_key.clone(), entry.clone());
         }
 
-        let fs_resp = match self
-            .coordinator
-            .ragents_client
-            .node_fs_query(
-                node_id,
-                &NodeFsRequest {
-                    zone,
-                    workspace_path,
-                    tmp_dir: tmp_dir_for_zone,
-                    op: NodeFsOp::UploadFileToHttp {
-                        rel_path: clean_rel.clone(),
-                        upload_url,
-                        upload_token: Some(upload_token),
-                    },
-                },
-            )
-            .await
-        {
-            Ok(r) if r.ok => r,
-            Ok(r) => {
-                self.staged_by_id.lock().unwrap().remove(&stage_id);
-                self.staged_by_key.lock().unwrap().remove(&cache_key);
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    r.error.unwrap_or_else(|| "file not found".to_string()),
-                ));
-            }
-            Err(e) => {
-                self.staged_by_id.lock().unwrap().remove(&stage_id);
-                self.staged_by_key.lock().unwrap().remove(&cache_key);
-                return Err((StatusCode::BAD_GATEWAY, e.to_string()));
-            }
+        let client = self.coordinator.ragents_client.clone();
+        let nid = node_id.clone();
+        let entry_bg = entry.clone();
+        let primary_root = if zone_label == "workspace" {
+            workspace_path.clone()
+        } else {
+            tmp_dir_for_zone.clone().or_else(|| workspace_path.clone())
         };
-
-        let total_size = fs_resp.size.unwrap_or(0);
-        let mime_type = fs_resp
-            .mime_type
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-        entry.total_bytes.store(total_size, Ordering::Relaxed);
-        *entry.mime_type.lock().unwrap() = mime_type;
+        let mut preopen_dirs = Vec::new();
+        if let Some(ref p) = primary_root {
+            preopen_dirs.push(p.clone());
+        }
+        tokio::spawn(async move {
+            let res = client
+                .node_extension_call(
+                    &nid,
+                    &NodeExtensionCallRequest {
+                        extension: "chatroom".to_string(),
+                        config: json!({
+                            "primary_root": primary_root,
+                            "preopen_dirs": preopen_dirs,
+                            "create_preopen_dirs": false,
+                        }),
+                        payload: json!({
+                            "op": "upload_to_http",
+                            "zone": zone_label,
+                            "workspace_path": workspace_path,
+                            "tmp_dir": tmp_dir_for_zone,
+                            "rel_path": clean_rel,
+                            "upload_url": upload_url,
+                            "upload_token": upload_token,
+                        }),
+                    },
+                )
+                .await;
+            match res {
+                Ok(r) if r.ok && r.output.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) => {}
+                Ok(r) => {
+                    let err = r
+                        .error
+                        .or_else(|| {
+                            r.output
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                        })
+                        .unwrap_or_else(|| "文件从节点上传到服务器失败".to_string());
+                    *entry_bg.phase.lock().unwrap() = StagePhase::Failed;
+                    *entry_bg.error.lock().unwrap() = Some(err);
+                    entry_bg.notify.notify_waiters();
+                }
+                Err(e) => {
+                    *entry_bg.phase.lock().unwrap() = StagePhase::Failed;
+                    *entry_bg.error.lock().unwrap() = Some(e.to_string());
+                    entry_bg.notify.notify_waiters();
+                }
+            }
+        });
 
         Ok(entry)
     }
@@ -471,35 +562,67 @@ impl WorkspaceFsExtension {
         *entry.phase.lock().unwrap() = DistributePhase::Distributing;
         *entry.error.lock().unwrap() = None;
 
-        let resp = self
-            .coordinator
-            .ragents_client
-            .node_fs_query(
-                &entry.node_id,
-                &NodeFsRequest {
-                    zone: NodeFsZone::Tmp,
-                    workspace_path: entry.workspace_path.clone(),
-                    tmp_dir: Some(entry.room_tmp_dir.clone()),
-                    op: NodeFsOp::DownloadFileFromHttp {
-                        rel_path: entry.rel_path.clone(),
-                        download_url,
-                        download_token: Some(entry.distribute_token.clone()),
-                        expected_size: Some(entry.total_bytes),
+        let client = self.coordinator.ragents_client.clone();
+        let entry_bg = entry.clone();
+        tokio::spawn(async move {
+            let primary_root = entry_bg.room_tmp_dir.clone();
+            let res = client
+                .node_extension_call(
+                    &entry_bg.node_id,
+                    &NodeExtensionCallRequest {
+                        extension: "chatroom".to_string(),
+                        config: json!({
+                            "primary_root": primary_root,
+                            "preopen_dirs": [primary_root],
+                            "create_preopen_dirs": true,
+                        }),
+                        payload: json!({
+                            "op": "download_from_http",
+                            "zone": "tmp",
+                            "workspace_path": entry_bg.workspace_path,
+                            "tmp_dir": entry_bg.room_tmp_dir,
+                            "rel_path": entry_bg.rel_path,
+                            "download_url": download_url,
+                            "download_token": entry_bg.distribute_token,
+                            "expected_size": entry_bg.total_bytes,
+                        }),
                     },
-                },
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+                )
+                .await;
+            match res {
+                Ok(r) if r.ok && r.output.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) => {
+                    entry_bg
+                        .distributed_bytes
+                        .store(entry_bg.total_bytes, Ordering::Relaxed);
+                    entry_bg
+                        .completed_at_unix
+                        .store(Utc::now().timestamp() as u64, Ordering::Relaxed);
+                    *entry_bg.phase.lock().unwrap() = DistributePhase::Completed;
+                    *entry_bg.error.lock().unwrap() = None;
+                    entry_bg.notify.notify_waiters();
+                }
+                Ok(r) => {
+                    let err = r
+                        .error
+                        .or_else(|| {
+                            r.output
+                                .get("error")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                        })
+                        .unwrap_or_else(|| "节点拉取分发文件失败".to_string());
+                    *entry_bg.phase.lock().unwrap() = DistributePhase::Failed;
+                    *entry_bg.error.lock().unwrap() = Some(err);
+                    entry_bg.notify.notify_waiters();
+                }
+                Err(e) => {
+                    *entry_bg.phase.lock().unwrap() = DistributePhase::Failed;
+                    *entry_bg.error.lock().unwrap() = Some(e.to_string());
+                    entry_bg.notify.notify_waiters();
+                }
+            }
+        });
 
-        if !resp.ok {
-            let err = resp
-                .error
-                .unwrap_or_else(|| "节点拒绝接收分发文件".to_string());
-            *entry.phase.lock().unwrap() = DistributePhase::Failed;
-            *entry.error.lock().unwrap() = Some(err.clone());
-            entry.notify.notify_waiters();
-            return Err(err);
-        }
         Ok(())
     }
 
@@ -559,8 +682,7 @@ impl WorkspaceFsExtension {
         let expires_at = (Utc::now().timestamp() + STAGE_TTL_SECS) as u64;
 
         // 1. Register in staged_by_id & staged_by_key as Ready immediately so /raw serves from local disk
-        let (cache_key, zone_str) =
-            Self::make_cache_key(node_id, NodeFsZone::Tmp, &target_rel_path);
+        let (cache_key, zone_str) = Self::make_cache_key(node_id, "tmp", &target_rel_path);
         let staged_entry = Arc::new(StagedFileEntry {
             stage_id: stage_id.clone(),
             cache_key: cache_key.clone(),
@@ -1002,15 +1124,15 @@ impl WorkspaceFsExtension {
 
         let (node_id, workspace_path) = self.resolve_room_node_and_workspace(room_id, p).await?;
         let room_tmp_dir = RoomCoordinator::room_tmp_dir(room_id);
-        let zone = if workspace_path.is_none() {
-            NodeFsZone::Tmp
+        let zone_str = if workspace_path.is_none() {
+            "tmp"
         } else {
             match query.get("zone").map(|s| s.as_str()) {
-                Some("tmp") => NodeFsZone::Tmp,
-                _ => NodeFsZone::Workspace,
+                Some("tmp") => "tmp",
+                _ => "workspace",
             }
         };
-        let tmp_dir_for_zone = if zone == NodeFsZone::Tmp {
+        let tmp_dir_for_zone = if zone_str == "tmp" {
             Some(room_tmp_dir.clone())
         } else {
             None
@@ -1020,26 +1142,21 @@ impl WorkspaceFsExtension {
         match (method, action) {
             (Method::GET, "list") => {
                 self.purge_expired();
-                let fs_resp = self
-                    .coordinator
-                    .ragents_client
-                    .node_fs_query(
+                let mut val = self
+                    .call_node_fs_extension(
                         &node_id,
-                        &NodeFsRequest {
-                            zone,
-                            workspace_path,
-                            tmp_dir: tmp_dir_for_zone,
-                            op: NodeFsOp::ListDir { rel_path },
-                        },
+                        zone_str,
+                        workspace_path,
+                        tmp_dir_for_zone,
+                        json!({
+                            "op": "list_dir",
+                            "rel_path": rel_path,
+                        }),
                     )
                     .await
-                    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+                    .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
 
                 let now_unix = Utc::now().timestamp();
-                let zone_str = match zone {
-                    NodeFsZone::Workspace => "workspace",
-                    NodeFsZone::Tmp => "tmp",
-                };
                 let mut staged_files = HashMap::new();
                 {
                     let kmap = self.staged_by_key.lock().unwrap();
@@ -1056,8 +1173,6 @@ impl WorkspaceFsExtension {
                 }
 
                 let distributing_files = self.list_room_distributing(room_id, false);
-                let mut val = serde_json::to_value(&fs_resp)
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
                 if let Some(obj) = val.as_object_mut() {
                     obj.insert(
                         "staged_files".to_string(),
@@ -1097,7 +1212,13 @@ impl WorkspaceFsExtension {
             }
             (Method::POST, "stage") => {
                 let entry = self
-                    .start_or_get_stage(&node_id, zone, workspace_path, tmp_dir_for_zone, &rel_path)
+                    .start_or_get_stage(
+                        &node_id,
+                        zone_str,
+                        workspace_path,
+                        tmp_dir_for_zone,
+                        &rel_path,
+                    )
                     .await?;
                 let dto = entry.to_dto(Utc::now().timestamp());
                 Ok(Json(dto).into_response())
@@ -1110,7 +1231,7 @@ impl WorkspaceFsExtension {
                         return Ok(Json(entry.to_dto(now_unix)).into_response());
                     }
                 }
-                if let Some(entry) = self.find_valid_staged(&node_id, zone, &rel_path) {
+                if let Some(entry) = self.find_valid_staged(&node_id, zone_str, &rel_path) {
                     return Ok(Json(entry.to_dto(now_unix)).into_response());
                 }
                 Err((
@@ -1120,22 +1241,19 @@ impl WorkspaceFsExtension {
             }
             (Method::GET, "read") => {
                 let fs_resp = self
-                    .coordinator
-                    .ragents_client
-                    .node_fs_query(
+                    .call_node_fs_extension(
                         &node_id,
-                        &NodeFsRequest {
-                            zone,
-                            workspace_path,
-                            tmp_dir: tmp_dir_for_zone,
-                            op: NodeFsOp::ReadFile {
-                                rel_path,
-                                max_bytes: Some(512 * 1024),
-                            },
-                        },
+                        zone_str,
+                        workspace_path,
+                        tmp_dir_for_zone,
+                        json!({
+                            "op": "read_file",
+                            "rel_path": rel_path,
+                            "max_bytes": 512 * 1024,
+                        }),
                     )
                     .await
-                    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+                    .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
                 Ok(Json(fs_resp).into_response())
             }
             (Method::GET, "raw") => {
@@ -1154,7 +1272,13 @@ impl WorkspaceFsExtension {
 
                 // All file downloads/previews stage directly to ragents-chat Server disk over HTTP
                 let entry = self
-                    .start_or_get_stage(&node_id, zone, workspace_path, tmp_dir_for_zone, &rel_path)
+                    .start_or_get_stage(
+                        &node_id,
+                        zone_str,
+                        workspace_path,
+                        tmp_dir_for_zone,
+                        &rel_path,
+                    )
                     .await?;
                 let deadline =
                     tokio::time::Instant::now() + std::time::Duration::from_secs(600);

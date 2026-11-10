@@ -13,8 +13,6 @@ services:
       - 0.0.0.0:8080
       - --db
       - /var/lib/ragents/apiserver.sqlite3
-      - --authn-wasm
-      - /etc/ragents/wasm/ragent_authn_extension.wasm
     environment:
       - RAGENTS_AUTH_TOKEN=${RAGENTS_AUTH_TOKEN:-ragents-dev-cluster-token}
     volumes:
