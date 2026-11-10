@@ -194,8 +194,8 @@ impl ModelBackend for ChatroomTestModelBackend {
             ));
         }
 
-        // 4. If muted peek (`(Muted)]`) or no `chatroom_speak` tool available
-        if latest_user.contains("(Muted)]")
+        // 4. If muted peek (`(Muted`) or no `chatroom_speak` tool available
+        if latest_user.contains("(Muted")
             || !tool_names.iter().any(|t| t == "chatroom_speak")
         {
             return Ok(make_openresponses_resource(
@@ -602,7 +602,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             let guard = seen_tools.lock().unwrap();
             for (prompt, tools) in guard.iter() {
                 if prompt.contains("[Chatroom Unread Peek")
-                    && prompt.contains("(Muted)]")
+                    && prompt.contains("(Muted")
                 {
                     assert!(
                         !tools.contains(&"chatroom_speak".to_string()),

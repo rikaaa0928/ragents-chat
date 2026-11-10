@@ -1063,28 +1063,6 @@ impl RoomCoordinator {
                 .await;
         }
 
-        let room_tmp = Self::room_tmp_dir(room_id);
-        let _ = self
-            .ragents_client
-            .node_extension_call(
-                &target_nid,
-                &NodeExtensionCallRequest {
-                    extension: "chatroom".to_string(),
-                    config: serde_json::json!({
-                        "primary_root": room_tmp,
-                        "preopen_dirs": [room_tmp],
-                        "create_preopen_dirs": true,
-                    }),
-                    payload: serde_json::json!({
-                        "op": "list_dir",
-                        "zone": "tmp",
-                        "tmp_dir": room_tmp,
-                        "rel_path": "",
-                    }),
-                },
-            )
-            .await;
-
         if changed {
             if let Some(msg) = reason_banner {
                 self.emit_flow_status(room_id, msg);
