@@ -216,7 +216,11 @@ fn extract_bearer_or_cookie_token(headers: &HeaderMap) -> Option<String> {
         }
     }
 
-    if let Some(cookie_hdr) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) {
+    for cookie_hdr in headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+    {
         for part in cookie_hdr.split(';') {
             if let Some((k, v)) = part.trim().split_once('=') {
                 if k.trim() == AUTH_COOKIE_NAME && !v.trim().is_empty() {
