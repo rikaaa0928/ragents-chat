@@ -202,7 +202,7 @@ fn verify_room_access(
     Ok(room)
 }
 
-fn extract_bearer_or_cookie_token(headers: &HeaderMap) -> Option<String> {
+fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
     if let Some(auth_val) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) {
         let trimmed = auth_val.trim();
         if let Some(rest) = trimmed
@@ -215,7 +215,10 @@ fn extract_bearer_or_cookie_token(headers: &HeaderMap) -> Option<String> {
             }
         }
     }
+    None
+}
 
+fn extract_cookie_token(headers: &HeaderMap) -> Option<String> {
     for cookie_hdr in headers
         .get_all(header::COOKIE)
         .iter()
@@ -229,8 +232,11 @@ fn extract_bearer_or_cookie_token(headers: &HeaderMap) -> Option<String> {
             }
         }
     }
-
     None
+}
+
+fn extract_bearer_or_cookie_token(headers: &HeaderMap) -> Option<String> {
+    extract_bearer_token(headers).or_else(|| extract_cookie_token(headers))
 }
 
 async fn handle_index_html() -> Html<&'static str> {
@@ -328,7 +334,7 @@ async fn handle_extension_gateway(
     body: axum::body::Body,
 ) -> Result<Response, ChatApiError> {
     let principal = verify_user_auth(&state, &headers).ok();
-    state
+    let mut resp = state
         .extensions
         .dispatch_http(
             &plugin_id,
@@ -340,7 +346,23 @@ async fn handle_extension_gateway(
             body,
         )
         .await
-        .map_err(|(code, msg)| ChatApiError::Http(code, msg))
+        .map_err(|(code, msg)| ChatApiError::Http(code, msg))?;
+
+    if principal.is_some() {
+        if let Some(bearer_tok) = extract_bearer_token(&headers) {
+            if extract_cookie_token(&headers).as_deref() != Some(bearer_tok.as_str()) {
+                let cookie = format!(
+                    "{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000",
+                    AUTH_COOKIE_NAME, bearer_tok
+                );
+                if let Ok(val) = header::HeaderValue::from_str(&cookie) {
+                    resp.headers_mut().append(header::SET_COOKIE, val);
+                }
+            }
+        }
+    }
+
+    Ok(resp)
 }
 
 #[derive(Serialize)]
