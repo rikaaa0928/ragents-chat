@@ -59,6 +59,8 @@ pub fn build_chat_router(state: ChatServerState) -> Router {
             "/api/v1/settings/manager",
             get(handle_get_manager_settings).put(handle_update_manager_settings),
         )
+        .route("/api/v1/models", get(handle_list_models))
+        .route("/api/v1/models/refresh", post(handle_refresh_models))
         .route(
             "/api/v1/rooms",
             get(handle_list_rooms).post(handle_create_room),
@@ -369,6 +371,44 @@ async fn handle_extension_gateway(
 struct ManagerSettingsWithClusterResponse {
     settings: ManagerSettings,
     cluster_nodes: Vec<Node>,
+    cluster_models: ClusterModelsResponse,
+}
+
+fn filter_cluster_models_for_principal(
+    mut resp: ClusterModelsResponse,
+    principal: &ChatPrincipal,
+) -> ClusterModelsResponse {
+    if principal.is_admin {
+        return resp;
+    }
+    resp.models.retain_mut(|m| {
+        m.available_on_nodes
+            .retain(|nid| principal.can_access_node(Some(nid.as_str())));
+        !m.available_on_nodes.is_empty() || m.source != ClusterModelSource::NodeLocal
+    });
+    resp
+}
+
+async fn handle_list_models(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+) -> Result<Json<ClusterModelsResponse>, ChatApiError> {
+    let principal = verify_user_auth(&state, &headers)?;
+    let catalog = state.coordinator.ragents_client.list_models().await?;
+    Ok(Json(filter_cluster_models_for_principal(
+        catalog, &principal,
+    )))
+}
+
+async fn handle_refresh_models(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+) -> Result<Json<ClusterModelsResponse>, ChatApiError> {
+    let principal = verify_user_auth(&state, &headers)?;
+    let catalog = state.coordinator.ragents_client.refresh_models().await?;
+    Ok(Json(filter_cluster_models_for_principal(
+        catalog, &principal,
+    )))
 }
 
 async fn handle_get_manager_settings(
@@ -386,9 +426,17 @@ async fn handle_get_manager_settings(
         .into_iter()
         .filter(|n| principal.can_access_node(Some(n.metadata.id.as_str())))
         .collect();
+    let cluster_models = state
+        .coordinator
+        .ragents_client
+        .list_models()
+        .await
+        .map(|c| filter_cluster_models_for_principal(c, &principal))
+        .unwrap_or_default();
     Ok(Json(ManagerSettingsWithClusterResponse {
         settings,
         cluster_nodes,
+        cluster_models,
     }))
 }
 
@@ -1132,6 +1180,18 @@ pub enum ChatApiError {
 impl From<crate::store::ChatStoreError> for ChatApiError {
     fn from(v: crate::store::ChatStoreError) -> Self {
         Self::Store(v)
+    }
+}
+
+impl From<ragents_client::ClientError> for ChatApiError {
+    fn from(v: ragents_client::ClientError) -> Self {
+        match v {
+            ragents_client::ClientError::Api { status, message } => Self::Http(
+                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+                message,
+            ),
+            other => Self::Http(StatusCode::BAD_GATEWAY, other.to_string()),
+        }
     }
 }
 

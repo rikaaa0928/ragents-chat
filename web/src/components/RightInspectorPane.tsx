@@ -38,6 +38,7 @@ import {
   Copy,
   Check,
   RotateCcw,
+  RefreshCw,
 } from 'lucide-react';
 import {
   Room,
@@ -93,6 +94,8 @@ interface RightInspectorPaneProps {
   agentActivities: Record<string, string>;
   inspector: InspectorSnapshot | null;
   availableModels: string[];
+  onRefreshModels?: () => Promise<void> | void;
+  refreshingModels?: boolean;
   liveReasoningBuffer: string;
   liveStreamBuffer: string;
   onSelectAgent: (agentId: string, sessionId?: string) => void;
@@ -149,6 +152,8 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   agentActivities,
   inspector,
   availableModels,
+  onRefreshModels,
+  refreshingModels = false,
   liveReasoningBuffer,
   liveStreamBuffer,
   onSelectAgent,
@@ -1240,9 +1245,27 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                   <div className="p-2.5 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] space-y-2">
                     <div className="grid grid-cols-3 gap-2">
                       <div>
-                        <label className="block text-[10.5px] text-[var(--text-muted)] mb-1">
-                          模型 (Model)
-                        </label>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="block text-[10.5px] text-[var(--text-muted)]">
+                            模型 (Model)
+                          </label>
+                          {onRefreshModels && (
+                            <button
+                              type="button"
+                              onClick={() => onRefreshModels()}
+                              disabled={refreshingModels}
+                              title="刷新集群可用模型列表"
+                              className="inline-flex items-center gap-0.5 text-[10px] text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-50 cursor-pointer"
+                            >
+                              <RefreshCw
+                                className={`w-2.5 h-2.5 ${
+                                  refreshingModels ? 'animate-spin' : ''
+                                }`}
+                              />
+                              <span>刷新</span>
+                            </button>
+                          )}
+                        </div>
                         <select
                           value={inspectedAgent.model || ''}
                           onChange={(e) =>

@@ -6,6 +6,7 @@ import {
   InspectorSnapshot,
   ManagerSettings,
   ClusterNode,
+  ClusterModelsResponse,
   CreateRoomPreset,
   SendShortcutMode,
   ChatPrincipal,
@@ -118,6 +119,9 @@ export const App: React.FC = () => {
   } | null>(null);
 
   const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [clusterModels, setClusterModels] =
+    useState<ClusterModelsResponse | null>(null);
+  const [refreshingModels, setRefreshingModels] = useState(false);
   const [clusterNodes, setClusterNodes] = useState<ClusterNode[]>([]);
   const [managerSettings, setManagerSettings] = useState<ManagerSettings>(
     DEFAULT_MANAGER_SETTINGS
@@ -225,6 +229,28 @@ export const App: React.FC = () => {
     [authToken, pushApiError]
   );
 
+  const applyModelsFromCatalog = useCallback(
+    (
+      catalog: ClusterModelsResponse | null | undefined,
+      settingsObj?: Partial<ManagerSettings>
+    ) => {
+      const models = new Set<string>();
+      for (const m of catalog?.models || []) {
+        if (m?.id) models.add(m.id);
+      }
+      if (catalog?.default_model) models.add(catalog.default_model);
+      if (settingsObj?.default_agent_model) {
+        models.add(settingsObj.default_agent_model);
+      }
+      if (settingsObj?.manager_model) models.add(settingsObj.manager_model);
+      const nextModels = Array.from(models);
+      setAvailableModels((prev) =>
+        JSON.stringify(prev) === JSON.stringify(nextModels) ? prev : nextModels
+      );
+    },
+    []
+  );
+
   const refreshAvailableModels = useCallback(async () => {
     try {
       const data = await apiFetch('/api/v1/settings/manager');
@@ -234,25 +260,31 @@ export const App: React.FC = () => {
         return JSON.stringify(prev) === JSON.stringify(merged) ? prev : merged;
       });
       setClusterNodes(data.cluster_nodes || []);
-      const models = new Set<string>();
-      for (const node of data.cluster_nodes || []) {
-        const st = node.status || {};
-        if (st.default_model) models.add(st.default_model);
-        for (const m of st.supported_models || []) {
-          if (m) models.add(m);
-        }
-      }
-      if (s.default_agent_model) models.add(s.default_agent_model);
-      if (s.manager_model) models.add(s.manager_model);
-      const nextModels = Array.from(models);
-      setAvailableModels((prev) =>
-        JSON.stringify(prev) === JSON.stringify(nextModels) ? prev : nextModels
-      );
+      const catalog: ClusterModelsResponse | null = data.cluster_models || null;
+      setClusterModels(catalog);
+      applyModelsFromCatalog(catalog, s);
       return data;
     } catch (_) {
       return null;
     }
-  }, [apiFetch]);
+  }, [apiFetch, applyModelsFromCatalog]);
+
+  const handleForceRefreshModels = useCallback(async () => {
+    setRefreshingModels(true);
+    try {
+      const catalog: ClusterModelsResponse = await apiFetch(
+        '/api/v1/models/refresh',
+        { method: 'POST' }
+      );
+      setClusterModels(catalog);
+      applyModelsFromCatalog(catalog, managerSettings);
+      await refreshAvailableModels();
+    } catch (_) {
+      // error is already surfaced by apiFetch
+    } finally {
+      setRefreshingModels(false);
+    }
+  }, [apiFetch, applyModelsFromCatalog, managerSettings, refreshAvailableModels]);
 
   const refreshInspectorSnapshot = useCallback(
     async (
@@ -1112,6 +1144,8 @@ export const App: React.FC = () => {
         agentActivities={agentActivities}
         inspector={inspectorSnap}
         availableModels={availableModels}
+        onRefreshModels={handleForceRefreshModels}
+        refreshingModels={refreshingModels}
         liveReasoningBuffer={liveReasoningBuffer}
         liveStreamBuffer={liveStreamBuffer}
         onSelectAgent={(id, sessId) => handleInspectAgent(id, sessId, true)}
@@ -1313,6 +1347,9 @@ export const App: React.FC = () => {
           setCreateRoomPreset(null);
         }}
         availableModels={availableModels}
+        clusterModels={clusterModels}
+        refreshingModels={refreshingModels}
+        onRefreshModels={handleForceRefreshModels}
         clusterNodes={clusterNodes}
         defaultAgentModel={managerSettings.default_agent_model}
         managerSettings={managerSettings}

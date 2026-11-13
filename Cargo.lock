@@ -1976,7 +1976,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "ragents-apiserver"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#4fb3af97b4f6e05d2c7514fc35e590296e1708e4"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#c4fe8a1113b24a90e5eee0533a3538574992749e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1985,19 +1985,21 @@ dependencies = [
  "futures",
  "openresponses-rust",
  "ragents-protocol",
+ "reqwest 0.13.5",
  "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "toml",
  "uuid",
 ]
 
 [[package]]
 name = "ragents-client"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#4fb3af97b4f6e05d2c7514fc35e590296e1708e4"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#c4fe8a1113b24a90e5eee0533a3538574992749e"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2020,7 +2022,7 @@ dependencies = [
 [[package]]
 name = "ragents-core"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#4fb3af97b4f6e05d2c7514fc35e590296e1708e4"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#c4fe8a1113b24a90e5eee0533a3538574992749e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2047,7 +2049,7 @@ dependencies = [
 [[package]]
 name = "ragents-daemon"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#4fb3af97b4f6e05d2c7514fc35e590296e1708e4"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#c4fe8a1113b24a90e5eee0533a3538574992749e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2072,7 +2074,7 @@ dependencies = [
 [[package]]
 name = "ragents-protocol"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#4fb3af97b4f6e05d2c7514fc35e590296e1708e4"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#c4fe8a1113b24a90e5eee0533a3538574992749e"
 dependencies = [
  "chrono",
  "openresponses-rust",

@@ -390,6 +390,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         allowed_workspace_dirs: parse_workspace_dirs_csv("/a/b/c,/a/b/d"),
         labels: BTreeMap::new(),
         auto_discover_models: false,
+        use_cluster_models: true,
         models,
         extensions: vec![],
         interceptors: vec![],
@@ -428,6 +429,29 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         .await
         .unwrap();
     assert_eq!(unauth_resp.status().as_u16(), 401);
+
+    // Verify centralized model catalog endpoints on `chatroom-server`
+    let models_list: ragents_protocol::ClusterModelsResponse = http
+        .get(format!("{chat_base}/api/v1/models"))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(models_list.models.iter().any(|m| m.id == "gpt-4.1-mini"));
+
+    let models_refreshed: ragents_protocol::ClusterModelsResponse = http
+        .post(format!("{chat_base}/api/v1/models/refresh"))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(models_refreshed.models.iter().any(|m| m.id == "gpt-4.1-mini"));
 
     // 5. Create a room with 1 default agent (`@Assistant`)
     let created_room: RoomDetailResponse = http
@@ -1177,6 +1201,7 @@ async fn test_live_multi_agent_chatroom_when_env_present() {
         allowed_workspace_dirs: default_allowed_workspace_dirs(),
         labels: BTreeMap::new(),
         auto_discover_models: true,
+        use_cluster_models: true,
         models,
         extensions: vec![],
         interceptors: vec![],

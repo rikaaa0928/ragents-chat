@@ -238,6 +238,24 @@ export interface InspectorSnapshot {
   schedules?: AgentSchedule[];
 }
 
+export interface ClusterModelInfo {
+  id: string;
+  source: 'cluster' | 'node_local' | 'cluster_and_node_local';
+  available_on_nodes?: string[];
+  capabilities?: string[];
+  owned_by?: string | null;
+  default_temperature?: number | null;
+  default_max_output_tokens?: number | null;
+  is_default?: boolean;
+}
+
+export interface ClusterModelsResponse {
+  default_model?: string | null;
+  models: ClusterModelInfo[];
+  last_refreshed_at?: string | null;
+  last_error?: string | null;
+}
+
 export interface ClusterNode {
   metadata: {
     id: string;
@@ -247,6 +265,8 @@ export interface ClusterNode {
     hostname?: string;
     os?: string;
     arch?: string;
+    local_models?: string[];
+    use_cluster_models?: boolean;
     supported_models?: string[];
     default_model?: string;
     allowed_workspace_dirs?: string[];

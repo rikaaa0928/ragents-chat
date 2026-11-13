@@ -3,24 +3,23 @@ server_url = "http://ragents-apiserver:8080"
 executor_mode = "subprocess"
 max_concurrent_runners = 8
 default_system_prompt = "You are a helpful AI assistant running inside the ragents container cluster."
-default_model = "gemini-3.8-flash"
+# 集群模型与 Provider 凭据由 ragents-apiserver 集中管理并通过 DaemonTunnel 下发（默认 use_cluster_models = true）
+use_cluster_models = true
 temp_root_dir = "/var/lib/ragents/tmp"
 extensions_dir = "/etc/ragents/wasm"
 # 允许创建 Agent 工作目录 (workspace_path) 的父目录白名单（默认总是包含 /tmp）
 allowed_workspace_dirs = ["/tmp", "/var/lib/ragents/workspaces"]
-# 自动从模型提供商 `/v1/models` 接口拉取可用模型列表，下方 `[models]` 配置作为补充与参数覆盖（默认开启）
+# 仅针对节点本地专属 `[models]` 自动探测 `/v1/models`（默认开启）
 auto_discover_models = true
 
 [labels]
 env = "docker-compose"
 role = "worker"
 
-#的模型配置支持通过环境变量 RAGENTS_BASE_URL、RAGENTS_API_KEY、RAGENTS_MODEL 动态注入或覆盖
-[models."gemini-3.8-flash"]
-base_url = "${RAGENTS_BASE_URL}"
-api_key_env = "RAGENTS_API_KEY"
-default_temperature = 0.2
-default_max_output_tokens = 8192
+# 如需节点专属模型或覆盖集群同名模型，可按需取消注释并配置 `[models."..."]`
+# [models."qwen3-local"]
+# base_url = "http://127.0.0.1:8000/v1"
+# api_key = "local-key"
 
 [[extensions]]
 name = "shell"

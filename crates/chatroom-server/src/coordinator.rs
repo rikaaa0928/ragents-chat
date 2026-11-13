@@ -2383,11 +2383,12 @@ impl RoomCoordinator {
             return Ok(existing.into());
         }
 
-        let nodes = self.ragents_client.list_nodes().await.unwrap_or_default();
-        let available_models: Vec<String> = nodes
-            .iter()
-            .flat_map(|n| n.status.supported_models.clone())
-            .collect();
+        let available_models: Vec<String> = self
+            .ragents_client
+            .list_models()
+            .await
+            .map(|resp| resp.models.into_iter().map(|m| m.id).collect())
+            .unwrap_or_default();
         let mgr_settings = self
             .store
             .get_manager_settings()
@@ -3473,11 +3474,12 @@ Task Instructions:\n\
         }
 
         let mgr_settings = self.store.get_manager_settings()?;
-        let nodes = self.ragents_client.list_nodes().await.unwrap_or_default();
-        let available_models: Vec<String> = nodes
-            .iter()
-            .flat_map(|n| n.status.supported_models.clone())
-            .collect();
+        let available_models: Vec<String> = self
+            .ragents_client
+            .list_models()
+            .await
+            .map(|resp| resp.models.into_iter().map(|m| m.id).collect())
+            .unwrap_or_default();
 
         let lead_agent_name = if trigger_msg.sender_kind == SenderKind::Agent {
             Some(trigger_msg.sender_name.clone())

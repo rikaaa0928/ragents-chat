@@ -8,10 +8,12 @@ import {
   ChevronDown,
   ChevronRight,
   MessageSquarePlus,
+  RefreshCw,
 } from 'lucide-react';
 import {
   ManagerSettings,
   ClusterNode,
+  ClusterModelsResponse,
   CreateRoomPreset,
   SendShortcutMode,
 } from '../types';
@@ -28,6 +30,9 @@ interface ModalsProps {
   activeModal: ActiveModalType;
   onClose: () => void;
   availableModels: string[];
+  clusterModels?: ClusterModelsResponse | null;
+  refreshingModels?: boolean;
+  onRefreshModels?: () => Promise<void> | void;
   clusterNodes: ClusterNode[];
   defaultAgentModel: string;
   managerSettings: ManagerSettings;
@@ -68,6 +73,9 @@ export const Modals: React.FC<ModalsProps> = ({
   activeModal,
   onClose,
   availableModels,
+  clusterModels,
+  refreshingModels = false,
+  onRefreshModels,
   clusterNodes,
   defaultAgentModel,
   managerSettings,
@@ -344,9 +352,27 @@ export const Modals: React.FC<ModalsProps> = ({
                     </div>
 
                     <div>
-                      <label className="block text-[11px] text-[var(--text-muted)] mb-1">
-                        初始 Agent 模型
-                      </label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-[11px] text-[var(--text-muted)]">
+                          初始 Agent 模型
+                        </label>
+                        {onRefreshModels && (
+                          <button
+                            type="button"
+                            onClick={() => onRefreshModels()}
+                            disabled={refreshingModels}
+                            title="从 api-server 刷新最新可用模型列表"
+                            className="inline-flex items-center gap-1 text-[10.5px] text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-50 cursor-pointer"
+                          >
+                            <RefreshCw
+                              className={`w-3 h-3 ${
+                                refreshingModels ? 'animate-spin' : ''
+                              }`}
+                            />
+                            <span>{refreshingModels ? '刷新中...' : '刷新模型'}</span>
+                          </button>
+                        )}
+                      </div>
                       <select
                         value={initAgentModel}
                         onChange={(e) => setInitAgentModel(e.target.value)}
@@ -654,9 +680,27 @@ export const Modals: React.FC<ModalsProps> = ({
                 {manualAdvancedOpen && (
                   <div className="p-3 border-t border-[var(--border-subtle)] space-y-2.5">
                     <div>
-                      <label className="block text-[11px] text-[var(--text-muted)] mb-1">
-                        模型 (Model)
-                      </label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-[11px] text-[var(--text-muted)]">
+                          模型 (Model)
+                        </label>
+                        {onRefreshModels && (
+                          <button
+                            type="button"
+                            onClick={() => onRefreshModels()}
+                            disabled={refreshingModels}
+                            title="从 api-server 刷新最新可用模型列表"
+                            className="inline-flex items-center gap-1 text-[10.5px] text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-50 cursor-pointer"
+                          >
+                            <RefreshCw
+                              className={`w-3 h-3 ${
+                                refreshingModels ? 'animate-spin' : ''
+                              }`}
+                            />
+                            <span>{refreshingModels ? '刷新中...' : '刷新模型'}</span>
+                          </button>
+                        )}
+                      </div>
                       <select
                         value={manualModel}
                         onChange={(e) => setManualModel(e.target.value)}
@@ -817,13 +861,52 @@ export const Modals: React.FC<ModalsProps> = ({
                 <Settings className="w-4 h-4 text-violet-500" />
                 <span>聊天室管家 (@Manager) 与全局默认设置</span>
               </h3>
-              <button
-                onClick={onClose}
-                className="p-1 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-2">
+                {onRefreshModels && (
+                  <button
+                    type="button"
+                    onClick={() => onRefreshModels()}
+                    disabled={refreshingModels}
+                    title="强制触发 api-server 重新拉取上游 /v1/models 模型列表"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-50 cursor-pointer"
+                  >
+                    <RefreshCw
+                      className={`w-3 h-3 ${
+                        refreshingModels ? 'animate-spin' : ''
+                      }`}
+                    />
+                    <span>{refreshingModels ? '刷新中...' : '刷新模型列表'}</span>
+                  </button>
+                )}
+                <button
+                  onClick={onClose}
+                  className="p-1 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
+
+            {clusterModels && (
+              <div className="px-3 py-2 rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[11px] flex flex-wrap items-center justify-between gap-2 text-[var(--text-muted)]">
+                <span>
+                  集群模型目录：{clusterModels.models?.length || 0} 个可用模型
+                  {clusterModels.default_model
+                    ? ` · 集群默认 ${clusterModels.default_model}`
+                    : ''}
+                </span>
+                <span>
+                  {clusterModels.last_refreshed_at
+                    ? `上次刷新: ${new Date(
+                        clusterModels.last_refreshed_at
+                      ).toLocaleTimeString()}`
+                    : ''}
+                  {clusterModels.last_error
+                    ? ` · ⚠ ${clusterModels.last_error}`
+                    : ''}
+                </span>
+              </div>
+            )}
 
             <div className="space-y-3 text-xs">
               <div className="grid grid-cols-2 gap-2.5">
