@@ -715,13 +715,13 @@ async fn handle_get_inspector(
     let context = state
         .coordinator
         .ragents_client
-        .get_session_context(&selected_session_id)
+        .get_session_context_with_options(&selected_session_id, ContentFetchMode::View, false)
         .await
         .ok();
-    let events = state
+    let mut events = state
         .coordinator
         .ragents_client
-        .read_events(Some(&selected_session_id), 0)
+        .read_events_with_mode(Some(&selected_session_id), 0, ContentFetchMode::View)
         .await
         .unwrap_or_default();
 
@@ -741,6 +741,20 @@ async fn handle_get_inspector(
         .coordinator
         .build_agent_permission_summary(&agent, session.as_ref(), &events)
         .await;
+
+    // Historical items are already present in `context.effective_items`; clear duplicate `items`
+    // payloads from the historical `events` snapshot to avoid sending redundant data to the browser.
+    for env in &mut events {
+        match &mut env.event {
+            SessionEvent::ActivationSubmitted { items, .. }
+            | SessionEvent::TurnCompleted { items, .. }
+            | SessionEvent::ToolCallFinished { items, .. } => {
+                items.clear();
+            }
+            _ => {}
+        }
+    }
+
     let schedules = state
         .coordinator
         .store

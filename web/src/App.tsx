@@ -153,9 +153,11 @@ export const App: React.FC = () => {
 
   const roomEsRef = useRef<EventSource | null>(null);
   const inspectorEsRef = useRef<EventSource | null>(null);
+  const inspectorAbortRef = useRef<AbortController | null>(null);
   const currentRoomIdRef = useRef<string | null>(currentRoomId);
   const inspectedAgentIdRef = useRef<string | null>(null);
   const inspectedSessionIdRef = useRef<string | null>(null);
+  const inspectorColumnOpenRef = useRef<boolean>(inspectorColumnOpen);
 
   useEffect(() => {
     currentRoomIdRef.current = currentRoomId;
@@ -172,6 +174,10 @@ export const App: React.FC = () => {
     inspectedSessionIdRef.current = inspectedSessionId;
   }, [inspectedSessionId]);
 
+  useEffect(() => {
+    inspectorColumnOpenRef.current = inspectorColumnOpen;
+  }, [inspectorColumnOpen]);
+
   const apiFetch = useCallback(
     async (path: string, options: RequestInit = {}) => {
       const method = (options.method || 'GET').toUpperCase();
@@ -186,6 +192,12 @@ export const App: React.FC = () => {
       try {
         res = await fetch(path, { ...options, headers });
       } catch (netErr: unknown) {
+        if (
+          (netErr instanceof DOMException && netErr.name === 'AbortError') ||
+          options.signal?.aborted
+        ) {
+          throw netErr;
+        }
         const msg = netErr instanceof Error ? netErr.message : String(netErr);
         pushApiError(method, path, 'NETWORK_ERR', msg);
         throw netErr;
@@ -248,8 +260,28 @@ export const App: React.FC = () => {
       sessionId: string | null = null,
       resetBuffers = true
     ) => {
+      if (inspectorAbortRef.current) {
+        inspectorAbortRef.current.abort();
+      }
+      const abortCtrl = new AbortController();
+      inspectorAbortRef.current = abortCtrl;
+
       const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
-      const snap = await apiFetch(`/api/v1/agents/${agentId}/inspector${q}`);
+      let snap: any;
+      try {
+        snap = await apiFetch(`/api/v1/agents/${agentId}/inspector${q}`, {
+          signal: abortCtrl.signal,
+        });
+      } catch (err: unknown) {
+        if (abortCtrl.signal.aborted) {
+          return;
+        }
+        throw err;
+      } finally {
+        if (inspectorAbortRef.current === abortCtrl) {
+          inspectorAbortRef.current = null;
+        }
+      }
       // Guard against stale out-of-order responses from another room after room switch
       if (
         currentRoomIdRef.current &&
@@ -277,6 +309,7 @@ export const App: React.FC = () => {
           defaults: {},
           rules: [],
         },
+        schedules: snap.schedules || [],
       };
       inspectedAgentIdRef.current = snap.agent.agent_id;
       inspectedSessionIdRef.current = sessionId;
@@ -339,30 +372,31 @@ export const App: React.FC = () => {
             setLiveStreamBuffer((prev) => prev + (ev.delta || ''));
           } else if (evType === 'activation_submitted') {
             if (ev.items && ev.items.length > 0) {
-              appendContextItems(ev.items);
+              appendContextItems(ev.items, env.created_at);
             }
-            refreshInspectorSnapshot(agentId, sessionId, false);
+            if (inspectorColumnOpenRef.current) {
+              refreshInspectorSnapshot(agentId, sessionId, false);
+            }
           } else if (
             evType === 'activation_started' ||
             evType === 'realtime_messages_drained'
           ) {
-            refreshInspectorSnapshot(agentId, sessionId, false);
+            if (inspectorColumnOpenRef.current) {
+              refreshInspectorSnapshot(agentId, sessionId, false);
+            }
           } else if (evType === 'turn_started') {
             setLiveReasoningBuffer('');
             setLiveStreamBuffer('');
-            refreshInspectorSnapshot(agentId, sessionId, false);
           } else if (evType === 'turn_completed') {
             setLiveReasoningBuffer('');
             setLiveStreamBuffer('');
             if (ev.items && ev.items.length > 0) {
-              appendContextItems(ev.items);
+              appendContextItems(ev.items, env.created_at);
             }
-            refreshInspectorSnapshot(agentId, sessionId, false);
           } else if (evType === 'tool_call_finished') {
             if (ev.items && ev.items.length > 0) {
-              appendContextItems(ev.items);
+              appendContextItems(ev.items, env.created_at);
             }
-            refreshInspectorSnapshot(agentId, sessionId, false);
           } else if (
             evType === 'session_compacted' ||
             evType === 'permission_requested' ||
@@ -372,12 +406,14 @@ export const App: React.FC = () => {
             evType === 'activation_interrupted' ||
             evType === 'activation_cancelled'
           ) {
-            refreshInspectorSnapshot(
-              agentId,
-              sessionId,
-              evType !== 'permission_requested' &&
-                evType !== 'permission_resolved'
-            );
+            if (inspectorColumnOpenRef.current) {
+              refreshInspectorSnapshot(
+                agentId,
+                sessionId,
+                evType !== 'permission_requested' &&
+                  evType !== 'permission_resolved'
+              );
+            }
           }
         } catch (err) {
           console.error(err);
@@ -386,6 +422,29 @@ export const App: React.FC = () => {
     },
     [refreshInspectorSnapshot]
   );
+
+  // Manage Inspector snapshot & SSE stream lazily based on whether the Inspector column is open
+  useEffect(() => {
+    if (!inspectorColumnOpen || !inspectedAgentId) {
+      if (inspectorEsRef.current) {
+        inspectorEsRef.current.close();
+        inspectorEsRef.current = null;
+      }
+      if (inspectorAbortRef.current) {
+        inspectorAbortRef.current.abort();
+        inspectorAbortRef.current = null;
+      }
+      return;
+    }
+    refreshInspectorSnapshot(inspectedAgentId, inspectedSessionId);
+    subscribeInspectorStream(inspectedAgentId, inspectedSessionId);
+  }, [
+    inspectorColumnOpen,
+    inspectedAgentId,
+    inspectedSessionId,
+    refreshInspectorSnapshot,
+    subscribeInspectorStream,
+  ]);
 
   const subscribeRoomStream = useCallback(
     (roomId: string) => {
@@ -416,7 +475,7 @@ export const App: React.FC = () => {
                   : item
               )
             );
-            if (inspectedAgentIdRef.current) {
+            if (inspectorColumnOpenRef.current && inspectedAgentIdRef.current) {
               refreshInspectorSnapshot(
                 inspectedAgentIdRef.current,
                 inspectedSessionIdRef.current,
@@ -431,7 +490,7 @@ export const App: React.FC = () => {
                 messages: prev.messages.filter((m) => m.msg_seq !== ev.msg_seq),
               };
             });
-            if (inspectedAgentIdRef.current) {
+            if (inspectorColumnOpenRef.current && inspectedAgentIdRef.current) {
               refreshInspectorSnapshot(
                 inspectedAgentIdRef.current,
                 inspectedSessionIdRef.current,
@@ -472,11 +531,6 @@ export const App: React.FC = () => {
               setInspectorSnap((prev) =>
                 prev ? { ...prev, agent: ev.agent } : prev
               );
-              refreshInspectorSnapshot(
-                ev.agent.agent_id,
-                inspectedSessionIdRef.current,
-                false
-              );
             }
           } else if (ev.type === 'agent_removed') {
             setCurrentDetail((prev) => {
@@ -515,9 +569,12 @@ export const App: React.FC = () => {
               setPeekStatusBanner((cur) => (cur === ev.status ? '' : cur));
             }, 5000);
           } else if (ev.type === 'permission_alert') {
-            if (inspectedAgentIdRef.current === ev.agent_id) {
-              refreshInspectorSnapshot(ev.agent_id, null);
-            }
+            inspectedAgentIdRef.current = ev.agent_id;
+            inspectedSessionIdRef.current = null;
+            setInspectedAgentId(ev.agent_id);
+            setInspectedSessionId(null);
+            setInspectorColumnOpen(true);
+            refreshInspectorSnapshot(ev.agent_id, null, false);
           } else if (ev.type === 'agent_activity') {
             setAgentActivities((prev) => ({
               ...prev,
@@ -563,16 +620,14 @@ export const App: React.FC = () => {
       }
       subscribeRoomStream(roomId);
       if (detail.agents.length > 0) {
-        await refreshInspectorSnapshot(detail.agents[0].agent_id, null);
-        subscribeInspectorStream(detail.agents[0].agent_id, null);
+        const defaultAgentId = detail.agents[0].agent_id;
+        inspectedAgentIdRef.current = defaultAgentId;
+        inspectedSessionIdRef.current = null;
+        setInspectedAgentId(defaultAgentId);
+        setInspectedSessionId(null);
       }
     },
-    [
-      apiFetch,
-      refreshInspectorSnapshot,
-      subscribeInspectorStream,
-      subscribeRoomStream,
-    ]
+    [apiFetch, subscribeRoomStream]
   );
 
   const refreshRooms = useCallback(async () => {
@@ -640,6 +695,17 @@ export const App: React.FC = () => {
     sessionId?: string,
     autoOpenPane = true
   ) => {
+    const nextSessionId = sessionId || null;
+    const sameSelection =
+      inspectedAgentIdRef.current === agentId &&
+      inspectedSessionIdRef.current === nextSessionId &&
+      inspectorColumnOpenRef.current === (autoOpenPane ? true : inspectorColumnOpenRef.current);
+    inspectedAgentIdRef.current = agentId;
+    inspectedSessionIdRef.current = nextSessionId;
+    setInspectedAgentId(agentId);
+    setInspectedSessionId(nextSessionId);
+    setLiveReasoningBuffer('');
+    setLiveStreamBuffer('');
     if (autoOpenPane) {
       if (isMobileViewport()) {
         setSidebarCollapsed(true);
@@ -649,11 +715,10 @@ export const App: React.FC = () => {
       }
       setInspectorColumnOpen(true);
     }
-    setInspectedAgentId(agentId);
-    setLiveReasoningBuffer('');
-    setLiveStreamBuffer('');
-    await refreshInspectorSnapshot(agentId, sessionId || null);
-    subscribeInspectorStream(agentId, sessionId || null);
+    if (sameSelection && inspectorColumnOpenRef.current) {
+      await refreshInspectorSnapshot(agentId, nextSessionId);
+      subscribeInspectorStream(agentId, nextSessionId);
+    }
   };
 
   const handleToggleMention = (name: string) => {
@@ -844,7 +909,12 @@ export const App: React.FC = () => {
           room={currentDetail?.room || null}
           agents={currentDetail?.agents || []}
           clusterNodes={clusterNodes}
-          inspectedAgent={inspectorSnap?.agent || null}
+          inspectedAgent={
+            inspectorSnap?.agent ||
+            currentDetail?.agents.find((a) => a.agent_id === inspectedAgentId) ||
+            currentDetail?.agents[0] ||
+            null
+          }
           flowLogCount={currentDetail?.flow_logs?.length || 0}
           peekStatusBanner={peekStatusBanner}
           rightColumnContributions={(extManifest?.contributions || []).filter(

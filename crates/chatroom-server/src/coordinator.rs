@@ -177,7 +177,11 @@ impl RoomCoordinator {
         }
 
         for sid in session_ids {
-            if let Ok(events) = self.ragents_client.read_events(Some(&sid), 0).await {
+            if let Ok(events) = self
+                .ragents_client
+                .read_events_with_mode(Some(&sid), 0, ContentFetchMode::View)
+                .await
+            {
                 for env in events {
                     if let SessionEvent::TurnCompleted {
                         usage: Some(ref u), ..
@@ -447,7 +451,11 @@ impl RoomCoordinator {
         let updated_agent = self.store.get_agent(agent_id)?.unwrap_or(agent);
         let events = self
             .ragents_client
-            .read_events(Some(&updated_agent.active_session_id), 0)
+            .read_events_with_mode(
+                Some(&updated_agent.active_session_id),
+                0,
+                ContentFetchMode::View,
+            )
             .await
             .unwrap_or_default();
         let message_queues = self.build_agent_message_queues(&updated_agent, &events);
@@ -963,7 +971,7 @@ impl RoomCoordinator {
 
         let events = self
             .ragents_client
-            .read_events(Some(&target_session_id), 0)
+            .read_events_with_mode(Some(&target_session_id), 0, ContentFetchMode::View)
             .await
             .unwrap_or_default();
 
@@ -1173,7 +1181,11 @@ impl RoomCoordinator {
                 if cancel.is_cancelled() {
                     break;
                 }
-                match coord.ragents_client.watch_events(None, after_rv).await {
+                match coord
+                    .ragents_client
+                    .watch_events_with_mode(None, after_rv, ContentFetchMode::View)
+                    .await
+                {
                     Ok(mut stream) => {
                         loop {
                             tokio::select! {
