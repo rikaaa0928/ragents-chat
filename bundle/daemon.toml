@@ -52,6 +52,11 @@ name = "compaction"
 enabled = true
 config = { enabled = true, trigger_tokens = 400000, keep_recent_tokens = 64000 }
 
+[[extensions]]
+name = "session_history"
+enabled = true
+config = {}
+
 [default_permissions.file_read]
 allow = ["."]
 default = "ask"

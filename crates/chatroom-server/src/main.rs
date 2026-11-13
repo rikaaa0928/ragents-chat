@@ -107,6 +107,14 @@ async fn main() -> anyhow::Result<()> {
             allowed_dirs: vec![],
             filter_env: vec![],
         },
+        ExtensionSpec {
+            name: "session_history".to_string(),
+            path: String::new(),
+            enabled: true,
+            config: serde_json::json!({}),
+            allowed_dirs: vec![],
+            filter_env: vec![],
+        },
     ];
 
     let store = ChatroomStore::open(&cli.db, &default_model, default_extensions.clone())?;

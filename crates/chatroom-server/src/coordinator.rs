@@ -1113,6 +1113,19 @@ impl RoomCoordinator {
                     }
                     let mut exts = sess.spec.extensions.clone();
                     let mut ext_changed = false;
+                    if ag.created_by != "system_manager"
+                        && !exts.iter().any(|e| e.name == "session_history")
+                    {
+                        exts.push(ExtensionSpec {
+                            name: "session_history".to_string(),
+                            path: String::new(),
+                            enabled: true,
+                            config: serde_json::json!({}),
+                            allowed_dirs: vec![],
+                            filter_env: vec![],
+                        });
+                        ext_changed = true;
+                    }
                     for ext in &mut exts {
                         if ext.name == "chatroom" {
                             if let Some(obj) = ext.config.as_object_mut() {
@@ -1839,9 +1852,11 @@ impl RoomCoordinator {
 
         let mut labels = BTreeMap::new();
         labels.insert("ragents.chat.room_id".to_string(), room.room_id.clone());
+        labels.insert("ragents.chat.room_name".to_string(), room.name.clone());
         labels.insert("ragents.chat.agent_id".to_string(), agent_id.clone());
         labels.insert("ragents.chat.agent_name".to_string(), "Manager".to_string());
         labels.insert("ragents.chat.role".to_string(), "chatroom_manager".to_string());
+        labels.insert("ragents.chat.role_title".to_string(), "聊天室管家".to_string());
         if let Some(ref sticky_nid) = room.node_id {
             labels.insert("ragents.io/preferred-node".to_string(), sticky_nid.clone());
         }
@@ -2090,8 +2105,10 @@ impl RoomCoordinator {
 
         let mut labels = BTreeMap::new();
         labels.insert("ragents.chat.room_id".to_string(), room.room_id.clone());
+        labels.insert("ragents.chat.room_name".to_string(), room.name.clone());
         labels.insert("ragents.chat.agent_id".to_string(), agent_id.clone());
         labels.insert("ragents.chat.agent_name".to_string(), clean_name.clone());
+        labels.insert("ragents.chat.role_title".to_string(), req.role_title.clone());
         if let Some(ref pref_nid) = preferred_floating_node {
             labels.insert("ragents.io/preferred-node".to_string(), pref_nid.clone());
         }
