@@ -15,6 +15,7 @@ import {
   MoreHorizontal,
   KeyRound,
   LogOut,
+  Trash2,
 } from 'lucide-react';
 import {
   RoomListItem,
@@ -33,6 +34,8 @@ interface SidebarProps {
   onSelectRoom: (roomId: string) => void;
   onOpenCreateRoom: (preset?: CreateRoomPreset) => void;
   onOpenManagerSettings: () => void;
+  onDeleteNode?: (nodeId: string) => void;
+  deletingNodeId?: string | null;
   principal?: ChatPrincipal | null;
   authRequired?: boolean;
   footerContributions?: UiContribution[];
@@ -85,6 +88,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectRoom,
   onOpenCreateRoom,
   onOpenManagerSettings,
+  onDeleteNode,
+  deletingNodeId = null,
   principal,
   authRequired,
   footerContributions = [],
@@ -498,9 +503,31 @@ export const Sidebar: React.FC<SidebarProps> = ({
                         {active > 0 ? `运行 ${active}/${max}` : 'Ready'}
                       </span>
                     ) : (
-                      <span className="px-1 py-0.1 rounded bg-rose-500/20 text-rose-600 dark:text-rose-300 font-semibold">
-                        断联 (宽限中)
-                      </span>
+                      <div className="flex items-center gap-1">
+                        <span className="px-1 py-0.1 rounded bg-rose-500/20 text-rose-600 dark:text-rose-300 font-semibold">
+                          断联 (宽限中)
+                        </span>
+                        {principal?.is_admin && onDeleteNode && (
+                          <button
+                            type="button"
+                            disabled={deletingNodeId === node.metadata.id}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (
+                                window.confirm(
+                                  `确认剔除断联节点「${node.metadata.id}」？\n（仅当没有关联房间绑定在此节点上时才允许剔除）`
+                                )
+                              ) {
+                                onDeleteNode(node.metadata.id);
+                              }
+                            }}
+                            title="剔除断联节点（需先迁移或删除关联房间）"
+                            className="p-0.5 rounded text-rose-500 hover:text-rose-600 hover:bg-rose-500/20 disabled:opacity-50 cursor-pointer"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>

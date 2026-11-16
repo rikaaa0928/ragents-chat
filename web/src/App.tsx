@@ -122,6 +122,7 @@ export const App: React.FC = () => {
   const [clusterModels, setClusterModels] =
     useState<ClusterModelsResponse | null>(null);
   const [refreshingModels, setRefreshingModels] = useState(false);
+  const [deletingNodeId, setDeletingNodeId] = useState<string | null>(null);
   const [clusterNodes, setClusterNodes] = useState<ClusterNode[]>([]);
   const [managerSettings, setManagerSettings] = useState<ManagerSettings>(
     DEFAULT_MANAGER_SETTINGS
@@ -677,6 +678,24 @@ export const App: React.FC = () => {
     }
   }, [apiFetch, currentRoomId, handleSelectRoom]);
 
+  const handleDeleteNode = useCallback(
+    async (nodeId: string) => {
+      setDeletingNodeId(nodeId);
+      try {
+        await apiFetch(`/api/v1/nodes/${encodeURIComponent(nodeId)}`, {
+          method: 'DELETE',
+        });
+        await refreshAvailableModels();
+        await refreshRooms();
+      } catch (_) {
+        // error is already surfaced by apiFetch
+      } finally {
+        setDeletingNodeId(null);
+      }
+    },
+    [apiFetch, refreshAvailableModels, refreshRooms]
+  );
+
   useEffect(() => {
     (async () => {
       try {
@@ -898,6 +917,8 @@ export const App: React.FC = () => {
           await refreshAvailableModels();
           setActiveModal('managerSettings');
         }}
+        onDeleteNode={handleDeleteNode}
+        deletingNodeId={deletingNodeId}
         principal={principal}
         authRequired={extManifest?.auth_required}
         footerContributions={(extManifest?.contributions || []).filter(

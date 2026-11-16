@@ -11,7 +11,7 @@ use axum::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         Html, IntoResponse, Response,
     },
-    routing::{any, get, patch, post},
+    routing::{any, delete, get, patch, post},
     Json, Router,
 };
 use futures::stream::Stream;
@@ -61,6 +61,7 @@ pub fn build_chat_router(state: ChatServerState) -> Router {
         )
         .route("/api/v1/models", get(handle_list_models))
         .route("/api/v1/models/refresh", post(handle_refresh_models))
+        .route("/api/v1/nodes/{node_id}", delete(handle_delete_node))
         .route(
             "/api/v1/rooms",
             get(handle_list_rooms).post(handle_create_room),
@@ -409,6 +410,81 @@ async fn handle_refresh_models(
     Ok(Json(filter_cluster_models_for_principal(
         catalog, &principal,
     )))
+}
+
+async fn handle_delete_node(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Path(node_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ChatApiError> {
+    let principal = verify_user_auth(&state, &headers)?;
+    if !principal.is_admin {
+        return Err(ChatApiError::Http(
+            StatusCode::FORBIDDEN,
+            "仅管理员 (admin) 可剔除集群节点".into(),
+        ));
+    }
+
+    let nid = NodeId::new(node_id.clone());
+    let node = state
+        .coordinator
+        .ragents_client
+        .get_node(&nid)
+        .await?
+        .ok_or_else(|| ChatApiError::Http(StatusCode::NOT_FOUND, format!("节点 '{node_id}' 不存在")))?;
+
+    if node.status.phase != NodePhase::NotReady {
+        return Err(ChatApiError::Http(
+            StatusCode::CONFLICT,
+            format!("节点「{node_id}」当前在线，仅允许剔除处于断联 (not_ready) 状态的节点"),
+        ));
+    }
+
+    let bound_rooms = state.coordinator.store.list_rooms_bound_to_node(&node_id)?;
+    if !bound_rooms.is_empty() {
+        let room_labels: Vec<String> = bound_rooms
+            .iter()
+            .map(|r| {
+                if r.workspace_path.is_some() {
+                    format!("「{}」(固定目录，需删除)", r.name)
+                } else {
+                    format!("「{}」(浮动模式，可切换节点或删除)", r.name)
+                }
+            })
+            .collect();
+        return Err(ChatApiError::Http(
+            StatusCode::CONFLICT,
+            format!(
+                "无法剔除断联节点「{node_id}」：仍有 {} 个关联房间绑定在该节点上（{}）。请先将浮动房间迁移至其他节点或删除所有关联房间后再试。",
+                bound_rooms.len(),
+                room_labels.join("、")
+            ),
+        ));
+    }
+
+    if let Ok(settings) = state.coordinator.store.get_manager_settings() {
+        if settings.default_node_id.as_deref() == Some(node_id.as_str()) {
+            let _ = state.coordinator.store.update_manager_settings(
+                UpdateManagerSettingsRequest {
+                    manager_model: None,
+                    manager_system_prompt: None,
+                    default_node_id: Some(None),
+                    default_workspace_root: Some(None),
+                    default_agent_model: None,
+                    default_reasoning_effort: None,
+                    default_reasoning_summary: None,
+                    default_web_search: None,
+                    default_prompt_hint: None,
+                    default_extensions: None,
+                    idle_peek_debounce_ms: None,
+                    max_agent_relay_depth: None,
+                },
+            );
+        }
+    }
+
+    let resp = state.coordinator.ragents_client.delete_node(&nid).await?;
+    Ok(Json(resp))
 }
 
 async fn handle_get_manager_settings(

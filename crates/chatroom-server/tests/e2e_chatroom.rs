@@ -348,7 +348,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
     exts.add_authn(Arc::new(StaticTokenAuthnPlugin::new(ragents_token)));
 
     let store = SqliteStore::open_in_memory().expect("in-memory ragents store");
-    let apiserver_state = ApiServerState::new(store, DEFAULT_LEASE_TTL_MS).with_extensions(exts);
+    let apiserver_state = ApiServerState::new(store.clone(), DEFAULT_LEASE_TTL_MS).with_extensions(exts);
     let api_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_addr = serve_tcp(api_listener, apiserver_state, cancel.clone())
         .await
@@ -1142,6 +1142,101 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
     );
     let downloaded_bytes = raw_resp.bytes().await.unwrap();
     assert_eq!(downloaded_bytes.as_ref(), fake_png_bytes);
+
+    // 10. Verify disconnected node eviction guards on `chatroom-server`:
+    //     - Ready node (`node-chat-test`) cannot be evicted
+    let online_evict = http
+        .delete(format!("{chat_base}/api/v1/nodes/node-chat-test"))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(online_evict.status().as_u16(), 409);
+
+    // Register a second node and expire its lease -> NotReady
+    store
+        .register_node(
+            NodeId::new("node-dead-test"),
+            "dead.local".to_string(),
+            "linux".to_string(),
+            "x86_64".to_string(),
+            BTreeMap::new(),
+            vec!["gpt-4.1-mini".to_string()],
+            Some("gpt-4.1-mini".to_string()),
+            vec![],
+            4,
+            100,
+        )
+        .unwrap();
+    store
+        .patrol_expired_leases(chrono::Utc::now() + chrono::Duration::seconds(10))
+        .unwrap();
+
+    // Create a floating room pinned/bound to `node-dead-test`
+    let bound_room: RoomDetailResponse = http
+        .post(format!("{chat_base}/api/v1/rooms"))
+        .bearer_auth(chat_auth_token)
+        .json(&CreateRoomRequest {
+            name: "DeadNodeRoom".to_string(),
+            description: "Bound to dead node".to_string(),
+            default_agent_name: Some("Helper".to_string()),
+            default_agent_role: None,
+            default_agent_persona: None,
+            default_agent_model: Some("gpt-4.1-mini".to_string()),
+            reasoning_effort: None,
+            reasoning_summary: None,
+            web_search: None,
+            prompt_hint: None,
+            node_id: Some("node-dead-test".to_string()),
+            workspace_path: None,
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let dead_room_id = bound_room.room.room_id.clone();
+
+    // Cannot evict while room is bound to `node-dead-test` (returns 409 naming the room)
+    let blocked_evict = http
+        .delete(format!("{chat_base}/api/v1/nodes/node-dead-test"))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked_evict.status().as_u16(), 409);
+    let blocked_body: serde_json::Value = blocked_evict.json().await.unwrap();
+    assert!(blocked_body["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("DeadNodeRoom"));
+
+    // Migrate the floating room to `node-chat-test`
+    let migrated_resp = http
+        .patch(format!("{chat_base}/api/v1/rooms/{dead_room_id}"))
+        .bearer_auth(chat_auth_token)
+        .json(&PatchRoomRequest {
+            node_id: Some("node-chat-test".to_string()),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(migrated_resp.status().as_u16(), 200);
+
+    // Now evicting `node-dead-test` succeeds!
+    let ok_evict = http
+        .delete(format!("{chat_base}/api/v1/nodes/node-dead-test"))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok_evict.status().as_u16(), 200);
+    assert!(store
+        .get_node(&NodeId::new("node-dead-test"))
+        .unwrap()
+        .is_none());
 
     cancel.cancel();
 }

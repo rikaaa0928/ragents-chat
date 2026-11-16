@@ -462,6 +462,47 @@ You manage the room's specialist agent roster using your tools:\n\
         Ok(out)
     }
 
+    pub fn list_rooms_bound_to_node(&self, node_id: &str) -> Result<Vec<Room>, ChatStoreError> {
+        let conn = self.conn.lock().expect("store mutex poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT r.room_id, r.name, r.description, r.last_msg_seq, r.roster_version,
+                    r.peek_enabled, r.peek_idle_secs, r.peek_msg_interval, r.interject_enabled,
+                    r.mute_probability, r.max_agent_relay_depth, r.consecutive_agent_msgs,
+                    r.created_at, r.updated_at, r.node_id, r.workspace_path
+             FROM rooms r
+             LEFT JOIN room_agents a ON a.room_id = r.room_id
+             WHERE r.node_id = ?1
+                OR (json_extract(a.scheduling_json, '$.mode') = 'pinned'
+                    AND json_extract(a.scheduling_json, '$.node_id') = ?1)
+             ORDER BY r.updated_at DESC",
+        )?;
+        let rows = stmt.query_map(params![node_id], |r| {
+            Ok(Room {
+                room_id: r.get(0)?,
+                name: r.get(1)?,
+                description: r.get(2)?,
+                node_id: r.get(14)?,
+                workspace_path: r.get(15)?,
+                last_msg_seq: r.get::<_, i64>(3)? as u64,
+                roster_version: r.get::<_, i64>(4)? as u64,
+                peek_enabled: r.get::<_, i64>(5)? != 0,
+                peek_idle_secs: r.get::<_, i64>(6)? as u64,
+                peek_msg_interval: r.get::<_, i64>(7)? as u32,
+                interject_enabled: r.get::<_, i64>(8)? != 0,
+                mute_probability: (r.get::<_, i64>(9)?.clamp(0, 100)) as u8,
+                max_agent_relay_depth: r.get::<_, i64>(10)? as u32,
+                consecutive_agent_msgs: r.get::<_, i64>(11)? as u32,
+                created_at: parse_dt(&r.get::<_, String>(12)?),
+                updated_at: parse_dt(&r.get::<_, String>(13)?),
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     pub fn patch_room(&self, room_id: &str, patch: PatchRoomRequest) -> Result<Room, ChatStoreError> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut room = Self::load_room_from_conn(&conn, room_id)?
