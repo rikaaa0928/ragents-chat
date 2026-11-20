@@ -242,6 +242,12 @@ impl exports::ragent::extension::lifecycle::Guest for ChatroomExtension {
                     failure: "abort",
                 },
                 Subscription {
+                    hook: "tool.call.prepare",
+                    kind: "transform",
+                    priority: 90,
+                    failure: "ignore",
+                },
+                Subscription {
                     hook: "tools.call",
                     kind: "action",
                     priority: 90,
@@ -391,6 +397,7 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                 if cfg.is_manager {
                     tools.push(json!({
                         "enabled": true,
+                        "concurrency_safe": false,
                         "name": "chatroom_add_agent",
                         "description": "Recruit and add a new AI specialist agent into the current chatroom. Call this tool BEFORE calling chatroom_speak so the new agent is already seated in the room when you announce them.",
                         "parameters": {
@@ -422,6 +429,7 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                     }));
                     tools.push(json!({
                         "enabled": true,
+                        "concurrency_safe": false,
                         "name": "chatroom_remove_agent",
                         "description": "Remove an existing AI agent from the current chatroom by name or agent_id. Call this tool BEFORE calling chatroom_speak.",
                         "parameters": {
@@ -440,6 +448,7 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                 if !cfg.is_manager {
                     tools.push(json!({
                         "enabled": true,
+                        "concurrency_safe": false,
                         "name": "chatroom_schedule",
                         "description": "Create, list, update, pause, resume, or delete your own scheduled/recurring tasks in this chatroom (e.g. daily fixed-time checks, interval polling, one-shot delayed reminders, or cron jobs). When the scheduled time arrives, you will be automatically woken up with your `task_prompt`.",
                         "parameters": {
@@ -508,6 +517,7 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
 
                 tools.push(json!({
                     "enabled": true,
+                    "concurrency_safe": false,
                     "name": "chatroom_speak",
                     "description": "Post a public message to the chatroom. Call this ONLY when you have substantive content to share. Do NOT call this for polite sign-offs ('收到', '已签收', '待命').",
                     "parameters": {
@@ -544,6 +554,26 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                     }
                 })
                 .to_string())
+            }
+            "tool.call.prepare" => {
+                let mut payload = req.payload;
+                let tool_name = payload
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if tool_name == "chatroom_schedule" {
+                    let is_list = payload
+                        .get("arguments")
+                        .and_then(|a| a.get("action"))
+                        .and_then(|v| v.as_str())
+                        == Some("list");
+                    if let Some(obj) = payload.as_object_mut() {
+                        obj.insert("concurrency_safe".to_string(), json!(is_list));
+                    }
+                    Ok(json!({ "action": "continue", "payload": payload }).to_string())
+                } else {
+                    Ok(json!({ "action": "unchanged" }).to_string())
+                }
             }
             "tools.call" => {
                 let call: ToolCallRequest =

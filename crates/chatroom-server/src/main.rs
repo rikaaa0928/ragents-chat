@@ -8,6 +8,9 @@ use std::path::PathBuf;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Debug, Parser)]
 #[command(name = "ragents-chat", about = "Multi-Agent AI Chatroom Server & Web UI powered by ragents")]
 struct Cli {
@@ -109,6 +112,14 @@ async fn main() -> anyhow::Result<()> {
         },
         ExtensionSpec {
             name: "session_history".to_string(),
+            path: String::new(),
+            enabled: true,
+            config: serde_json::json!({}),
+            allowed_dirs: vec![],
+            filter_env: vec![],
+        },
+        ExtensionSpec {
+            name: "permissions".to_string(),
             path: String::new(),
             enabled: true,
             config: serde_json::json!({}),

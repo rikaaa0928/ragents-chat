@@ -617,7 +617,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               const isMetaExpanded = expandedMetaSeqs.has(m.msg_seq);
 
               if (isSystem) {
-                const sysKey = `${room.room_id}:${m.msg_seq}`;
+                const sysKey = `${room?.room_id || ''}:${m.msg_seq}`;
                 if (dismissedSystemKeys.has(sysKey)) {
                   return null;
                 }

@@ -589,6 +589,8 @@ pub struct InspectorResponse {
     pub selected_session_id: SessionId,
     pub session: Option<Session>,
     pub context: Option<SessionContextResponse>,
+    #[serde(default)]
+    pub item_timestamps: Vec<String>,
     pub events: Vec<SessionEventEnvelope>,
     pub pending_permissions: Vec<PermissionRequest>,
     #[serde(default)]

@@ -333,6 +333,7 @@ export const App: React.FC = () => {
           effective_items: snap.context?.effective_items || [],
           local_batches: snap.context?.local_batches || [],
         },
+        item_timestamps: snap.item_timestamps || [],
         events: snap.events || [],
         message_queues: snap.message_queues || {
           realtime_messages: [],
@@ -834,7 +835,12 @@ export const App: React.FC = () => {
     );
     if (!res.ok) {
       const errText = await res.text();
-      pushBackendError(`上传文件失败: ${errText || `HTTP ${res.status}`}`);
+      pushApiError(
+        'PUT',
+        `/api/v1/ext/workspace_fs/rooms/${currentRoomId}/upload-raw`,
+        res.status,
+        errText || `HTTP ${res.status}`
+      );
       throw new Error(errText || `HTTP ${res.status}`);
     }
     const data = await res.json();

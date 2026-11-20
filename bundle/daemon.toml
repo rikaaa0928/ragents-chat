@@ -56,6 +56,11 @@ name = "session_history"
 enabled = true
 config = {}
 
+[[extensions]]
+name = "permissions"
+enabled = true
+config = {}
+
 [default_permissions.file_read]
 allow = ["."]
 default = "ask"

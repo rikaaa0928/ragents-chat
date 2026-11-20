@@ -1126,6 +1126,19 @@ impl RoomCoordinator {
                         });
                         ext_changed = true;
                     }
+                    if ag.created_by != "system_manager"
+                        && !exts.iter().any(|e| e.name == "permissions")
+                    {
+                        exts.push(ExtensionSpec {
+                            name: "permissions".to_string(),
+                            path: String::new(),
+                            enabled: true,
+                            config: serde_json::json!({}),
+                            allowed_dirs: vec![],
+                            filter_env: vec![],
+                        });
+                        ext_changed = true;
+                    }
                     for ext in &mut exts {
                         if ext.name == "chatroom" {
                             if let Some(obj) = ext.config.as_object_mut() {

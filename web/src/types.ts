@@ -26,6 +26,7 @@ export interface SessionChainEntry {
   generation: number;
   working_session_id: string;
   compaction_session_id?: string | null;
+  created_at?: string;
 }
 
 export type RuntimeState = 'idle' | 'thinking' | 'waiting_permission';
@@ -127,6 +128,7 @@ export interface RoomDetailResponse {
 export interface PendingPermission {
   id: string;
   activation_id?: string;
+  extension_id?: string | null;
   capability: Record<string, unknown> | string;
   original_path?: string | null;
   reason?: string | null;
@@ -166,6 +168,7 @@ export interface InspectorEventEnvelope {
     name?: string;
     delta?: string;
     error?: string;
+    reason?: string;
     node_id?: string;
     count?: number;
     duration_ms?: number;
@@ -232,6 +235,7 @@ export interface InspectorSnapshot {
       items?: ContextItem[];
     }>;
   };
+  item_timestamps?: string[];
   events: InspectorEventEnvelope[];
   message_queues?: AgentMessageQueueSnapshot;
   permission_summary?: AgentPermissionSummary;

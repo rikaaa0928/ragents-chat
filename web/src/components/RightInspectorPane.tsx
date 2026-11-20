@@ -326,6 +326,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
 
   const inspectedAgent = inspector?.agent || null;
   const items = inspector?.context?.effective_items || [];
+  const serverTimestamps = inspector?.item_timestamps || [];
   const localBatches = inspector?.context?.local_batches || [];
   const realtimeQueue: QueuedMessageEntry[] =
     inspector?.message_queues?.realtime_messages || [];
@@ -334,7 +335,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   const rtQueuedCount = realtimeQueue.length;
   const normQueuedCount = normalQueue.length;
 
-  // Resolve per-item timestamp (`created_at`) from `local_batches`, live SSE items, and session lineage
+  // Resolve per-item timestamp (`created_at`) from server-computed `item_timestamps`, `local_batches`, live SSE items, and session lineage
   const itemTimestampMap = (() => {
     const byId = new Map<string, string>();
     const byCallKey = new Map<string, string>();
@@ -384,6 +385,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
 
     return items.map((it, idx) => {
       if (it.created_at) return it.created_at;
+      if (serverTimestamps[idx]) return serverTimestamps[idx];
       if (it.id && byId.has(it.id)) return byId.get(it.id)!;
       if (it.call_id) {
         const prefix = it.type === 'function_call_output' ? 'fco:' : 'fc:';
@@ -1555,7 +1557,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                         },
                         {
                           key: 'file_write',
-                          label: '✏️ 文件写入 (file_write)',
+                          label: '✏️ 文件写入 (file_write · 自动含读)',
                         },
                         {
                           key: 'command_work_dir',
@@ -2001,7 +2003,13 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                                   label: '全节点持久',
                                   tip: '在该节点的所有项目中全局持久有效',
                                 },
-                              ].map((btn) => (
+                              ]
+                                .filter(
+                                  (btn) =>
+                                    p.extension_id !== 'permissions' ||
+                                    btn.key !== 'allow_once'
+                                )
+                                .map((btn) => (
                                 <button
                                   key={btn.key}
                                   title={btn.tip}

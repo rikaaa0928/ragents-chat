@@ -547,6 +547,20 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         ctx_json.contains("INTERNAL_PRIVATE_THOUGHT_DO_NOT_LEAK"),
         "Inspector must show private inner thoughts"
     );
+    let eff_len = inspector
+        .context
+        .as_ref()
+        .map(|c| c.effective_items.len())
+        .unwrap_or(0);
+    assert_eq!(
+        inspector.item_timestamps.len(),
+        eff_len,
+        "Inspector item_timestamps must align 1-to-1 with effective_items"
+    );
+    assert!(
+        inspector.item_timestamps.iter().any(|ts| !ts.is_empty()),
+        "Inspector item_timestamps must preserve item timestamps even when events items are stripped"
+    );
 
     // 8. Test Direct-@ Forgotten-Speak Auto-Nudge:
     //    Send `TEST_FORGET_SPEAK` to `@Assistant`. On turn 1 it forgets to call `chatroom_speak`,
@@ -1431,4 +1445,99 @@ async fn test_live_multi_agent_chatroom_when_env_present() {
     );
 
     cancel.cancel();
+}
+
+#[tokio::test]
+async fn test_chatroom_extension_concurrency_safe_flags_and_call_prepare() {
+    let chatroom_wasm = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../extensions/chatroom/target/wasm32-wasip2/release/ragent_chatroom_extension.wasm");
+    if !chatroom_wasm.exists() {
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugin = ragents_core::WasmPlugin::load_from_file_with_workspace(
+        "chatroom",
+        &chatroom_wasm,
+        tmp.path(),
+        &[tmp.path().to_path_buf()],
+    )
+    .await
+    .expect("load chatroom wasm");
+
+    let mut manager = ragents_core::HookManager::empty();
+    let mut cfg = serde_json::json!({
+        "is_manager": false,
+        "room_id": "room_test",
+        "room_name": "TestRoom",
+        "agent_id": "agent_test",
+        "agent_name": "Tester",
+        "agent_role": "Tester",
+        "agent_token": "tok",
+        "chatroom_callback_url": "http://127.0.0.1:18090/api/v1/internal/agent-speak"
+    });
+    manager.add_plugin_with_config(plugin, cfg.take()).unwrap();
+    manager.initialize().await.unwrap();
+
+    let draft = ragents_core::AgentDraft {
+        system_prompt: "base".into(),
+        model: ragents_core::ModelDraft::new("gpt-4.1"),
+        tools: vec![],
+        context: None,
+    };
+    let (prepared, _, _) = manager
+        .prepare_extensions(ragents_core::HOOK_AGENT_PREPARE, None, draft)
+        .await
+        .unwrap();
+
+    let speak = prepared
+        .tools
+        .iter()
+        .find(|t| t.definition.name == "chatroom_speak")
+        .expect("chatroom_speak");
+    assert!(!speak.definition.concurrency_safe);
+
+    let schedule = prepared
+        .tools
+        .iter()
+        .find(|t| t.definition.name == "chatroom_schedule")
+        .expect("chatroom_schedule");
+    assert!(!schedule.definition.concurrency_safe);
+
+    // Call-level determination via tool.call.prepare:
+    // action="list" -> concurrency_safe: true
+    let list_req = serde_json::json!({
+        "call_id": "c_list",
+        "tool_id": "t_sched",
+        "name": "chatroom_schedule",
+        "arguments": { "action": "list" },
+        "concurrency_safe": false
+    });
+    let list_res = manager
+        .transform_validated(ragents_core::HOOK_TOOL_CALL_PREPARE, Some(1), list_req, |_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(
+        list_res.payload.get("concurrency_safe").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+
+    // action="create" -> concurrency_safe: false
+    let create_req = serde_json::json!({
+        "call_id": "c_create",
+        "tool_id": "t_sched",
+        "name": "chatroom_schedule",
+        "arguments": { "action": "create", "title": "t" },
+        "concurrency_safe": false
+    });
+    let create_res = manager
+        .transform_validated(ragents_core::HOOK_TOOL_CALL_PREPARE, Some(1), create_req, |_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(
+        create_res.payload.get("concurrency_safe").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+
+    manager.shutdown().await.unwrap();
 }

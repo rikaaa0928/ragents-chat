@@ -810,6 +810,81 @@ struct InspectorQuery {
     session_id: Option<String>,
 }
 
+fn item_identity_keys(item: &openresponses_rust::Item) -> (Option<String>, Option<String>) {
+    use openresponses_rust::Item;
+    match item {
+        Item::Message { id, .. }
+        | Item::Reasoning { id, .. }
+        | Item::Compaction { id, .. }
+        | Item::Extension { id, .. } => (id.clone(), None),
+        Item::FunctionCall { id, call_id, .. } => (id.clone(), Some(format!("fc:{call_id}"))),
+        Item::FunctionCallOutput { id, call_id, .. } => {
+            (id.clone(), Some(format!("fco:{call_id}")))
+        }
+        Item::ItemReference { id } => (Some(id.clone()), None),
+    }
+}
+
+fn resolve_inspector_item_timestamps(
+    effective_items: &[openresponses_rust::Item],
+    events: &[SessionEventEnvelope],
+    session_created_at: Option<&str>,
+) -> Vec<String> {
+    let mut by_id: HashMap<String, String> = HashMap::new();
+    let mut by_call_key: HashMap<String, String> = HashMap::new();
+    let mut positional_times: Vec<String> = Vec::new();
+
+    for env in events {
+        let ts = env.created_at.to_rfc3339();
+        let ev_items = match &env.event {
+            SessionEvent::ActivationSubmitted { items, .. }
+            | SessionEvent::TurnCompleted { items, .. }
+            | SessionEvent::ToolCallFinished { items, .. } => items.as_slice(),
+            _ => &[],
+        };
+        for ev_item in ev_items {
+            positional_times.push(ts.clone());
+            let (id_opt, call_key_opt) = item_identity_keys(ev_item);
+            if let Some(id) = id_opt {
+                by_id.entry(id).or_insert_with(|| ts.clone());
+            }
+            if let Some(call_key) = call_key_opt {
+                by_call_key.entry(call_key).or_insert_with(|| ts.clone());
+            }
+        }
+    }
+
+    let offset = effective_items.len().saturating_sub(positional_times.len());
+    effective_items
+        .iter()
+        .enumerate()
+        .map(|(idx, it)| {
+            let (id_opt, call_key_opt) = item_identity_keys(it);
+            if let Some(id) = id_opt {
+                if let Some(ts) = by_id.get(&id) {
+                    return ts.clone();
+                }
+            }
+            if let Some(call_key) = call_key_opt {
+                if let Some(ts) = by_call_key.get(&call_key) {
+                    return ts.clone();
+                }
+            }
+            if idx >= offset {
+                if let Some(ts) = positional_times.get(idx - offset) {
+                    return ts.clone();
+                }
+            }
+            if idx == 0 {
+                if let Some(ts) = session_created_at {
+                    return ts.to_string();
+                }
+            }
+            String::new()
+        })
+        .collect()
+}
+
 async fn handle_get_inspector(
     State(state): State<ChatServerState>,
     headers: HeaderMap,
@@ -866,6 +941,20 @@ async fn handle_get_inspector(
         .build_agent_permission_summary(&agent, session.as_ref(), &events)
         .await;
 
+    let session_created_at = session
+        .as_ref()
+        .map(|s| s.metadata.created_at.to_rfc3339());
+    let item_timestamps = context
+        .as_ref()
+        .map(|ctx| {
+            resolve_inspector_item_timestamps(
+                &ctx.effective_items,
+                &events,
+                session_created_at.as_deref(),
+            )
+        })
+        .unwrap_or_default();
+
     // Historical items are already present in `context.effective_items`; clear duplicate `items`
     // payloads from the historical `events` snapshot to avoid sending redundant data to the browser.
     for env in &mut events {
@@ -891,6 +980,7 @@ async fn handle_get_inspector(
         selected_session_id,
         session,
         context,
+        item_timestamps,
         events,
         pending_permissions,
         can_edit_prompt,
