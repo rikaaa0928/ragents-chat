@@ -259,7 +259,10 @@ You manage the room's specialist agent roster using your tools:\n\
     ) -> Result<ManagerSettings, ChatStoreError> {
         let mut current = self.get_manager_settings()?;
         if let Some(m) = patch.manager_model {
-            current.manager_model = m;
+            let trimmed = m.trim();
+            if !trimmed.is_empty() {
+                current.manager_model = trimmed.to_string();
+            }
         }
         if let Some(p) = patch.manager_system_prompt {
             current.manager_system_prompt = p;
@@ -271,7 +274,10 @@ You manage the room's specialist agent roster using your tools:\n\
             current.default_workspace_root = w.filter(|s| !s.trim().is_empty());
         }
         if let Some(am) = patch.default_agent_model {
-            current.default_agent_model = am;
+            let trimmed = am.trim();
+            if !trimmed.is_empty() {
+                current.default_agent_model = trimmed.to_string();
+            }
         }
         if let Some(eff) = patch.default_reasoning_effort {
             current.default_reasoning_effort = eff.filter(|s| !s.trim().is_empty());
@@ -330,6 +336,42 @@ You manage the room's specialist agent roster using your tools:\n\
             ],
         )?;
         Ok(current)
+    }
+
+    /// Synchronizes built-in extension defaults on startup without overwriting persisted
+    /// `manager_model` or `default_agent_model` configured via the Web UI.
+    pub fn sync_startup_defaults(
+        &self,
+        fallback_model: &str,
+        default_extensions: Vec<ExtensionSpec>,
+    ) -> Result<ManagerSettings, ChatStoreError> {
+        let current = self.get_manager_settings()?;
+        let fallback = fallback_model.trim();
+        let manager_model = if current.manager_model.trim().is_empty() && !fallback.is_empty() {
+            Some(fallback.to_string())
+        } else {
+            None
+        };
+        let default_agent_model =
+            if current.default_agent_model.trim().is_empty() && !fallback.is_empty() {
+                Some(fallback.to_string())
+            } else {
+                None
+            };
+        self.update_manager_settings(UpdateManagerSettingsRequest {
+            manager_model,
+            manager_system_prompt: None,
+            default_agent_model,
+            default_reasoning_effort: None,
+            default_reasoning_summary: None,
+            default_web_search: None,
+            default_prompt_hint: None,
+            default_extensions: Some(default_extensions),
+            default_node_id: None,
+            default_workspace_root: None,
+            idle_peek_debounce_ms: None,
+            max_agent_relay_depth: None,
+        })
     }
 
     pub fn create_room(&self, name: &str, description: &str) -> Result<Room, ChatStoreError> {
@@ -1342,4 +1384,51 @@ fn parse_dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_manager_and_default_agent_model_persist_across_restarts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("chatroom.sqlite");
+
+        // 1. First startup seeds fallback model.
+        let store1 = ChatroomStore::open(&db_path, "gemini-3.8-flash", vec![]).unwrap();
+        store1
+            .sync_startup_defaults("gemini-3.8-flash", vec![])
+            .unwrap();
+        let s1 = store1.get_manager_settings().unwrap();
+        assert_eq!(s1.manager_model, "gemini-3.8-flash");
+        assert_eq!(s1.default_agent_model, "gemini-3.8-flash");
+
+        // 2. User updates models in the Web UI.
+        store1
+            .update_manager_settings(UpdateManagerSettingsRequest {
+                manager_model: Some("gemini-4-hydrogen".to_string()),
+                manager_system_prompt: None,
+                default_agent_model: Some("gemini-4-argon".to_string()),
+                default_reasoning_effort: None,
+                default_reasoning_summary: None,
+                default_web_search: None,
+                default_prompt_hint: None,
+                default_extensions: None,
+                default_node_id: None,
+                default_workspace_root: None,
+                idle_peek_debounce_ms: None,
+                max_agent_relay_depth: None,
+            })
+            .unwrap();
+        drop(store1);
+
+        // 3. Reopening with env/CLI fallback must NOT overwrite user-selected models.
+        let store2 = ChatroomStore::open(&db_path, "gemini-3.8-flash", vec![]).unwrap();
+        let s2 = store2
+            .sync_startup_defaults("gemini-3.8-flash", vec![])
+            .unwrap();
+        assert_eq!(s2.manager_model, "gemini-4-hydrogen");
+        assert_eq!(s2.default_agent_model, "gemini-4-argon");
+    }
 }

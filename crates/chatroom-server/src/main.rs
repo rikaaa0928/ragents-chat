@@ -1,7 +1,5 @@
 use clap::Parser;
-use chatroom_server::{
-    serve_chat_tcp, ChatServerState, ChatroomStore, RoomCoordinator, UpdateManagerSettingsRequest,
-};
+use chatroom_server::{serve_chat_tcp, ChatServerState, ChatroomStore, RoomCoordinator};
 use ragents_client::RagentsClient;
 use ragents_protocol::ExtensionSpec;
 use std::path::PathBuf;
@@ -129,20 +127,7 @@ async fn main() -> anyhow::Result<()> {
     ];
 
     let store = ChatroomStore::open(&cli.db, &default_model, default_extensions.clone())?;
-    store.update_manager_settings(UpdateManagerSettingsRequest {
-        manager_model: Some(default_model.clone()),
-        manager_system_prompt: None,
-        default_agent_model: Some(default_model),
-        default_reasoning_effort: None,
-        default_reasoning_summary: None,
-        default_web_search: None,
-        default_prompt_hint: None,
-        default_extensions: Some(default_extensions),
-        default_node_id: None,
-        default_workspace_root: None,
-        idle_peek_debounce_ms: None,
-        max_agent_relay_depth: None,
-    })?;
+    store.sync_startup_defaults(&default_model, default_extensions)?;
 
     let listener = TcpListener::bind(&cli.listen).await?;
     let local_addr = listener.local_addr()?;
