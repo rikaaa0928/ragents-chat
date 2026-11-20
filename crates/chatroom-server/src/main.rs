@@ -43,6 +43,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    ragents_client::ensure_rustls_crypto_provider();
     let cli = Cli::parse();
 
     if let Some(parent) = cli.db.parent() {
