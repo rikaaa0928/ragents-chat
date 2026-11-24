@@ -859,8 +859,9 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
 
     seen_tools.lock().unwrap().clear();
 
-    // Wake ONLY `@SecAuditor` for 2.5s; `@Assistant` stays Idle and unmentioned
-    let _ = http
+    // Wake ONLY `@SecAuditor` for 2.5s using `is_realtime: true`; `@Assistant` stays Idle and unmentioned.
+    // Verify that for unmentioned `@Assistant`, this realtime message appears in `normal_messages` (`is_realtime: false`).
+    let rt_msg: RoomMessage = http
         .post(format!("{chat_base}/api/v1/rooms/{room_id}/messages"))
         .bearer_auth(chat_auth_token)
         .json(&PostMessageRequest {
@@ -869,11 +870,43 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             mentions: vec!["SecAuditor".to_string()],
             visible_to: vec![],
             reply_to_seq: None,
-            is_realtime: false,
+            is_realtime: true,
         })
         .send()
         .await
+        .unwrap()
+        .json()
+        .await
         .unwrap();
+    assert!(rt_msg.is_realtime);
+
+    let unmentioned_insp: InspectorResponse = http
+        .get(format!("{chat_base}/api/v1/agents/{assistant_id}/inspector"))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        unmentioned_insp
+            .message_queues
+            .realtime_messages
+            .iter()
+            .all(|q| q.msg_seq != rt_msg.msg_seq),
+        "Realtime message must NOT appear in realtime_messages for unmentioned @Assistant"
+    );
+    let queued_for_assistant = unmentioned_insp
+        .message_queues
+        .normal_messages
+        .iter()
+        .find(|q| q.msg_seq == rt_msg.msg_seq)
+        .expect("Unmentioned @Assistant must see the message in normal_messages");
+    assert!(
+        !queued_for_assistant.is_realtime,
+        "Unmentioned @Assistant must treat realtime message as non-realtime"
+    );
 
     let mut assistant_peeked_while_sec_busy = false;
     for _ in 0..22 {
@@ -943,6 +976,29 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         .json()
         .await
         .unwrap();
+
+    // Multi-agent broadcast with `is_realtime: true` and NO `@mention` must degrade to non-realtime (`is_realtime == false`)
+    let broadcast_rt: RoomMessage = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/messages"))
+        .bearer_auth(chat_auth_token)
+        .json(&PostMessageRequest {
+            sender_name: "Alice".to_string(),
+            content: "未点名任何人的实时广播也应视为非实时消息".to_string(),
+            mentions: vec![],
+            visible_to: vec![],
+            reply_to_seq: None,
+            is_realtime: true,
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !broadcast_rt.is_realtime,
+        "Multi-agent broadcast without @mention must coerce is_realtime to false"
+    );
 
     // 12. Test `@Manager` Agent removal via `chatroom_remove_agent` -> `chatroom_speak` and verify @Manager Inspector
     let mgr_rm_msg: RoomMessage = http

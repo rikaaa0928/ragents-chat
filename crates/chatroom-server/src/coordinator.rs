@@ -304,13 +304,21 @@ impl RoomCoordinator {
                 }
             }
 
+            let is_mentioned = msg
+                .mentions
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(&agent.name));
+            let is_pending_rt_injected =
+                msg.msg_seq <= agent.last_delivered_seq && pending_rt.contains(&msg.msg_seq);
+            let effective_realtime = msg.is_realtime && (is_mentioned || is_pending_rt_injected);
+
             let status_label = if msg.msg_seq > agent.last_delivered_seq {
-                if msg.is_realtime {
+                if effective_realtime {
                     "排队中 · 待投递".to_string()
                 } else {
                     "排队中 · 待唤醒/窥屏投递".to_string()
                 }
-            } else if msg.is_realtime {
+            } else if effective_realtime {
                 if !is_agent_idle && pending_rt.contains(&msg.msg_seq) {
                     "排队中 · 等待步骤间隙注入".to_string()
                 } else {
@@ -326,12 +334,12 @@ impl RoomCoordinator {
                 msg_seq: msg.msg_seq,
                 sender_name: msg.sender_name,
                 content: msg.content,
-                is_realtime: msg.is_realtime,
+                is_realtime: effective_realtime,
                 status_label,
                 created_at: msg.created_at,
             };
 
-            if msg.is_realtime {
+            if effective_realtime {
                 realtime_messages.push(entry);
             } else {
                 normal_messages.push(entry);
@@ -2337,6 +2345,11 @@ impl RoomCoordinator {
         }
 
         let visible_to = resolve_explicit_mentions(&req.visible_to, &agents, None);
+        // Realtime delivery only applies to explicitly @mentioned targets; unmentioned members (or broadcasts with no @mentions) always treat it as non-realtime.
+        let has_agent_mention = mentions
+            .iter()
+            .any(|m| !m.eq_ignore_ascii_case("Human"));
+        let effective_is_realtime = req.is_realtime && has_agent_mention;
         let (msg, updated_room) = self.store.append_message(
             room_id,
             SenderKind::Human,
@@ -2350,7 +2363,7 @@ impl RoomCoordinator {
             mentions,
             visible_to,
             req.reply_to_seq,
-            req.is_realtime,
+            effective_is_realtime,
             None,
             None,
         )?;

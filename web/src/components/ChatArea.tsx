@@ -369,10 +369,10 @@ const ChatMessageRow: React.FC<ChatMessageRowProps> = React.memo(
               </span>
             )}
             <span className="font-mono-code">#{m.msg_seq}</span>
-            {m.is_realtime ? (
+            {m.is_realtime && mentions.some((tag) => String(tag).toLowerCase() !== 'human') ? (
               <span
                 className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 font-medium text-[10.5px]"
-                title="实时消息：直接注入 Agent 当前运行循环或立即唤醒"
+                title="实时消息：仅对本次 @点名 的成员实时注入，未点名成员按非实时处理"
               >
                 <Zap className="w-2.5 h-2.5" />
                 <span>实时</span>
@@ -1370,7 +1370,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   }`}
                   title={
                     isRealtimeMsg
-                      ? '当前：实时消息（点击切换为非实时消息）。实时消息会直接注入 Agent 正在运行的思考循环中'
+                      ? '当前：实时消息（仅对本次 @点名 的成员实时注入，对其余未点名成员按非实时排队/窥屏处理）'
                       : '当前：非实时消息（默认，点击切换为实时消息）。非实时消息会等待 Agent 当前回合结束后按序投递'
                   }
                 >
