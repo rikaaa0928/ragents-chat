@@ -253,7 +253,9 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
             )}
             <span className="hidden lg:inline">窥屏配置</span>
             <span className="hidden sm:inline text-[11px] text-[var(--text-muted)]">
-              {room.peek_enabled ? `${room.peek_idle_secs}s` : '已关'}
+              {room.peek_enabled
+                ? `${room.peek_idle_mode === 'per_agent' ? '单体' : '全局'} ${room.peek_idle_secs}s`
+                : '已关'}
             </span>
             {peekConfigOpen ? (
               <ChevronUp className="hidden sm:block w-3 h-3 text-[var(--text-muted)] shrink-0" />
@@ -522,6 +524,40 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                   开启空闲窥屏
                 </span>
               </label>
+
+              {/* Idle Mode: Global vs Per-Agent */}
+              <div
+                className="flex items-center gap-1.5 text-[var(--text-secondary)]"
+                title="全局静默：等待房间所有成员均空闲且静默后触发；单体静默：单个成员空闲静默后独立触发窥屏，及时消化消息并触发上下文压缩"
+              >
+                <span>触发模式</span>
+                <div className="inline-flex rounded-md border border-[var(--border-default)] bg-[var(--bg-main)] p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => onUpdateRoomControls({ peek_idle_mode: 'global' })}
+                    className={`px-2 py-0.5 rounded text-[11px] font-medium cursor-pointer transition-colors ${
+                      room.peek_idle_mode !== 'per_agent'
+                        ? 'bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)]'
+                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                    }`}
+                    title="房间全员均空闲且静默后触发"
+                  >
+                    全局静默
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onUpdateRoomControls({ peek_idle_mode: 'per_agent' })}
+                    className={`px-2 py-0.5 rounded text-[11px] font-medium cursor-pointer transition-colors ${
+                      room.peek_idle_mode === 'per_agent'
+                        ? 'bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)]'
+                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                    }`}
+                    title="单 Agent 空闲静默后独立窥屏，避免堆积过多消息导致上下文溢出"
+                  >
+                    单体静默
+                  </button>
+                </div>
+              </div>
 
               {/* Idle Secs */}
               <label className="flex items-center gap-1.5 text-[var(--text-secondary)]">

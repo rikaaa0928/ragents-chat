@@ -85,6 +85,7 @@ impl ChatroomStore {
                  last_msg_seq            INTEGER NOT NULL DEFAULT 0,
                  roster_version          INTEGER NOT NULL DEFAULT 1,
                  peek_enabled            INTEGER NOT NULL DEFAULT 0,
+                 peek_idle_mode          TEXT NOT NULL DEFAULT 'global',
                  peek_idle_secs          INTEGER NOT NULL DEFAULT 60,
                  peek_msg_interval       INTEGER NOT NULL DEFAULT 20,
                  interject_enabled       INTEGER NOT NULL DEFAULT 0,
@@ -387,6 +388,7 @@ You manage the room's specialist agent roster using your tools:\n\
             last_msg_seq: 0,
             roster_version: 1,
             peek_enabled: false,
+            peek_idle_mode: PeekIdleMode::Global,
             peek_idle_secs: 60,
             peek_msg_interval: 20,
             interject_enabled: false,
@@ -401,10 +403,10 @@ You manage the room's specialist agent roster using your tools:\n\
         conn.execute(
             "INSERT INTO rooms (
                 room_id, name, description, node_id, workspace_path, last_msg_seq, roster_version,
-                peek_enabled, peek_idle_secs, peek_msg_interval, interject_enabled,
+                peek_enabled, peek_idle_mode, peek_idle_secs, peek_msg_interval, interject_enabled,
                 mute_probability, max_agent_relay_depth, consecutive_agent_msgs,
                 created_at, updated_at
-             ) VALUES (?1, ?2, ?3, NULL, NULL, 0, 1, 0, 60, 20, 0, 40, ?4, 0, ?5, ?5)",
+             ) VALUES (?1, ?2, ?3, NULL, NULL, 0, 1, 0, 'global', 60, 20, 0, 40, ?4, 0, ?5, ?5)",
             params![
                 &room.room_id,
                 &room.name,
@@ -440,10 +442,11 @@ You manage the room's specialist agent roster using your tools:\n\
             "SELECT room_id, name, description, last_msg_seq, roster_version,
                     peek_enabled, peek_idle_secs, peek_msg_interval, interject_enabled,
                     mute_probability, max_agent_relay_depth, consecutive_agent_msgs,
-                    created_at, updated_at, node_id, workspace_path
+                    created_at, updated_at, node_id, workspace_path, peek_idle_mode
              FROM rooms WHERE room_id = ?1",
             params![room_id],
             |r| {
+                let mode_str: String = r.get(16)?;
                 Ok(Room {
                     room_id: r.get(0)?,
                     name: r.get(1)?,
@@ -453,6 +456,7 @@ You manage the room's specialist agent roster using your tools:\n\
                     last_msg_seq: r.get::<_, i64>(3)? as u64,
                     roster_version: r.get::<_, i64>(4)? as u64,
                     peek_enabled: r.get::<_, i64>(5)? != 0,
+                    peek_idle_mode: PeekIdleMode::from_str(&mode_str),
                     peek_idle_secs: r.get::<_, i64>(6)? as u64,
                     peek_msg_interval: r.get::<_, i64>(7)? as u32,
                     interject_enabled: r.get::<_, i64>(8)? != 0,
@@ -474,10 +478,11 @@ You manage the room's specialist agent roster using your tools:\n\
             "SELECT room_id, name, description, last_msg_seq, roster_version,
                     peek_enabled, peek_idle_secs, peek_msg_interval, interject_enabled,
                     mute_probability, max_agent_relay_depth, consecutive_agent_msgs,
-                    created_at, updated_at, node_id, workspace_path
+                    created_at, updated_at, node_id, workspace_path, peek_idle_mode
              FROM rooms ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([], |r| {
+            let mode_str: String = r.get(16)?;
             Ok(Room {
                 room_id: r.get(0)?,
                 name: r.get(1)?,
@@ -487,6 +492,7 @@ You manage the room's specialist agent roster using your tools:\n\
                 last_msg_seq: r.get::<_, i64>(3)? as u64,
                 roster_version: r.get::<_, i64>(4)? as u64,
                 peek_enabled: r.get::<_, i64>(5)? != 0,
+                peek_idle_mode: PeekIdleMode::from_str(&mode_str),
                 peek_idle_secs: r.get::<_, i64>(6)? as u64,
                 peek_msg_interval: r.get::<_, i64>(7)? as u32,
                 interject_enabled: r.get::<_, i64>(8)? != 0,
@@ -510,7 +516,7 @@ You manage the room's specialist agent roster using your tools:\n\
             "SELECT DISTINCT r.room_id, r.name, r.description, r.last_msg_seq, r.roster_version,
                     r.peek_enabled, r.peek_idle_secs, r.peek_msg_interval, r.interject_enabled,
                     r.mute_probability, r.max_agent_relay_depth, r.consecutive_agent_msgs,
-                    r.created_at, r.updated_at, r.node_id, r.workspace_path
+                    r.created_at, r.updated_at, r.node_id, r.workspace_path, r.peek_idle_mode
              FROM rooms r
              LEFT JOIN room_agents a ON a.room_id = r.room_id
              WHERE r.node_id = ?1
@@ -519,6 +525,7 @@ You manage the room's specialist agent roster using your tools:\n\
              ORDER BY r.updated_at DESC",
         )?;
         let rows = stmt.query_map(params![node_id], |r| {
+            let mode_str: String = r.get(16)?;
             Ok(Room {
                 room_id: r.get(0)?,
                 name: r.get(1)?,
@@ -528,6 +535,7 @@ You manage the room's specialist agent roster using your tools:\n\
                 last_msg_seq: r.get::<_, i64>(3)? as u64,
                 roster_version: r.get::<_, i64>(4)? as u64,
                 peek_enabled: r.get::<_, i64>(5)? != 0,
+                peek_idle_mode: PeekIdleMode::from_str(&mode_str),
                 peek_idle_secs: r.get::<_, i64>(6)? as u64,
                 peek_msg_interval: r.get::<_, i64>(7)? as u32,
                 interject_enabled: r.get::<_, i64>(8)? != 0,
@@ -559,6 +567,9 @@ You manage the room's specialist agent roster using your tools:\n\
         if let Some(pe) = patch.peek_enabled {
             room.peek_enabled = pe;
         }
+        if let Some(mode) = patch.peek_idle_mode {
+            room.peek_idle_mode = mode;
+        }
         if let Some(secs) = patch.peek_idle_secs {
             room.peek_idle_secs = secs;
         }
@@ -581,17 +592,19 @@ You manage the room's specialist agent roster using your tools:\n\
                 name = ?1,
                 description = ?2,
                 peek_enabled = ?3,
-                peek_idle_secs = ?4,
-                peek_msg_interval = ?5,
-                interject_enabled = ?6,
-                mute_probability = ?7,
-                max_agent_relay_depth = ?8,
-                updated_at = ?9
-             WHERE room_id = ?10",
+                peek_idle_mode = ?4,
+                peek_idle_secs = ?5,
+                peek_msg_interval = ?6,
+                interject_enabled = ?7,
+                mute_probability = ?8,
+                max_agent_relay_depth = ?9,
+                updated_at = ?10
+             WHERE room_id = ?11",
             params![
                 &room.name,
                 &room.description,
                 i64::from(room.peek_enabled),
+                room.peek_idle_mode.as_str(),
                 room.peek_idle_secs as i64,
                 room.peek_msg_interval as i64,
                 i64::from(room.interject_enabled),

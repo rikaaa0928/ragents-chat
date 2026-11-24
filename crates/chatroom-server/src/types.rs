@@ -88,6 +88,35 @@ pub struct UpdateManagerSettingsRequest {
     pub max_agent_relay_depth: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeekIdleMode {
+    Global,
+    PerAgent,
+}
+
+impl Default for PeekIdleMode {
+    fn default() -> Self {
+        Self::Global
+    }
+}
+
+impl PeekIdleMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::PerAgent => "per_agent",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "per_agent" => Self::PerAgent,
+            _ => Self::Global,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Room {
     pub room_id: String,
@@ -100,6 +129,7 @@ pub struct Room {
     pub last_msg_seq: u64,
     pub roster_version: u64,
     pub peek_enabled: bool,
+    pub peek_idle_mode: PeekIdleMode,
     pub peek_idle_secs: u64,
     pub peek_msg_interval: u32,
     pub interject_enabled: bool,
@@ -170,6 +200,8 @@ pub struct PatchRoomRequest {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peek_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peek_idle_mode: Option<PeekIdleMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peek_idle_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

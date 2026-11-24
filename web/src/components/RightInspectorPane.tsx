@@ -842,7 +842,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                 </div>
                 <div className="font-semibold text-[var(--text-primary)]">
                   {room.peek_enabled
-                    ? `${room.peek_idle_secs}s · ≥${room.peek_msg_interval}条`
+                    ? `${room.peek_idle_mode === 'per_agent' ? '单体' : '全局'} ${room.peek_idle_secs}s · ≥${room.peek_msg_interval}条`
                     : '已关闭'}
                 </div>
               </div>

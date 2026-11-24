@@ -5,6 +5,7 @@ export interface Room {
   node_id?: string | null;
   workspace_path?: string | null;
   peek_enabled: boolean;
+  peek_idle_mode: 'global' | 'per_agent';
   peek_idle_secs: number;
   peek_msg_interval: number;
   interject_enabled: boolean;

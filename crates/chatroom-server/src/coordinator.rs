@@ -28,10 +28,14 @@ struct RoomPeekState {
     eligible_queue: VecDeque<(String, u8)>,
     /// Agents that rolled `< mute_probability` (or when `interject_enabled == false`) waiting for muted read-only sync
     muted_queue: VecDeque<(String, u8)>,
-    /// Currently peeking agent ID in the sequential loop
+    /// Currently peeking agent ID in the sequential loop (tracks active interjection-capable peek)
     active_peeking_agent_id: Option<String>,
-    /// Generation counter to cancel stale debounce timers when new messages arrive
+    /// Generation counter to cancel stale debounce timers when new messages arrive (Global mode)
     timer_generation: u64,
+    /// Per-agent idle timer generation counters (PerAgent mode)
+    per_agent_timer_gens: HashMap<String, u64>,
+    /// Per-agent armed flags indicating an active countdown is running for that agent
+    per_agent_armed: HashMap<String, bool>,
 }
 
 #[derive(Clone)]
@@ -581,6 +585,7 @@ impl RoomCoordinator {
 
         let act_id = ActivationId::new(act.metadata.id.clone());
         let mut final_agent = updated_agent.clone();
+        self.cancel_agent_per_agent_timer(&room.room_id, &updated_agent.agent_id);
         if act.status.phase.is_active() {
             if let Ok(thinking_agent) = self.store.update_agent_runtime_state(
                 &updated_agent.agent_id,
@@ -1178,6 +1183,9 @@ impl RoomCoordinator {
                     let _ = self.sync_floating_room_node(&room.room_id, bn, None).await;
                 }
             }
+            if room.peek_enabled {
+                self.schedule_room_peek_if_ready(&room.room_id);
+            }
         }
     }
 
@@ -1299,6 +1307,7 @@ impl RoomCoordinator {
                         AgentRuntimeState::Thinking,
                         env.activation_id.clone(),
                     ) {
+                        self.cancel_agent_per_agent_timer(&updated.room_id, &updated.agent_id);
                         self.emit_room_event(ChatroomEvent::AgentUpdated {
                             room_id: updated.room_id.clone(),
                             agent: self.to_agent_public(updated.clone()),
@@ -1746,7 +1755,8 @@ impl RoomCoordinator {
                 ),
             );
             self.step_sequential_peek_queue(&agent.room_id).await;
-        } else if !agent.name.eq_ignore_ascii_case("Manager") {
+        }
+        if !agent.name.eq_ignore_ascii_case("Manager") {
             self.schedule_room_peek_if_ready(&agent.room_id);
         }
     }
@@ -2572,6 +2582,13 @@ impl RoomCoordinator {
         }
 
         // Interrupt any ongoing sequential peek queue for this room because a new message just arrived!
+        let room_mode = self
+            .store
+            .get_room(&req.room_id)
+            .ok()
+            .flatten()
+            .map(|r| r.peek_idle_mode)
+            .unwrap_or_default();
         {
             let mut peek_guard = self
                 .room_peek_states
@@ -2580,7 +2597,11 @@ impl RoomCoordinator {
             if let Some(st) = peek_guard.get_mut(&req.room_id) {
                 st.eligible_queue.clear();
                 st.muted_queue.clear();
-                st.active_peeking_agent_id = None;
+                let active_is_speaker =
+                    st.active_peeking_agent_id.as_deref() == Some(agent.agent_id.as_str());
+                if room_mode == PeekIdleMode::Global || active_is_speaker {
+                    st.active_peeking_agent_id = None;
+                }
                 st.timer_generation += 1;
             }
         }
@@ -3277,13 +3298,18 @@ Task Instructions:\n\
                         ),
                     );
                 } else {
+                    let mode_label = match room.peek_idle_mode {
+                        PeekIdleMode::Global => "全局静默",
+                        PeekIdleMode::PerAgent => "单体静默",
+                    };
                     self.emit_flow_status(
                         &room.room_id,
                         format!(
-                            "[#{} 路由] {} 发送{} (无点名目标) -> 启动空闲窥屏计时 ({}s 静默后检测，间隔阈值 ≥{} 条)",
+                            "[#{} 路由] {} 发送{} (无点名目标) -> 启动{}窥屏计时 ({}s 静默后检测，间隔阈值 ≥{} 条)",
                             msg.msg_seq,
                             msg.sender_name,
                             vis_tag,
+                            mode_label,
                             room.peek_idle_secs,
                             room.peek_msg_interval
                         ),
@@ -3291,8 +3317,12 @@ Task Instructions:\n\
                 }
             }
 
-            // 3. If no agents were explicitly @mentioned (and sender is not @Manager), schedule the room's Peek & Interjection check
-            if mentioned_agent_ids.is_empty() && msg.sender_kind != SenderKind::Manager {
+            // 3. Schedule room peek:
+            //    - Global mode: when no agents were explicitly @mentioned (and sender is not @Manager).
+            //    - PerAgent mode: whenever any non-Manager message arrives so unmentioned idle agents stay armed.
+            if (mentioned_agent_ids.is_empty() || room.peek_idle_mode == PeekIdleMode::PerAgent)
+                && msg.sender_kind != SenderKind::Manager
+            {
                 self.schedule_room_peek_if_ready(&room.room_id);
             }
         })
@@ -3330,6 +3360,7 @@ Task Instructions:\n\
             room.roster_version,
             true,
         )?;
+        self.cancel_agent_per_agent_timer(&room.room_id, &target_agent.agent_id);
 
         {
             let mut dm_guard = self
@@ -3686,6 +3717,62 @@ Task Instructions:\n\
         Ok(())
     }
 
+    fn cancel_agent_per_agent_timer(&self, room_id: &str, agent_id: &str) {
+        let mut guard = self
+            .room_peek_states
+            .lock()
+            .expect("room_peek_states mutex poisoned");
+        if let Some(st) = guard.get_mut(room_id) {
+            let gen = st
+                .per_agent_timer_gens
+                .entry(agent_id.to_string())
+                .or_insert(0);
+            *gen += 1;
+            st.per_agent_armed.remove(agent_id);
+        }
+    }
+
+    pub fn on_room_peek_config_updated(&self, room: &Room) {
+        {
+            let mut guard = self
+                .room_peek_states
+                .lock()
+                .expect("room_peek_states mutex poisoned");
+            let st = guard.entry(room.room_id.clone()).or_default();
+            st.timer_generation += 1;
+            for gen in st.per_agent_timer_gens.values_mut() {
+                *gen += 1;
+            }
+            st.per_agent_armed.clear();
+            if !room.peek_enabled {
+                st.eligible_queue.clear();
+                st.muted_queue.clear();
+                st.active_peeking_agent_id = None;
+            }
+        }
+        if !room.peek_enabled {
+            self.emit_flow_status(&room.room_id, "[🛑 窥屏已关闭] 已清空待触发窥屏计时器".to_string());
+            return;
+        }
+        let mode_label = match room.peek_idle_mode {
+            PeekIdleMode::Global => "全局静默",
+            PeekIdleMode::PerAgent => "单体静默",
+        };
+        let interject_label = if room.interject_enabled {
+            format!("允许主动插话 (禁言率 {}%)", room.mute_probability)
+        } else {
+            "仅只读窥屏".to_string()
+        };
+        self.emit_flow_status(
+            &room.room_id,
+            format!(
+                "[⚙️ 窥屏配置] 已开启{} ({}s 静默, ≥{}条触发, {})",
+                mode_label, room.peek_idle_secs, room.peek_msg_interval, interject_label
+            ),
+        );
+        self.schedule_room_peek_if_ready(&room.room_id);
+    }
+
     pub fn schedule_room_peek_if_ready(&self, room_id: &str) {
         let Ok(Some(room)) = self.store.get_room(room_id) else {
             return;
@@ -3697,38 +3784,346 @@ Task Instructions:\n\
             return;
         }
 
-        let my_gen = {
-            let mut guard = self
-                .room_peek_states
-                .lock()
-                .expect("room_peek_states mutex poisoned");
-            let st = guard.entry(room_id.to_string()).or_default();
-            if st.active_peeking_agent_id.is_some() || !st.eligible_queue.is_empty() {
-                return;
+        match room.peek_idle_mode {
+            PeekIdleMode::Global => {
+                let my_gen = {
+                    let mut guard = self
+                        .room_peek_states
+                        .lock()
+                        .expect("room_peek_states mutex poisoned");
+                    let st = guard.entry(room_id.to_string()).or_default();
+                    if st.active_peeking_agent_id.is_some()
+                        || !st.eligible_queue.is_empty()
+                        || !st.muted_queue.is_empty()
+                    {
+                        return;
+                    }
+                    st.timer_generation += 1;
+                    st.timer_generation
+                };
+
+                let delay_ms = (room.peek_idle_secs * 1000).max(200);
+                let coord = self.clone();
+                let room_id_owned = room_id.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    let still_valid = {
+                        let guard = coord
+                            .room_peek_states
+                            .lock()
+                            .expect("room_peek_states mutex poisoned");
+                        guard
+                            .get(&room_id_owned)
+                            .map(|st| {
+                                st.timer_generation == my_gen && st.active_peeking_agent_id.is_none()
+                            })
+                            .unwrap_or(false)
+                    };
+                    if still_valid {
+                        coord.start_peek_and_interject_round(&room_id_owned).await;
+                    }
+                });
             }
-            st.timer_generation += 1;
-            st.timer_generation
+            PeekIdleMode::PerAgent => {
+                let Ok(agents) = self.store.list_room_agents(room_id) else {
+                    return;
+                };
+                let delay_ms = (room.peek_idle_secs * 1000).max(200);
+                let threshold = u64::from(room.peek_msg_interval.max(1));
+                let mut newly_armed = Vec::new();
+                let mut to_spawn: Vec<(String, u64)> = Vec::new();
+
+                {
+                    let mut guard = self
+                        .room_peek_states
+                        .lock()
+                        .expect("room_peek_states mutex poisoned");
+                    let st = guard.entry(room_id.to_string()).or_default();
+
+                    for ag in &agents {
+                        if ag.runtime_state != AgentRuntimeState::Idle {
+                            let gen = st
+                                .per_agent_timer_gens
+                                .entry(ag.agent_id.clone())
+                                .or_insert(0);
+                            *gen += 1;
+                            st.per_agent_armed.remove(&ag.agent_id);
+                            continue;
+                        }
+                        if st.active_peeking_agent_id.as_deref() == Some(ag.agent_id.as_str())
+                            || st.eligible_queue.iter().any(|(id, _)| id == &ag.agent_id)
+                        {
+                            continue;
+                        }
+                        if st.per_agent_armed.get(&ag.agent_id).copied().unwrap_or(false) {
+                            continue;
+                        }
+
+                        let unread_msgs = self
+                            .store
+                            .list_room_messages_for_agent(
+                                room_id,
+                                ag.last_delivered_seq,
+                                &ag.name,
+                            )
+                            .unwrap_or_default();
+                        let countable_unread = unread_msgs
+                            .iter()
+                            .filter(|m| is_peek_countable_message(m))
+                            .count() as u64;
+                        if countable_unread < threshold {
+                            continue;
+                        }
+
+                        let gen = {
+                            let g = st
+                                .per_agent_timer_gens
+                                .entry(ag.agent_id.clone())
+                                .or_insert(0);
+                            *g += 1;
+                            *g
+                        };
+                        st.per_agent_armed.insert(ag.agent_id.clone(), true);
+                        newly_armed.push(format!("@{}({}条)", ag.name, countable_unread));
+                        to_spawn.push((ag.agent_id.clone(), gen));
+                    }
+                }
+
+                if !newly_armed.is_empty() {
+                    self.emit_flow_status(
+                        room_id,
+                        format!(
+                            "[⏳ 单体窥屏计时] 为 {} 启动 {}s 静默倒计时",
+                            newly_armed.join("、"),
+                            room.peek_idle_secs
+                        ),
+                    );
+                }
+
+                for (agent_id, my_gen) in to_spawn {
+                    let coord = self.clone();
+                    let room_id_owned = room_id.to_string();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        let should_fire = {
+                            let mut guard = coord
+                                .room_peek_states
+                                .lock()
+                                .expect("room_peek_states mutex poisoned");
+                            if let Some(st) = guard.get_mut(&room_id_owned) {
+                                let gen_ok = st
+                                    .per_agent_timer_gens
+                                    .get(&agent_id)
+                                    .copied()
+                                    == Some(my_gen);
+                                let armed_ok =
+                                    st.per_agent_armed.get(&agent_id).copied().unwrap_or(false);
+                                if gen_ok && armed_ok {
+                                    st.per_agent_armed.remove(&agent_id);
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        };
+                        if should_fire {
+                            coord
+                                .trigger_single_agent_peek(&room_id_owned, &agent_id)
+                                .await;
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    async fn trigger_single_agent_peek(&self, room_id: &str, agent_id: &str) {
+        let Ok(Some(room)) = self.store.get_room(room_id) else {
+            return;
+        };
+        if !room.peek_enabled
+            || room.peek_idle_mode != PeekIdleMode::PerAgent
+            || (room.max_agent_relay_depth > 0
+                && room.consecutive_agent_msgs >= room.max_agent_relay_depth)
+        {
+            return;
+        }
+
+        let Ok(all_agents) = self.store.list_room_agents(room_id) else {
+            return;
+        };
+        let Some(target_agent) = all_agents.iter().find(|a| a.agent_id == agent_id) else {
+            return;
+        };
+        if target_agent.runtime_state != AgentRuntimeState::Idle {
+            return;
+        }
+
+        let Ok(unread) = self.store.list_room_messages_for_agent(
+            room_id,
+            target_agent.last_delivered_seq,
+            &target_agent.name,
+        ) else {
+            return;
+        };
+        if unread.is_empty() {
+            return;
+        }
+
+        let countable_unread = unread
+            .iter()
+            .filter(|m| is_peek_countable_message(m))
+            .count() as u64;
+        if countable_unread < u64::from(room.peek_msg_interval.max(1)) {
+            return;
+        }
+
+        let roll: u8 = rand::thread_rng().gen_range(0..=100);
+        let allow_speak = room.interject_enabled && roll >= room.mute_probability;
+        let status_label = if allow_speak {
+            format!("≥{}% 可主动插话", room.mute_probability)
+        } else if room.interject_enabled {
+            format!("<{}% 禁言只读", room.mute_probability)
+        } else {
+            "插话已关 禁言只读".to_string()
         };
 
-        let delay_ms = (room.peek_idle_secs * 1000).max(200);
-        let coord = self.clone();
-        let room_id_owned = room_id.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            let still_valid = {
-                let guard = coord
+        self.emit_flow_status(
+            room_id,
+            format!(
+                "[🎲 单体窥屏掷骰] @{} 静默满 {}s (未读 {} 条) -> 🎲{} ({})",
+                target_agent.name, room.peek_idle_secs, countable_unread, roll, status_label
+            ),
+        );
+
+        if allow_speak {
+            let can_dispatch_now = {
+                let mut guard = self
                     .room_peek_states
                     .lock()
                     .expect("room_peek_states mutex poisoned");
-                guard
-                    .get(&room_id_owned)
-                    .map(|st| st.timer_generation == my_gen && st.active_peeking_agent_id.is_none())
-                    .unwrap_or(false)
+                let st = guard.entry(room_id.to_string()).or_default();
+                if st.active_peeking_agent_id.is_none() && st.eligible_queue.is_empty() {
+                    st.active_peeking_agent_id = Some(target_agent.agent_id.clone());
+                    true
+                } else {
+                    if !st.eligible_queue.iter().any(|(id, _)| id == &target_agent.agent_id)
+                        && st.active_peeking_agent_id.as_deref() != Some(target_agent.agent_id.as_str())
+                    {
+                        st.eligible_queue.push_back((target_agent.agent_id.clone(), roll));
+                        let mut vec: Vec<_> = st.eligible_queue.drain(..).collect();
+                        vec.sort_by(|a, b| b.1.cmp(&a.1));
+                        st.eligible_queue = vec.into_iter().collect();
+                    }
+                    false
+                }
             };
-            if still_valid {
-                coord.start_peek_and_interject_round(&room_id_owned).await;
+            if can_dispatch_now {
+                let dispatched = self
+                    .dispatch_peek_to_agent(&room, &all_agents, target_agent, &unread, roll, true)
+                    .await;
+                if !dispatched {
+                    {
+                        let mut guard = self
+                            .room_peek_states
+                            .lock()
+                            .expect("room_peek_states mutex poisoned");
+                        if let Some(st) = guard.get_mut(room_id) {
+                            if st.active_peeking_agent_id.as_deref()
+                                == Some(target_agent.agent_id.as_str())
+                            {
+                                st.active_peeking_agent_id = None;
+                            }
+                        }
+                    }
+                    self.step_sequential_peek_queue(room_id).await;
+                }
             }
-        });
+        } else {
+            self.dispatch_peek_to_agent(&room, &all_agents, target_agent, &unread, roll, false)
+                .await;
+        }
+    }
+
+    async fn dispatch_peek_to_agent(
+        &self,
+        room: &Room,
+        all_agents: &[RoomAgent],
+        target_agent: &RoomAgent,
+        unread: &[RoomMessage],
+        roll: u8,
+        allow_speak: bool,
+    ) -> bool {
+        let max_seq = room.last_msg_seq;
+        let mode = if allow_speak {
+            DeliveryMode::PeekAllowed { roll }
+        } else {
+            DeliveryMode::PeekMuted { roll }
+        };
+        let formatted = format_delivery_payload(room, all_agents, target_agent, unread, mode);
+
+        let Ok(updated_agent) = self.store.prepare_agent_delivery(
+            &target_agent.agent_id,
+            max_seq,
+            room.roster_version,
+            allow_speak,
+        ) else {
+            return false;
+        };
+        self.cancel_agent_per_agent_timer(&room.room_id, &target_agent.agent_id);
+
+        self.emit_flow_status(
+            &room.room_id,
+            format!(
+                "[👀 正在窥屏] @{} 正在浏览 {} 条未读消息 (roll={}, {})",
+                updated_agent.name,
+                unread.len(),
+                roll,
+                if allow_speak {
+                    "ALLOWED 可主动插话"
+                } else {
+                    "MUTED 本轮禁言只读(已剥夺发言工具)"
+                }
+            ),
+        );
+
+        match self
+            .ragents_client
+            .push_realtime_message(
+                &updated_agent.active_session_id,
+                PushRealtimeMessageRequest {
+                    content: vec![MessageContent::InputText { text: formatted }],
+                    disabled_tools: if allow_speak {
+                        vec![]
+                    } else {
+                        vec!["chatroom_speak".to_string()]
+                    },
+                },
+            )
+            .await
+        {
+            Ok(resp) => {
+                if let Some(spawned_act_id) = resp.spawned_activation_id {
+                    if let Ok(thinking_agent) = self.store.update_agent_runtime_state(
+                        &target_agent.agent_id,
+                        AgentRuntimeState::Thinking,
+                        Some(spawned_act_id),
+                    ) {
+                        self.emit_room_event(ChatroomEvent::AgentUpdated {
+                            room_id: room.room_id.clone(),
+                            agent: self.to_agent_public(thinking_agent),
+                        });
+                    }
+                    true
+                } else {
+                    // Message appended to an already-running activation; release slot if held
+                    false
+                }
+            }
+            Err(_) => false,
+        }
     }
 
     async fn start_peek_and_interject_round(&self, room_id: &str) {
@@ -3736,6 +4131,7 @@ Task Instructions:\n\
             return;
         };
         if !room.peek_enabled
+            || room.peek_idle_mode != PeekIdleMode::Global
             || (room.max_agent_relay_depth > 0
                 && room.consecutive_agent_msgs >= room.max_agent_relay_depth)
         {
@@ -3746,11 +4142,20 @@ Task Instructions:\n\
             return;
         };
 
-        // Wait until all agents in the room are Idle before starting a Peek & Interject round
-        if agents
+        // Wait until all agents in the room are Idle before starting a Global Peek & Interject round
+        let busy_names: Vec<String> = agents
             .iter()
-            .any(|a| a.runtime_state != AgentRuntimeState::Idle)
-        {
+            .filter(|a| a.runtime_state != AgentRuntimeState::Idle)
+            .map(|a| format!("@{}", a.name))
+            .collect();
+        if !busy_names.is_empty() {
+            self.emit_flow_status(
+                room_id,
+                format!(
+                    "[⏸️ 全局窥屏等待] 仍有成员运行中 ({})，待全员空闲后再重新计时",
+                    busy_names.join("、")
+                ),
+            );
             return;
         }
 
@@ -3773,6 +4178,13 @@ Task Instructions:\n\
             .collect();
 
         if candidates.is_empty() {
+            self.emit_flow_status(
+                room_id,
+                format!(
+                    "[💤 全局窥屏跳过] 当前无成员满足 ≥{} 条未读阈值",
+                    room.peek_msg_interval.max(1)
+                ),
+            );
             return;
         }
 
@@ -3867,10 +4279,12 @@ Task Instructions:\n\
             };
 
             let Some((agent_id, roll, allow_speak)) = next_pick else {
-                self.emit_flow_status(
-                    room_id,
-                    "[✅ 窥屏轮次结束] 本轮所有候选 Agent 已完成窥屏，无人主动插话".to_string(),
-                );
+                if room.peek_idle_mode == PeekIdleMode::Global {
+                    self.emit_flow_status(
+                        room_id,
+                        "[✅ 窥屏轮次结束] 本轮所有候选 Agent 已完成窥屏，无人主动插话".to_string(),
+                    );
+                }
                 return;
             };
 
@@ -3887,6 +4301,19 @@ Task Instructions:\n\
                 self.step_sequential_peek_queue(room_id).await;
                 return;
             };
+            if target_agent.runtime_state != AgentRuntimeState::Idle {
+                {
+                    let mut guard = self
+                        .room_peek_states
+                        .lock()
+                        .expect("room_peek_states mutex poisoned");
+                    if let Some(st) = guard.get_mut(room_id) {
+                        st.active_peeking_agent_id = None;
+                    }
+                }
+                self.step_sequential_peek_queue(room_id).await;
+                return;
+            }
 
             let Ok(unread) = self.store.list_room_messages_for_agent(
                 room_id,
@@ -3924,74 +4351,20 @@ Task Instructions:\n\
                 return;
             }
 
-            let max_seq = room.last_msg_seq;
-            let mode = if allow_speak {
-                DeliveryMode::PeekAllowed { roll }
-            } else {
-                DeliveryMode::PeekMuted { roll }
-            };
-            let formatted =
-                format_delivery_payload(&room, &all_agents, target_agent, &unread, mode);
-
-            let Ok(updated_agent) = self.store.prepare_agent_delivery(
-                &target_agent.agent_id,
-                max_seq,
-                room.roster_version,
-                allow_speak,
-            ) else {
-                return;
-            };
-
-            self.emit_flow_status(
-                room_id,
-                format!(
-                    "[👀 正在窥屏] @{} 正在浏览 {} 条未读消息 (roll={}, {})",
-                    updated_agent.name,
-                    unread.len(),
-                    roll,
-                    if allow_speak {
-                        "ALLOWED 可主动插话"
-                    } else {
-                        "MUTED 本轮禁言只读(已剥夺发言工具)"
-                    }
-                ),
-            );
-
-            if let Ok(resp) = self
-                .ragents_client
-                .push_realtime_message(
-                    &updated_agent.active_session_id,
-                    PushRealtimeMessageRequest {
-                        content: vec![MessageContent::InputText { text: formatted }],
-                        disabled_tools: if allow_speak {
-                            vec![]
-                        } else {
-                            vec!["chatroom_speak".to_string()]
-                        },
-                    },
-                )
-                .await
-            {
-                if let Some(spawned_act_id) = resp.spawned_activation_id {
-                    if let Ok(thinking_agent) = self.store.update_agent_runtime_state(
-                        &target_agent.agent_id,
-                        AgentRuntimeState::Thinking,
-                        Some(spawned_act_id),
-                    ) {
-                        self.emit_room_event(ChatroomEvent::AgentUpdated {
-                            room_id: room_id.to_string(),
-                            agent: thinking_agent.into(),
-                        });
+            let dispatched = self
+                .dispatch_peek_to_agent(&room, &all_agents, target_agent, &unread, roll, allow_speak)
+                .await;
+            if !dispatched {
+                {
+                    let mut guard = self
+                        .room_peek_states
+                        .lock()
+                        .expect("room_peek_states mutex poisoned");
+                    if let Some(st) = guard.get_mut(room_id) {
+                        st.active_peeking_agent_id = None;
                     }
                 }
-            } else {
-                let mut guard = self
-                    .room_peek_states
-                    .lock()
-                    .expect("room_peek_states mutex poisoned");
-                if let Some(st) = guard.get_mut(room_id) {
-                    st.active_peeking_agent_id = None;
-                }
+                self.step_sequential_peek_queue(room_id).await;
             }
         })
     }

@@ -239,6 +239,13 @@ impl ModelBackend for ChatroomTestModelBackend {
             ));
         }
 
+        // Hold this agent in Thinking state temporarily to verify `per_agent` peek runs while another agent is busy
+        if latest_user.contains("HOLD_BUSY_FOR_PER_AGENT_PEEK")
+            && !latest_user.contains("[Chatroom Unread Peek")
+        {
+            tokio::time::sleep(Duration::from_millis(2500)).await;
+        }
+
         // 3. Test Direct-@ Forgotten-Speak Auto-Nudge:
         //    If user message contains `TEST_FORGET_SPEAK` and it's not yet the `[System Reminder`,
         //    finish without calling `chatroom_speak` the first time!
@@ -807,6 +814,135 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         interjected,
         "Peeking agent with roll >= mute_probability should actively interject via chatroom_speak"
     );
+
+    // 11b. Test `PeekIdleMode::PerAgent` (单体静默):
+    //      Keep `@SecAuditor` busy for 2.5s while `@Assistant` is Idle.
+    //      `@Assistant` must still trigger an independent muted peek after 1s without waiting for `@SecAuditor`!
+    for _ in 0..30 {
+        let d: RoomDetailResponse = http
+            .get(format!("{chat_base}/api/v1/rooms/{room_id}"))
+            .bearer_auth(chat_auth_token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if d.agents
+            .iter()
+            .all(|a| a.runtime_state == AgentRuntimeState::Idle)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let updated_per_agent: Room = http
+        .patch(format!("{chat_base}/api/v1/rooms/{room_id}"))
+        .bearer_auth(chat_auth_token)
+        .json(&PatchRoomRequest {
+            peek_enabled: Some(true),
+            peek_idle_mode: Some(PeekIdleMode::PerAgent),
+            peek_idle_secs: Some(1),
+            peek_msg_interval: Some(1),
+            interject_enabled: Some(true),
+            mute_probability: Some(100),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(updated_per_agent.peek_idle_mode, PeekIdleMode::PerAgent);
+
+    seen_tools.lock().unwrap().clear();
+
+    // Wake ONLY `@SecAuditor` for 2.5s; `@Assistant` stays Idle and unmentioned
+    let _ = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/messages"))
+        .bearer_auth(chat_auth_token)
+        .json(&PostMessageRequest {
+            sender_name: "Alice".to_string(),
+            content: "HOLD_BUSY_FOR_PER_AGENT_PEEK 请审计一下当前状态".to_string(),
+            mentions: vec!["SecAuditor".to_string()],
+            visible_to: vec![],
+            reply_to_seq: None,
+            is_realtime: false,
+        })
+        .send()
+        .await
+        .unwrap();
+
+    let mut assistant_peeked_while_sec_busy = false;
+    for _ in 0..22 {
+        let saw_muted = {
+            let guard = seen_tools.lock().unwrap();
+            guard.iter().any(|(prompt, tools)| {
+                prompt.contains("HOLD_BUSY_FOR_PER_AGENT_PEEK")
+                    && prompt.contains("[Chatroom Unread Peek")
+                    && prompt.contains("(Muted")
+                    && !tools.contains(&"chatroom_speak".to_string())
+            })
+        };
+        if saw_muted {
+            let d: RoomDetailResponse = http
+                .get(format!("{chat_base}/api/v1/rooms/{room_id}"))
+                .bearer_auth(chat_auth_token)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if d.agents
+                .iter()
+                .any(|a| a.name == "SecAuditor" && a.runtime_state == AgentRuntimeState::Thinking)
+            {
+                assistant_peeked_while_sec_busy = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        assistant_peeked_while_sec_busy,
+        "PerAgent mode must wake idle @Assistant while @SecAuditor is still Thinking"
+    );
+
+    // Wait for @SecAuditor to settle back to Idle, then restore Global mode for subsequent steps
+    for _ in 0..40 {
+        let d: RoomDetailResponse = http
+            .get(format!("{chat_base}/api/v1/rooms/{room_id}"))
+            .bearer_auth(chat_auth_token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if d.agents
+            .iter()
+            .all(|a| a.runtime_state == AgentRuntimeState::Idle)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let _: Room = http
+        .patch(format!("{chat_base}/api/v1/rooms/{room_id}"))
+        .bearer_auth(chat_auth_token)
+        .json(&PatchRoomRequest {
+            peek_idle_mode: Some(PeekIdleMode::Global),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
     // 12. Test `@Manager` Agent removal via `chatroom_remove_agent` -> `chatroom_speak` and verify @Manager Inspector
     let mgr_rm_msg: RoomMessage = http

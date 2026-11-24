@@ -630,6 +630,13 @@ async fn handle_patch_room(
             ));
         }
     }
+    let peek_settings_touched = patch.peek_enabled.is_some()
+        || patch.peek_idle_mode.is_some()
+        || patch.peek_idle_secs.is_some()
+        || patch.peek_msg_interval.is_some()
+        || patch.interject_enabled.is_some()
+        || patch.mute_probability.is_some()
+        || patch.max_agent_relay_depth.is_some();
     let mut updated = state.coordinator.store.patch_room(&room_id, patch)?;
     if let Some(target_nid) = requested_node_drift {
         updated = state
@@ -650,7 +657,9 @@ async fn handle_patch_room(
             room: updated.clone(),
         });
     }
-    if updated.peek_enabled {
+    if peek_settings_touched {
+        state.coordinator.on_room_peek_config_updated(&updated);
+    } else if updated.peek_enabled {
         state.coordinator.schedule_room_peek_if_ready(&room_id);
     }
     Ok(Json(updated))
