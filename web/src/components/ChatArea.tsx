@@ -150,18 +150,54 @@ function renderMessageWithAttachments(text: string, roomId?: string | null): Rea
 function stripLeadingRedundantMentions(content: string, mentions: string[]): string {
   let rest = String(content || '').trimStart();
   if (!mentions || mentions.length === 0) return rest;
-  const lowerSet = new Set(mentions.map((n) => String(n).toLowerCase()));
+  const sortedMentions = [...mentions]
+    .map((n) => String(n).trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
   while (rest.startsWith('@')) {
-    const match = rest.match(/^@([A-Za-z0-9_-]+)([\s,，:：]*)/);
+    const exactMatch = sortedMentions.find((name) => {
+      if (!rest.slice(1).toLowerCase().startsWith(name.toLowerCase())) return false;
+      const nextChar = rest.slice(1 + name.length, 2 + name.length);
+      return !nextChar || /[\s,，:：]/.test(nextChar);
+    });
+    if (exactMatch) {
+      rest = rest.slice(1 + exactMatch.length).replace(/^[\s,，:：]+/, '');
+      continue;
+    }
+    const match = rest.match(/^@([^\s,，:：;；!?！？()（）\[\]{}<>]+)([\s,，:：]*)/u);
     if (!match) break;
     const tag = match[1].toLowerCase();
-    if (lowerSet.has(tag)) {
+    if (sortedMentions.some((m) => m.toLowerCase() === tag)) {
       rest = rest.slice(match[0].length);
     } else {
       break;
     }
   }
   return rest || String(content || '');
+}
+
+function findMentionedAgent(
+  text: string,
+  agents: RoomAgent[],
+  agentLookup: Map<string, RoomAgent>
+): RoomAgent | null {
+  const sortedAgents = [...agents].sort((a, b) => b.name.length - a.name.length);
+  const lowerText = text.toLowerCase();
+  for (const agent of sortedAgents) {
+    const needle = `@${agent.name.toLowerCase()}`;
+    const idx = lowerText.indexOf(needle);
+    if (idx !== -1) {
+      const nextChar = text.slice(idx + needle.length, idx + needle.length + 1);
+      if (!nextChar || /[\s,，:：;；!?！？()（）\[\]{}<>]/.test(nextChar)) {
+        return agent;
+      }
+    }
+  }
+  const mentionedMatch = text.match(/@([^\s,，:：;；!?！？()（）\[\]{}<>]+)/u);
+  if (mentionedMatch) {
+    return agentLookup.get(mentionedMatch[1].toLowerCase()) || null;
+  }
+  return null;
 }
 
 export const ChatArea: React.FC<ChatAreaProps> = ({
@@ -621,17 +657,20 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 if (dismissedSystemKeys.has(sysKey)) {
                   return null;
                 }
-                const mentionedMatch = cleanedBody.match(/@([A-Za-z0-9_-]+)/);
                 const retryTargetAgent =
-                  (mentionedMatch &&
-                    agentLookup.get(mentionedMatch[1].toLowerCase())) ||
+                  findMentionedAgent(cleanedBody, agents, agentLookup) ||
+                  (m.mentions || [])
+                    .map((name) => agentLookup.get(String(name).toLowerCase()))
+                    .find((a): a is RoomAgent => Boolean(a)) ||
                   (agents.length === 1 ? agents[0] : null);
+                const lowerBody = cleanedBody.toLowerCase();
                 const canRetry =
                   Boolean(onRetryAgent && retryTargetAgent) &&
                   (cleanedBody.includes('报错') ||
                     cleanedBody.includes('中断') ||
-                    cleanedBody.includes('Interrupted') ||
-                    cleanedBody.includes('error'));
+                    lowerBody.includes('interrupted') ||
+                    lowerBody.includes('error') ||
+                    lowerBody.includes('failed'));
 
                 return (
                   <div key={m.msg_seq} className="flex justify-center">

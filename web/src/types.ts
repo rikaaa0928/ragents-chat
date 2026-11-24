@@ -166,6 +166,7 @@ export interface InspectorEventEnvelope {
     type?: string;
     kind?: string;
     name?: string;
+    call_id?: string;
     delta?: string;
     error?: string;
     reason?: string;

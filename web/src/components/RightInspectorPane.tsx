@@ -462,6 +462,11 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
       if (!ev) continue;
       const evType = ev.type || ev.kind;
 
+      // In `view` mode `ev.items` is stripped; track `ev.call_id` directly on tool events too.
+      if (typeof ev.call_id === 'string' && ev.call_id) {
+        lastAnchorCallId = ev.call_id;
+      }
+
       if (Array.isArray(ev.items)) {
         for (const rawIt of ev.items) {
           seenEventItems += 1;
@@ -500,11 +505,11 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
             }
           }
         }
-        if (targetIdx === -1 && seenEventItems > 0 && items.length > 0) {
-          targetIdx = Math.min(
-            items.length - 1,
-            Math.max(0, baseOffset + seenEventItems - 1)
-          );
+        if (targetIdx === -1 && items.length > 0) {
+          targetIdx =
+            seenEventItems > 0
+              ? Math.min(items.length - 1, Math.max(0, baseOffset + seenEventItems - 1))
+              : items.length - 1;
         }
 
         const list = map.get(targetIdx) || [];
@@ -514,6 +519,28 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
     }
 
     return map;
+  })();
+
+  const latestFailedOrInterruptedEvent = (() => {
+    const allEvents = inspector?.events || [];
+    for (let i = allEvents.length - 1; i >= 0; i--) {
+      const env = allEvents[i];
+      const evType = env.event?.type || env.event?.kind;
+      if (
+        evType === 'activation_failed' ||
+        evType === 'activation_interrupted'
+      ) {
+        return env;
+      }
+      if (
+        evType === 'activation_completed' ||
+        evType === 'activation_started' ||
+        evType === 'activation_cancelled'
+      ) {
+        return null;
+      }
+    }
+    return null;
   })();
 
   const renderInlineAlertCard = (
@@ -1099,6 +1126,23 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                 <span>中止</span>
               </button>
             )}
+            {inspectedAgent &&
+              !inspectedAgent.active_activation_id &&
+              onRetryAgent &&
+              latestFailedOrInterruptedEvent && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    dismissInspectorAlert(getAlertKey(latestFailedOrInterruptedEvent));
+                    onRetryAgent(inspectedAgent.agent_id);
+                  }}
+                  className="px-2 py-1 rounded-lg text-[11px] font-semibold bg-amber-500 hover:bg-amber-400 text-black flex items-center gap-1 cursor-pointer transition-colors"
+                  title="直接重试最近中断或报错的执行回合"
+                >
+                  <RotateCcw className="w-3 h-3 stroke-[2.5]" />
+                  <span>继续重试</span>
+                </button>
+              )}
 
             {/* Master Collapsible Config Drawer Toggle Button */}
             {inspectedAgent && (
