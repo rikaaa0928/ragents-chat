@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   ArrowUp,
   AtSign,
@@ -19,8 +19,13 @@ import {
   FileText,
   Loader2,
   RotateCcw,
+  Copy,
+  Check,
+  Code2,
+  Eye,
 } from 'lucide-react';
 import { Room, RoomAgent, ChatMessage, SendShortcutMode } from '../types';
+import { MarkdownRenderer } from './MarkdownRenderer';
 
 export interface UploadedTempAttachment {
   dist_id?: string;
@@ -83,69 +88,88 @@ function agentPathToTmpRelPath(agentPath: string): string {
   return trimmed.replace(/^\/+/, '');
 }
 
-function renderMessageWithAttachments(text: string, roomId?: string | null): React.ReactNode {
+interface ExtractedAttachment {
+  kind: 'Image' | 'File';
+  agentPath: string;
+  relPath: string;
+  rawUrl: string;
+}
+
+function extractAttachmentsFromText(
+  text: string,
+  roomId?: string | null
+): { bodyText: string; attachments: ExtractedAttachment[] } {
+  if (!roomId) {
+    return { bodyText: text, attachments: [] };
+  }
   const pattern = /\[Attached (Image|File):\s*([^\]]+)\]/g;
-  const matches: Array<{ kind: 'Image' | 'File'; agentPath: string }> = [];
+  const attachments: ExtractedAttachment[] = [];
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(text)) !== null) {
-    matches.push({
+    const agentPath = match[2].trim();
+    const relPath = agentPathToTmpRelPath(agentPath);
+    const rawUrl = `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(
+      roomId
+    )}/raw?zone=tmp&path=${encodeURIComponent(relPath)}`;
+    attachments.push({
       kind: match[1] as 'Image' | 'File',
-      agentPath: match[2].trim(),
+      agentPath,
+      relPath,
+      rawUrl,
     });
   }
-  if (matches.length === 0 || !roomId) {
-    return text;
+  if (attachments.length === 0) {
+    return { bodyText: text, attachments: [] };
   }
+  const bodyText = text.replace(pattern, '').trim();
+  return { bodyText, attachments };
+}
 
-  const textWithoutTags = text.replace(pattern, '').trim();
+const MessageAttachmentsGrid: React.FC<{
+  attachments: ExtractedAttachment[];
+}> = ({ attachments }) => {
+  if (attachments.length === 0) return null;
   return (
-    <div className="space-y-2">
-      {textWithoutTags && <div>{textWithoutTags}</div>}
-      <div className="flex flex-wrap gap-2 pt-0.5">
-        {matches.map((item, idx) => {
-          const relPath = agentPathToTmpRelPath(item.agentPath);
-          const rawUrl = `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(
-            roomId
-          )}/raw?zone=tmp&path=${encodeURIComponent(relPath)}`;
-          if (item.kind === 'Image') {
-            return (
-              <a
-                key={`${item.agentPath}-${idx}`}
-                href={rawUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="group/att block rounded-xl overflow-hidden border border-[var(--border-subtle)] bg-[var(--bg-surface)] max-w-[240px] hover:border-blue-500/50 transition-colors"
-                title={`点击查看原图 · Agent 读取路径: ${item.agentPath}`}
-              >
-                <img
-                  src={rawUrl}
-                  alt={item.agentPath}
-                  loading="lazy"
-                  className="max-h-44 w-auto object-contain bg-black/5 dark:bg-white/5 mx-auto"
-                />
-                <div className="px-2 py-1 text-[10px] font-mono-code text-[var(--text-muted)] truncate border-t border-[var(--border-subtle)]">
-                  🖼️ {item.agentPath}
-                </div>
-              </a>
-            );
-          }
+    <div className="flex flex-wrap gap-2 pt-1">
+      {attachments.map((item, idx) => {
+        if (item.kind === 'Image') {
           return (
             <a
               key={`${item.agentPath}-${idx}`}
-              href={`${rawUrl}&download=1`}
+              href={item.rawUrl}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-xs font-mono-code text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              className="group/att block rounded-xl overflow-hidden border border-[var(--border-subtle)] bg-[var(--bg-surface)] max-w-[240px] hover:border-blue-500/50 transition-colors"
+              title={`点击查看原图 · Agent 读取路径: ${item.agentPath}`}
             >
-              <FileText className="w-3.5 h-3.5 text-blue-500 shrink-0" />
-              <span className="truncate max-w-[220px]">{item.agentPath}</span>
+              <img
+                src={item.rawUrl}
+                alt={item.agentPath}
+                loading="lazy"
+                className="max-h-44 w-auto object-contain bg-black/5 dark:bg-white/5 mx-auto"
+              />
+              <div className="px-2 py-1 text-[10px] font-mono-code text-[var(--text-muted)] truncate border-t border-[var(--border-subtle)]">
+                🖼️ {item.agentPath}
+              </div>
             </a>
           );
-        })}
-      </div>
+        }
+        return (
+          <a
+            key={`${item.agentPath}-${idx}`}
+            href={`${item.rawUrl}&download=1`}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-xs font-mono-code text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+          >
+            <FileText className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+            <span className="truncate max-w-[220px]">{item.agentPath}</span>
+          </a>
+        );
+      })}
     </div>
   );
-}
+};
 
 function stripLeadingRedundantMentions(content: string, mentions: string[]): string {
   let rest = String(content || '').trimStart();
@@ -200,6 +224,394 @@ function findMentionedAgent(
   return null;
 }
 
+interface ChatMessageRowProps {
+  message: ChatMessage;
+  roomId?: string | null;
+  agents: RoomAgent[];
+  agentLookup: Map<string, RoomAgent>;
+  isMetaExpanded: boolean;
+  isRawMode: boolean;
+  isCopied: boolean;
+  isDismissedSystem: boolean;
+  onToggleMeta: (seq: number) => void;
+  onToggleRaw: (seq: number) => void;
+  onCopyMessage: (seq: number, text: string) => void;
+  onDismissSystem: (sysKey: string) => void;
+  onRetryAgent?: (agentId: string, dismissMsgSeq?: number) => void;
+  onInspectAgent: (agentId: string) => void;
+}
+
+const ChatMessageRow: React.FC<ChatMessageRowProps> = React.memo(
+  ({
+    message: m,
+    roomId,
+    agents,
+    agentLookup,
+    isMetaExpanded,
+    isRawMode,
+    isCopied,
+    isDismissedSystem,
+    onToggleMeta,
+    onToggleRaw,
+    onCopyMessage,
+    onDismissSystem,
+    onRetryAgent,
+    onInspectAgent,
+  }) => {
+    const isHuman = m.sender_kind === 'human';
+    const isManager = m.sender_kind === 'manager';
+    const isSystem = m.sender_kind === 'system';
+    const mentions = m.mentions || [];
+    const visibleTo = m.visible_to || [];
+    const isWhisper = visibleTo.length > 0;
+    const cleanedBody = stripLeadingRedundantMentions(m.content, mentions);
+    const timeStr = new Date(m.created_at).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    const matchedAgent =
+      agentLookup.get(m.sender_id) ||
+      agentLookup.get(String(m.sender_name).toLowerCase());
+    const avatarIcon = isManager
+      ? '🎩'
+      : matchedAgent?.avatar || (isHuman ? '👤' : '🤖');
+
+    if (isSystem) {
+      if (isDismissedSystem) {
+        return null;
+      }
+      const sysKey = `${roomId || ''}:${m.msg_seq}`;
+      const retryTargetAgent =
+        findMentionedAgent(cleanedBody, agents, agentLookup) ||
+        (m.mentions || [])
+          .map((name) => agentLookup.get(String(name).toLowerCase()))
+          .find((a): a is RoomAgent => Boolean(a)) ||
+        (agents.length === 1 ? agents[0] : null);
+      const lowerBody = cleanedBody.toLowerCase();
+      const canRetry =
+        Boolean(onRetryAgent && retryTargetAgent) &&
+        (cleanedBody.includes('报错') ||
+          cleanedBody.includes('中断') ||
+          lowerBody.includes('interrupted') ||
+          lowerBody.includes('error') ||
+          lowerBody.includes('failed'));
+
+      return (
+        <div className="flex justify-center">
+          <div className="pl-3.5 pr-2 py-1.5 rounded-2xl bg-amber-500/10 border border-amber-500/25 text-amber-600 dark:text-amber-300 text-xs flex items-center gap-2 max-w-[94%]">
+            <span className="break-words flex-1 min-w-0">
+              #{m.msg_seq} · {cleanedBody}
+            </span>
+            {canRetry && retryTargetAgent && (
+              <button
+                type="button"
+                onClick={() => {
+                  onDismissSystem(sysKey);
+                  onRetryAgent?.(retryTargetAgent.agent_id, m.msg_seq);
+                }}
+                title={`直接让 @${retryTargetAgent.name} 重试中断/失败的回合（无需重新输入）`}
+                className="px-2.5 py-1 rounded-full bg-amber-500 hover:bg-amber-400 text-black font-semibold text-[11px] inline-flex items-center gap-1 shrink-0 cursor-pointer transition-colors shadow-xs"
+              >
+                <RotateCcw className="w-3 h-3 stroke-[2.5]" />
+                <span>直接重试</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => onDismissSystem(sysKey)}
+              title="关闭并不再展示此系统通知"
+              className="w-5 h-5 rounded-full flex items-center justify-center hover:bg-amber-500/20 text-amber-600 dark:text-amber-300 shrink-0 cursor-pointer transition-colors"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    const { bodyText, attachments } = extractAttachmentsFromText(cleanedBody, roomId);
+
+    /* Human Message: ChatGPT / Codex Right-Aligned Pill Bubble */
+    if (isHuman) {
+      return (
+        <div className="group/human flex flex-col items-end gap-1.5">
+          <div className="flex flex-wrap items-center justify-end gap-2 text-[11px] text-[var(--text-muted)] px-1">
+            <div className="inline-flex items-center gap-1 opacity-75 md:opacity-0 md:group-hover/human:opacity-100 focus-within:opacity-100 transition-opacity">
+              <button
+                type="button"
+                onClick={() => onCopyMessage(m.msg_seq, cleanedBody)}
+                className="px-1.5 py-0.5 rounded hover:bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-[var(--text-primary)] inline-flex items-center gap-0.5 cursor-pointer"
+                title="复制消息原文"
+              >
+                {isCopied ? (
+                  <Check className="w-3 h-3 text-emerald-500" />
+                ) : (
+                  <Copy className="w-3 h-3" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => onToggleRaw(m.msg_seq)}
+                className="px-1.5 py-0.5 rounded hover:bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-[var(--text-primary)] inline-flex items-center gap-0.5 cursor-pointer"
+                title={isRawMode ? '切换为 Markdown 渲染' : '查看 Markdown 原文'}
+              >
+                {isRawMode ? (
+                  <Eye className="w-3 h-3" />
+                ) : (
+                  <Code2 className="w-3 h-3" />
+                )}
+              </button>
+            </div>
+            {m.sender_name && m.sender_name !== 'Human' && (
+              <span className="font-semibold text-[var(--text-secondary)]">
+                @{m.sender_name}
+              </span>
+            )}
+            <span className="font-mono-code">#{m.msg_seq}</span>
+            {m.is_realtime ? (
+              <span
+                className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 font-medium text-[10.5px]"
+                title="实时消息：直接注入 Agent 当前运行循环或立即唤醒"
+              >
+                <Zap className="w-2.5 h-2.5" />
+                <span>实时</span>
+              </span>
+            ) : (
+              <span
+                className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-[var(--bg-surface)] text-[var(--text-muted)] font-medium text-[10.5px]"
+                title="非实时消息：作为独立回合排队投递"
+              >
+                <Clock className="w-2.5 h-2.5" />
+                <span>非实时</span>
+              </span>
+            )}
+            {mentions.length > 0 && (
+              <div className="flex items-center gap-1">
+                {mentions.map((tag) => (
+                  <span
+                    key={tag}
+                    className="px-1.5 py-0.2 rounded-full bg-[var(--bg-surface)] text-[var(--text-primary)] font-medium text-[10.5px]"
+                  >
+                    @{tag}
+                  </span>
+                ))}
+              </div>
+            )}
+            <span>{timeStr}</span>
+          </div>
+
+          <div className="max-w-[85%] sm:max-w-[78%] rounded-[22px] rounded-br-md bg-[var(--bg-human)] px-4 py-2.5 text-[var(--text-primary)] space-y-2">
+            {bodyText &&
+              (isRawMode ? (
+                <div className="text-[14px] leading-relaxed whitespace-pre-wrap break-words font-mono-code">
+                  {bodyText}
+                </div>
+              ) : (
+                <MarkdownRenderer
+                  content={bodyText}
+                  variant="bubble"
+                  agents={agents}
+                  onInspectAgent={onInspectAgent}
+                />
+              ))}
+            <MessageAttachmentsGrid attachments={attachments} />
+          </div>
+        </div>
+      );
+    }
+
+    /* Agent or @Manager Message: Clean Codex Left-Aligned Response Block */
+    return (
+      <div
+        className={`group flex items-start gap-3.5 ${
+          isWhisper
+            ? 'p-3.5 rounded-2xl border border-dashed border-violet-500/40 bg-violet-500/[0.04]'
+            : ''
+        }`}
+      >
+        {/* Avatar Circle */}
+        <div
+          onClick={() => m.sender_id && onInspectAgent(m.sender_id)}
+          className={`w-7 h-7 rounded-full flex items-center justify-center text-sm shrink-0 mt-0.5 cursor-pointer border transition-transform hover:scale-105 ${
+            isManager
+              ? 'bg-violet-500/15 border-violet-500/30'
+              : 'bg-[var(--bg-surface)] border-[var(--border-subtle)]'
+          }`}
+          title="点击在右侧透视该 Agent 的内部 Session"
+        >
+          {avatarIcon}
+        </div>
+
+        {/* Message Content Column */}
+        <div className="flex-1 min-w-0 space-y-1.5">
+          {/* Header Meta Line */}
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="font-semibold text-[13.5px] text-[var(--text-primary)]">
+              @{m.sender_name}
+            </span>
+
+            {matchedAgent?.role_title && (
+              <span className="text-[11px] text-[var(--text-muted)] hidden sm:inline">
+                · {matchedAgent.role_title}
+              </span>
+            )}
+
+            <span className="font-mono-code text-[11px] text-[var(--text-muted)]">
+              #{m.msg_seq}
+            </span>
+
+            {/* Mention Pills */}
+            {mentions.map((tag) => (
+              <span
+                key={tag}
+                className="px-1.5 py-0.2 rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium text-[11px]"
+              >
+                ➔ @{tag}
+              </span>
+            ))}
+
+            {/* Whisper Badge */}
+            {isWhisper && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-violet-500/15 text-violet-600 dark:text-violet-300 text-[11px] font-medium">
+                <Lock className="w-3 h-3" />
+                暗语 (仅{' '}
+                {[
+                  m.sender_name,
+                  ...visibleTo.filter(
+                    (v) => v.toLowerCase() !== m.sender_name.toLowerCase()
+                  ),
+                ]
+                  .map((v) => '@' + v)
+                  .join(', ')}{' '}
+                可见)
+              </span>
+            )}
+
+            {/* Reply Badge */}
+            {m.reply_to_seq && (
+              <span className="inline-flex items-center gap-0.5 text-[11px] text-[var(--text-muted)]">
+                <CornerDownRight className="w-3 h-3" />#{m.reply_to_seq}
+              </span>
+            )}
+
+            <span className="text-[11px] text-[var(--text-muted)] ml-auto">
+              {timeStr}
+            </span>
+          </div>
+
+          {/* Message Body */}
+          <div className="space-y-2">
+            {bodyText &&
+              (isRawMode ? (
+                <div className="text-[13.5px] leading-[1.65] text-[var(--text-primary)] whitespace-pre-wrap break-words font-mono-code">
+                  {bodyText}
+                </div>
+              ) : (
+                <MarkdownRenderer
+                  content={bodyText}
+                  variant="default"
+                  agents={agents}
+                  onInspectAgent={onInspectAgent}
+                />
+              ))}
+            <MessageAttachmentsGrid attachments={attachments} />
+          </div>
+
+          {/* Action & Collapsible Envelope Details Bar */}
+          <div className="pt-1 flex flex-wrap items-center gap-2">
+            {m.sender_id && (
+              <button
+                onClick={() => onInspectAgent(m.sender_id)}
+                className="px-2 py-0.5 rounded-md text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] bg-[var(--bg-surface)] hover:bg-[var(--bg-surface-2)] border border-[var(--border-subtle)] inline-flex items-center gap-1 cursor-pointer transition-colors"
+              >
+                <Microscope className="w-3 h-3 text-emerald-500" />
+                <span>透视内部 Session</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => onCopyMessage(m.msg_seq, cleanedBody)}
+              className="px-2 py-0.5 rounded-md text-[11px] text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] inline-flex items-center gap-1 cursor-pointer transition-colors"
+              title="复制 Markdown 原文"
+            >
+              {isCopied ? (
+                <>
+                  <Check className="w-3 h-3 text-emerald-500" />
+                  <span className="text-emerald-600 dark:text-emerald-400">
+                    已复制
+                  </span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3 h-3" />
+                  <span>复制</span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onToggleRaw(m.msg_seq)}
+              className="px-2 py-0.5 rounded-md text-[11px] text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] inline-flex items-center gap-1 cursor-pointer transition-colors"
+              title={isRawMode ? '切换回 Markdown 渲染' : '查看 Markdown 原文'}
+            >
+              {isRawMode ? (
+                <>
+                  <Eye className="w-3 h-3 text-blue-500" />
+                  <span>渲染</span>
+                </>
+              ) : (
+                <>
+                  <Code2 className="w-3 h-3" />
+                  <span>原文</span>
+                </>
+              )}
+            </button>
+
+            <button
+              onClick={() => onToggleMeta(m.msg_seq)}
+              className="px-2 py-0.5 rounded-md text-[11px] text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] inline-flex items-center gap-1 cursor-pointer transition-colors"
+            >
+              {isWhisper ? (
+                <Lock className="w-3 h-3 text-violet-500" />
+              ) : (
+                <Globe className="w-3 h-3" />
+              )}
+              <span>投递元数据</span>
+              {isMetaExpanded ? (
+                <ChevronUp className="w-3 h-3" />
+              ) : (
+                <ChevronDown className="w-3 h-3" />
+              )}
+            </button>
+          </div>
+
+          {/* Expanded Message Delivery Metadata */}
+          {isMetaExpanded && (
+            <div className="mt-1 p-2.5 rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[11.5px] text-[var(--text-secondary)] font-mono-code space-y-1">
+              <div>
+                sender_id: <span className="text-[var(--text-primary)]">{m.sender_id}</span> · kind: {m.sender_kind}
+              </div>
+              <div>
+                mentions: {mentions.length > 0 ? mentions.map((x) => '@' + x).join(', ') : '(无显式点名)'}
+              </div>
+              <div>
+                visibility:{' '}
+                {isWhisper
+                  ? `暗语隔离 [${visibleTo.join(', ')}]`
+                  : '全员可见 (Public Broadcast via chatroom_speak)'}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+);
+ChatMessageRow.displayName = 'ChatMessageRow';
+
 export const ChatArea: React.FC<ChatAreaProps> = ({
   room,
   agents,
@@ -222,6 +634,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [uploadingAttachments, setUploadingAttachments] = useState(false);
   const [roomDistributingFiles, setRoomDistributingFiles] = useState<DistributingFileStatus[]>([]);
   const [expandedMetaSeqs, setExpandedMetaSeqs] = useState<Set<number>>(new Set());
+  const [rawMessageSeqs, setRawMessageSeqs] = useState<Set<number>>(new Set());
+  const [copiedMessageSeq, setCopiedMessageSeq] = useState<number | null>(null);
   const [dismissedSystemKeys, setDismissedSystemKeys] = useState<Set<string>>(() => {
     try {
       const raw = localStorage.getItem('ragents_dismissed_system_msgs');
@@ -233,7 +647,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     return new Set();
   });
 
-  const dismissSystemMessage = (sysKey: string) => {
+  const dismissSystemMessage = useCallback((sysKey: string) => {
     setDismissedSystemKeys((prev) => {
       const next = new Set(prev);
       next.add(sysKey);
@@ -245,7 +659,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
       } catch (_) {}
       return next;
     });
-  };
+  }, []);
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
   const [showJumpBottom, setShowJumpBottom] = useState(false);
 
@@ -314,14 +728,35 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     }
   };
 
-  const toggleMsgMeta = (seq: number) => {
+  const toggleMsgMeta = useCallback((seq: number) => {
     setExpandedMetaSeqs((prev) => {
       const next = new Set(prev);
       if (next.has(seq)) next.delete(seq);
       else next.add(seq);
       return next;
     });
-  };
+  }, []);
+
+  const toggleRawMessage = useCallback((seq: number) => {
+    setRawMessageSeqs((prev) => {
+      const next = new Set(prev);
+      if (next.has(seq)) next.delete(seq);
+      else next.add(seq);
+      return next;
+    });
+  }, []);
+
+  const copyMessageContent = useCallback((seq: number, text: string) => {
+    navigator.clipboard
+      ?.writeText(text)
+      .then(() => {
+        setCopiedMessageSeq(seq);
+        window.setTimeout(() => {
+          setCopiedMessageSeq((cur) => (cur === seq ? null : cur));
+        }, 1500);
+      })
+      .catch(() => {});
+  }, []);
 
   const startUploadForPendingItem = async (item: PendingAttachmentItem) => {
     if (!onUploadTempFile) return;
@@ -603,11 +1038,14 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     }
   };
 
-  const agentLookup = new Map<string, RoomAgent>();
-  agents.forEach((a) => {
-    agentLookup.set(a.agent_id, a);
-    agentLookup.set(a.name.toLowerCase(), a);
-  });
+  const agentLookup = useMemo(() => {
+    const map = new Map<string, RoomAgent>();
+    agents.forEach((a) => {
+      map.set(a.agent_id, a);
+      map.set(a.name.toLowerCase(), a);
+    });
+    return map;
+  }, [agents]);
 
   return (
     <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden bg-[var(--bg-main)] relative">
@@ -631,266 +1069,28 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               </p>
             </div>
           ) : (
-            messages.map((m) => {
-              const isHuman = m.sender_kind === 'human';
-              const isManager = m.sender_kind === 'manager';
-              const isSystem = m.sender_kind === 'system';
-              const mentions = m.mentions || [];
-              const visibleTo = m.visible_to || [];
-              const isWhisper = visibleTo.length > 0;
-              const cleanedBody = stripLeadingRedundantMentions(m.content, mentions);
-              const timeStr = new Date(m.created_at).toLocaleTimeString([], {
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-              });
-              const matchedAgent =
-                agentLookup.get(m.sender_id) ||
-                agentLookup.get(String(m.sender_name).toLowerCase());
-              const avatarIcon = isManager
-                ? '🎩'
-                : matchedAgent?.avatar || (isHuman ? '👤' : '🤖');
-              const isMetaExpanded = expandedMetaSeqs.has(m.msg_seq);
-
-              if (isSystem) {
-                const sysKey = `${room?.room_id || ''}:${m.msg_seq}`;
-                if (dismissedSystemKeys.has(sysKey)) {
-                  return null;
+            messages.map((m) => (
+              <ChatMessageRow
+                key={m.msg_seq}
+                message={m}
+                roomId={room?.room_id}
+                agents={agents}
+                agentLookup={agentLookup}
+                isMetaExpanded={expandedMetaSeqs.has(m.msg_seq)}
+                isRawMode={rawMessageSeqs.has(m.msg_seq)}
+                isCopied={copiedMessageSeq === m.msg_seq}
+                isDismissedSystem={
+                  m.sender_kind === 'system' &&
+                  dismissedSystemKeys.has(`${room?.room_id || ''}:${m.msg_seq}`)
                 }
-                const retryTargetAgent =
-                  findMentionedAgent(cleanedBody, agents, agentLookup) ||
-                  (m.mentions || [])
-                    .map((name) => agentLookup.get(String(name).toLowerCase()))
-                    .find((a): a is RoomAgent => Boolean(a)) ||
-                  (agents.length === 1 ? agents[0] : null);
-                const lowerBody = cleanedBody.toLowerCase();
-                const canRetry =
-                  Boolean(onRetryAgent && retryTargetAgent) &&
-                  (cleanedBody.includes('报错') ||
-                    cleanedBody.includes('中断') ||
-                    lowerBody.includes('interrupted') ||
-                    lowerBody.includes('error') ||
-                    lowerBody.includes('failed'));
-
-                return (
-                  <div key={m.msg_seq} className="flex justify-center">
-                    <div className="pl-3.5 pr-2 py-1.5 rounded-2xl bg-amber-500/10 border border-amber-500/25 text-amber-600 dark:text-amber-300 text-xs flex items-center gap-2 max-w-[94%]">
-                      <span className="break-words flex-1 min-w-0">
-                        #{m.msg_seq} · {cleanedBody}
-                      </span>
-                      {canRetry && retryTargetAgent && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            dismissSystemMessage(sysKey);
-                            onRetryAgent?.(retryTargetAgent.agent_id, m.msg_seq);
-                          }}
-                          title={`直接让 @${retryTargetAgent.name} 重试中断/失败的回合（无需重新输入）`}
-                          className="px-2.5 py-1 rounded-full bg-amber-500 hover:bg-amber-400 text-black font-semibold text-[11px] inline-flex items-center gap-1 shrink-0 cursor-pointer transition-colors shadow-xs"
-                        >
-                          <RotateCcw className="w-3 h-3 stroke-[2.5]" />
-                          <span>直接重试</span>
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => dismissSystemMessage(sysKey)}
-                        title="关闭并不再展示此系统通知"
-                        className="w-5 h-5 rounded-full flex items-center justify-center hover:bg-amber-500/20 text-amber-600 dark:text-amber-300 shrink-0 cursor-pointer transition-colors"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                );
-              }
-
-              /* Human Message: ChatGPT / Codex Right-Aligned Pill Bubble */
-              if (isHuman) {
-                return (
-                  <div key={m.msg_seq} className="flex flex-col items-end gap-1.5">
-                    <div className="flex items-center gap-2 text-[11px] text-[var(--text-muted)] px-1">
-                      {m.sender_name && m.sender_name !== 'Human' && (
-                        <span className="font-semibold text-[var(--text-secondary)]">
-                          @{m.sender_name}
-                        </span>
-                      )}
-                      <span className="font-mono-code">#{m.msg_seq}</span>
-                      {m.is_realtime ? (
-                        <span
-                          className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 font-medium text-[10.5px]"
-                          title="实时消息：直接注入 Agent 当前运行循环或立即唤醒"
-                        >
-                          <Zap className="w-2.5 h-2.5" />
-                          <span>实时</span>
-                        </span>
-                      ) : (
-                        <span
-                          className="inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded-full bg-[var(--bg-surface)] text-[var(--text-muted)] font-medium text-[10.5px]"
-                          title="非实时消息：作为独立回合排队投递"
-                        >
-                          <Clock className="w-2.5 h-2.5" />
-                          <span>非实时</span>
-                        </span>
-                      )}
-                      {mentions.length > 0 && (
-                        <div className="flex items-center gap-1">
-                          {mentions.map((tag) => (
-                            <span
-                              key={tag}
-                              className="px-1.5 py-0.2 rounded-full bg-[var(--bg-surface)] text-[var(--text-primary)] font-medium text-[10.5px]"
-                            >
-                              @{tag}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      <span>{timeStr}</span>
-                    </div>
-
-                    <div className="max-w-[85%] sm:max-w-[78%] rounded-[22px] rounded-br-md bg-[var(--bg-human)] px-4 py-2.5 text-[14px] leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap break-words">
-                      {renderMessageWithAttachments(cleanedBody, room?.room_id)}
-                    </div>
-                  </div>
-                );
-              }
-
-              /* Agent or @Manager Message: Clean Codex Left-Aligned Response Block */
-              return (
-                <div
-                  key={m.msg_seq}
-                  className={`group flex items-start gap-3.5 ${
-                    isWhisper
-                      ? 'p-3.5 rounded-2xl border border-dashed border-violet-500/40 bg-violet-500/[0.04]'
-                      : ''
-                  }`}
-                >
-                  {/* Avatar Circle */}
-                  <div
-                    onClick={() => m.sender_id && onInspectAgent(m.sender_id)}
-                    className={`w-7 h-7 rounded-full flex items-center justify-center text-sm shrink-0 mt-0.5 cursor-pointer border transition-transform hover:scale-105 ${
-                      isManager
-                        ? 'bg-violet-500/15 border-violet-500/30'
-                        : 'bg-[var(--bg-surface)] border-[var(--border-subtle)]'
-                    }`}
-                    title="点击在右侧透视该 Agent 的内部 Session"
-                  >
-                    {avatarIcon}
-                  </div>
-
-                  {/* Message Content Column */}
-                  <div className="flex-1 min-w-0 space-y-1.5">
-                    {/* Header Meta Line */}
-                    <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                      <span className="font-semibold text-[13.5px] text-[var(--text-primary)]">
-                        @{m.sender_name}
-                      </span>
-
-                      {matchedAgent?.role_title && (
-                        <span className="text-[11px] text-[var(--text-muted)] hidden sm:inline">
-                          · {matchedAgent.role_title}
-                        </span>
-                      )}
-
-                      <span className="font-mono-code text-[11px] text-[var(--text-muted)]">
-                        #{m.msg_seq}
-                      </span>
-
-                      {/* Mention Pills */}
-                      {mentions.map((tag) => (
-                        <span
-                          key={tag}
-                          className="px-1.5 py-0.2 rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium text-[11px]"
-                        >
-                          ➔ @{tag}
-                        </span>
-                      ))}
-
-                      {/* Whisper Badge */}
-                      {isWhisper && (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-violet-500/15 text-violet-600 dark:text-violet-300 text-[11px] font-medium">
-                          <Lock className="w-3 h-3" />
-                          暗语 (仅{' '}
-                          {[
-                            m.sender_name,
-                            ...visibleTo.filter(
-                              (v) => v.toLowerCase() !== m.sender_name.toLowerCase()
-                            ),
-                          ]
-                            .map((v) => '@' + v)
-                            .join(', ')}{' '}
-                          可见)
-                        </span>
-                      )}
-
-                      {/* Reply Badge */}
-                      {m.reply_to_seq && (
-                        <span className="inline-flex items-center gap-0.5 text-[11px] text-[var(--text-muted)]">
-                          <CornerDownRight className="w-3 h-3" />#{m.reply_to_seq}
-                        </span>
-                      )}
-
-                      <span className="text-[11px] text-[var(--text-muted)] ml-auto">
-                        {timeStr}
-                      </span>
-                    </div>
-
-                    {/* Message Body */}
-                    <div className="text-[14px] leading-[1.65] text-[var(--text-primary)] whitespace-pre-wrap break-words">
-                      {renderMessageWithAttachments(cleanedBody, room?.room_id)}
-                    </div>
-
-                    {/* Action & Collapsible Envelope Details Bar */}
-                    <div className="pt-1 flex flex-wrap items-center gap-2">
-                      {m.sender_id && (
-                        <button
-                          onClick={() => onInspectAgent(m.sender_id)}
-                          className="px-2 py-0.5 rounded-md text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] bg-[var(--bg-surface)] hover:bg-[var(--bg-surface-2)] border border-[var(--border-subtle)] inline-flex items-center gap-1 cursor-pointer transition-colors"
-                        >
-                          <Microscope className="w-3 h-3 text-emerald-500" />
-                          <span>透视内部 Session</span>
-                        </button>
-                      )}
-
-                      <button
-                        onClick={() => toggleMsgMeta(m.msg_seq)}
-                        className="px-2 py-0.5 rounded-md text-[11px] text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] inline-flex items-center gap-1 cursor-pointer transition-colors"
-                      >
-                        {isWhisper ? (
-                          <Lock className="w-3 h-3 text-violet-500" />
-                        ) : (
-                          <Globe className="w-3 h-3" />
-                        )}
-                        <span>投递元数据</span>
-                        {isMetaExpanded ? (
-                          <ChevronUp className="w-3 h-3" />
-                        ) : (
-                          <ChevronDown className="w-3 h-3" />
-                        )}
-                      </button>
-                    </div>
-
-                    {/* Expanded Message Delivery Metadata */}
-                    {isMetaExpanded && (
-                      <div className="mt-1 p-2.5 rounded-xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[11.5px] text-[var(--text-secondary)] font-mono-code space-y-1">
-                        <div>
-                          sender_id: <span className="text-[var(--text-primary)]">{m.sender_id}</span> · kind: {m.sender_kind}
-                        </div>
-                        <div>
-                          mentions: {mentions.length > 0 ? mentions.map((x) => '@' + x).join(', ') : '(无显式点名)'}
-                        </div>
-                        <div>
-                          visibility:{' '}
-                          {isWhisper
-                            ? `暗语隔离 [${visibleTo.join(', ')}]`
-                            : '全员可见 (Public Broadcast via chatroom_speak)'}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })
+                onToggleMeta={toggleMsgMeta}
+                onToggleRaw={toggleRawMessage}
+                onCopyMessage={copyMessageContent}
+                onDismissSystem={dismissSystemMessage}
+                onRetryAgent={onRetryAgent}
+                onInspectAgent={onInspectAgent}
+              />
+            ))
           )}
         </div>
       </div>

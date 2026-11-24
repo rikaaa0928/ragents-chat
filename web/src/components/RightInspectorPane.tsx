@@ -39,7 +39,9 @@ import {
   Check,
   RotateCcw,
   RefreshCw,
+  Code2,
 } from 'lucide-react';
+import { MarkdownRenderer } from './MarkdownRenderer';
 import {
   Room,
   RoomAgent,
@@ -202,6 +204,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   const [roleDraft, setRoleDraft] = useState('');
   const [promptDraft, setPromptDraft] = useState('');
   const [copiedBlockId, setCopiedBlockId] = useState<string | null>(null);
+  const [rawBlockIds, setRawBlockIds] = useState<Record<string, boolean>>({});
   const [dismissedAlertIds, setDismissedAlertIds] = useState<Set<string>>(() => {
     try {
       const raw = localStorage.getItem('ragents_dismissed_inspector_alerts');
@@ -2411,6 +2414,12 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                     let bodyContent = rawText;
                     let rawJsonForCopy: string | null = null;
                     let badgeColor = 'text-emerald-600 dark:text-emerald-400';
+                    const isMarkdownCapable =
+                      isCompaction ||
+                      item.type === 'reasoning' ||
+                      (item.type === 'message' &&
+                        String(item.role || 'user') !== 'user');
+                    const isRawBlock = Boolean(rawBlockIds[blockId]);
 
                     if (isCompaction) {
                       icon = <Package className="w-3.5 h-3.5 text-amber-500 shrink-0" />;
@@ -2551,6 +2560,59 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                                   </span>
                                 );
                               })()}
+                              {isMarkdownCapable && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setRawBlockIds((prev) => ({
+                                        ...prev,
+                                        [blockId]: !prev[blockId],
+                                      }));
+                                    }}
+                                    className="px-1.5 py-0.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] text-[10px] font-mono-code text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1 cursor-pointer transition-colors"
+                                    title={isRawBlock ? '切换为 Markdown 渲染' : '查看 Markdown 原文'}
+                                  >
+                                    {isRawBlock ? (
+                                      <>
+                                        <Eye className="w-2.5 h-2.5 text-blue-500" />
+                                        <span>渲染</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Code2 className="w-2.5 h-2.5" />
+                                        <span>原文</span>
+                                      </>
+                                    )}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      navigator.clipboard
+                                        .writeText(bodyContent)
+                                        .then(() => {
+                                          setCopiedBlockId(blockId);
+                                          setTimeout(() => {
+                                            setCopiedBlockId((cur) =>
+                                              cur === blockId ? null : cur
+                                            );
+                                          }, 1500);
+                                        })
+                                        .catch(() => {});
+                                    }}
+                                    className="px-1.5 py-0.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] text-[10px] font-mono-code text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1 cursor-pointer transition-colors"
+                                    title="复制全文"
+                                  >
+                                    {copiedBlockId === blockId ? (
+                                      <Check className="w-2.5 h-2.5 text-emerald-500" />
+                                    ) : (
+                                      <Copy className="w-2.5 h-2.5" />
+                                    )}
+                                  </button>
+                                </>
+                              )}
                               {rawJsonForCopy !== null && (
                                 <button
                                   type="button"
@@ -2592,11 +2654,20 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                             </div>
                           </div>
 
-                          {!isCollapsed && (
-                            <div className="px-3 pb-2.5 pt-1 border-t border-[var(--border-subtle)] text-[11.5px] leading-relaxed text-[var(--text-secondary)] whitespace-pre-wrap break-words">
-                              {bodyContent}
-                            </div>
-                          )}
+                          {!isCollapsed &&
+                            (isMarkdownCapable && !isRawBlock ? (
+                              <div className="px-3 pb-2.5 pt-2 border-t border-[var(--border-subtle)]">
+                                <MarkdownRenderer
+                                  content={bodyContent}
+                                  variant="compact"
+                                  agents={agents}
+                                />
+                              </div>
+                            ) : (
+                              <div className="px-3 pb-2.5 pt-1 border-t border-[var(--border-subtle)] text-[11.5px] leading-relaxed text-[var(--text-secondary)] whitespace-pre-wrap break-words">
+                                {bodyContent}
+                              </div>
+                            ))}
                         </div>
                         {trailingAlerts.map((env, aIdx) =>
                           renderInlineAlertCard(env, aIdx)
@@ -2608,29 +2679,35 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
 
                 {/* Live Streaming Reasoning Slot */}
                 {liveReasoningBuffer && (
-                  <div className="rounded-xl border border-violet-500/40 bg-violet-500/[0.06] p-3 space-y-1">
+                  <div className="rounded-xl border border-violet-500/40 bg-violet-500/[0.06] p-3 space-y-1.5">
                     <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-violet-500">
                       <Brain className="w-3.5 h-3.5 animate-spin" />
                       <span>💭 实时思考流 (Reasoning Delta)</span>
+                      <span className="inline-block w-1.5 h-3 bg-violet-500 animate-pulse rounded-xs" />
                     </div>
-                    <div className="text-[11.5px] leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap">
-                      {liveReasoningBuffer}
-                      <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-violet-500 animate-pulse align-middle" />
-                    </div>
+                    <MarkdownRenderer
+                      content={liveReasoningBuffer}
+                      variant="compact"
+                      streaming
+                      agents={agents}
+                    />
                   </div>
                 )}
 
                 {/* Live Streaming Output Slot */}
                 {liveStreamBuffer && (
-                  <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/[0.06] p-3 space-y-1">
+                  <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/[0.06] p-3 space-y-1.5">
                     <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-emerald-500">
                       <Terminal className="w-3.5 h-3.5" />
                       <span>✍️ 实时输出流 (Output Delta)</span>
+                      <span className="inline-block w-1.5 h-3 bg-emerald-500 animate-pulse rounded-xs" />
                     </div>
-                    <div className="text-[11.5px] leading-relaxed text-[var(--text-primary)] whitespace-pre-wrap">
-                      {liveStreamBuffer}
-                      <span className="inline-block w-1.5 h-3.5 ml-0.5 bg-emerald-500 animate-pulse align-middle" />
-                    </div>
+                    <MarkdownRenderer
+                      content={liveStreamBuffer}
+                      variant="compact"
+                      streaming
+                      agents={agents}
+                    />
                   </div>
                 )}
               </div>
