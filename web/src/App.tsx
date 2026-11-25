@@ -104,7 +104,7 @@ export const App: React.FC = () => {
   );
   const [currentDetail, setCurrentDetail] = useState<RoomDetailResponse | null>(null);
   const [selectedMentions, setSelectedMentions] = useState<Set<string>>(new Set());
-  const [singleChatAutoPreselected, setSingleChatAutoPreselected] = useState(false);
+  const [leadAutoPreselected, setLeadAutoPreselected] = useState(false);
 
   const [inspectedAgentId, setInspectedAgentId] = useState<string | null>(null);
   const [inspectedSessionId, setInspectedSessionId] = useState<string | null>(null);
@@ -546,9 +546,9 @@ export const App: React.FC = () => {
                 const nextAgents = [...prev.agents];
                 if (idx >= 0) nextAgents[idx] = ev.agent;
                 else nextAgents.push(ev.agent);
-                if (prevCount === 1 && nextAgents.length > 1) {
-                  setSelectedMentions(new Set());
-                  setSingleChatAutoPreselected(false);
+                if (prevCount === 0 && nextAgents.length > 0) {
+                  setSelectedMentions(new Set([nextAgents[0].name]));
+                  setLeadAutoPreselected(true);
                 }
                 setRoomsList((list) =>
                   list.map((r) =>
@@ -569,9 +569,24 @@ export const App: React.FC = () => {
           } else if (ev.type === 'agent_removed') {
             setCurrentDetail((prev) => {
               if (!prev) return prev;
+              const removedAgent = prev.agents.find(
+                (a) => a.agent_id === ev.agent_id
+              );
               const nextAgents = prev.agents.filter(
                 (a) => a.agent_id !== ev.agent_id
               );
+              if (removedAgent) {
+                setSelectedMentions((sel) => {
+                  if (!sel.has(removedAgent.name)) return sel;
+                  const nextSel = new Set(sel);
+                  nextSel.delete(removedAgent.name);
+                  if (nextSel.size === 0 && nextAgents.length > 0) {
+                    nextSel.add(nextAgents[0].name);
+                    setLeadAutoPreselected(true);
+                  }
+                  return nextSel;
+                });
+              }
               setRoomsList((list) =>
                 list.map((r) =>
                   r.room.room_id === roomId ? { ...r, agents: nextAgents } : r
@@ -645,12 +660,12 @@ export const App: React.FC = () => {
       const detail: RoomDetailResponse = await apiFetch(`/api/v1/rooms/${roomId}`);
       if (currentRoomIdRef.current !== roomId) return;
       setCurrentDetail(detail);
-      if (detail.agents.length === 1) {
+      if (detail.agents.length > 0) {
         setSelectedMentions(new Set([detail.agents[0].name]));
-        setSingleChatAutoPreselected(true);
+        setLeadAutoPreselected(true);
       } else {
         setSelectedMentions(new Set());
-        setSingleChatAutoPreselected(false);
+        setLeadAutoPreselected(false);
       }
       subscribeRoomStream(roomId);
       if (detail.agents.length > 0) {
@@ -777,9 +792,9 @@ export const App: React.FC = () => {
     setSelectedMentions((prev) => {
       const next = new Set(prev);
       const agents = currentDetail?.agents || [];
-      if (singleChatAutoPreselected) {
-        setSingleChatAutoPreselected(false);
-        if (agents.length === 1 && name !== agents[0].name) {
+      if (leadAutoPreselected) {
+        setLeadAutoPreselected(false);
+        if (agents.length > 0 && name !== agents[0].name) {
           next.clear();
           next.add(name);
           return next;
@@ -793,8 +808,20 @@ export const App: React.FC = () => {
 
   const handleSendMessage = async (content: string, isRealtime: boolean) => {
     if (!currentDetail || !currentRoomId) return;
+    const lowerContent = content.toLowerCase();
+    const hasInlineMention =
+      content.includes('@') &&
+      (['manager', ...currentDetail.agents.map((a) => a.name.toLowerCase())].some(
+        (name) => {
+          const needle = `@${name}`;
+          const idx = lowerContent.indexOf(needle);
+          if (idx === -1) return false;
+          const nextCh = content.slice(idx + needle.length, idx + needle.length + 1);
+          return !nextCh || /[\s,，:：;；!?！？()（）\[\]{}<>]/.test(nextCh);
+        }
+      ) || content.trimStart().startsWith('@'));
     const mentions =
-      singleChatAutoPreselected && content.startsWith('@')
+      leadAutoPreselected && hasInlineMention
         ? []
         : Array.from(selectedMentions);
 
@@ -807,9 +834,9 @@ export const App: React.FC = () => {
         is_realtime: isRealtime,
       }),
     });
-    if (currentDetail.agents.length === 1) {
+    if (currentDetail.agents.length > 0) {
       setSelectedMentions(new Set([currentDetail.agents[0].name]));
-      setSingleChatAutoPreselected(true);
+      setLeadAutoPreselected(true);
     }
   };
 

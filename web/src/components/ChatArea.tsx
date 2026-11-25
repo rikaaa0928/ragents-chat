@@ -1120,8 +1120,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   点名唤醒:
                 </span>
 
-                {agents.map((a) => {
+                {agents.map((a, idx) => {
                   const isSel = selectedMentions.has(a.name);
+                  const isLead = idx === 0 && agents.length > 1;
                   return (
                     <button
                       key={a.agent_id}
@@ -1132,9 +1133,17 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                           ? 'bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)]'
                           : 'bg-[var(--bg-main)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-[var(--border-subtle)]'
                       }`}
+                      title={
+                        isLead
+                          ? `@${a.name}（默认主导，点击可取消或切换点名目标）`
+                          : `点名唤醒 @${a.name}`
+                      }
                     >
                       <span>{a.avatar}</span>
                       <span>@{a.name}</span>
+                      {isLead && (
+                        <span className="text-[10px] opacity-75">主导</span>
+                      )}
                     </button>
                   );
                 })}
@@ -1346,11 +1355,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                       ? 'bg-[var(--bg-main)] text-[var(--text-primary)] border border-[var(--border-subtle)]'
                       : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]'
                   }`}
-                  title="展开/收起 @点名唤醒栏"
+                  title="展开/收起 @点名唤醒栏（默认点名主导 Agent，也可取消或改选其他成员）"
                 >
                   <AtSign className="w-3.5 h-3.5 shrink-0" />
-                  <span>
-                    点名 {selectedMentions.size > 0 ? `(${selectedMentions.size})` : ''}
+                  <span className="max-w-[120px] truncate">
+                    {selectedMentions.size === 1
+                      ? `点名 @${Array.from(selectedMentions)[0]}`
+                      : selectedMentions.size > 1
+                      ? `点名 (${selectedMentions.size})`
+                      : '点名'}
                   </span>
                   {mentionBarOpen ? (
                     <ChevronUp className="w-3 h-3 text-[var(--text-muted)] shrink-0" />
