@@ -169,6 +169,10 @@ pub fn build_chat_router(state: ChatServerState) -> Router {
             "/api/v1/internal/manager/remove-agent",
             post(handle_internal_manager_remove_agent),
         )
+        .route(
+            "/api/v1/internal/manager/room-info",
+            post(handle_internal_manager_room_info),
+        )
         .with_state(state)
 }
 
@@ -1334,6 +1338,25 @@ async fn handle_internal_manager_remove_agent(
     let res = state
         .coordinator
         .handle_internal_manager_remove_agent(bearer.as_deref(), req)
+        .await
+        .map_err(|(code, err)| {
+            ChatApiError::Http(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST),
+                err,
+            )
+        })?;
+    Ok((StatusCode::OK, Json(res)))
+}
+
+async fn handle_internal_manager_room_info(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Json(req): Json<InternalManagerRoomInfoRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ChatApiError> {
+    let bearer = extract_bearer_or_cookie_token(&headers);
+    let res = state
+        .coordinator
+        .handle_internal_manager_room_info(bearer.as_deref(), req)
         .await
         .map_err(|(code, err)| {
             ChatApiError::Http(

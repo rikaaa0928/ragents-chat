@@ -16,7 +16,6 @@ export interface Room {
   mute_probability: number;
   max_agent_relay_depth: number;
   consecutive_agent_msgs: number;
-  roster_version: number;
   last_msg_seq: number;
   created_at?: string;
   updated_at?: string;

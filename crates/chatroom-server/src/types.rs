@@ -178,7 +178,6 @@ pub struct Room {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_prompts_updated_by: Option<String>,
     pub last_msg_seq: u64,
-    pub roster_version: u64,
     pub peek_enabled: bool,
     pub peek_idle_mode: PeekIdleMode,
     pub peek_idle_secs: u64,
@@ -376,7 +375,6 @@ pub struct RoomAgent {
     pub active_session_id: SessionId,
     pub session_chain: Vec<SessionChainEntry>,
     pub last_delivered_seq: u64,
-    pub last_roster_version: u64,
     pub runtime_state: AgentRuntimeState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_activation_id: Option<ActivationId>,
@@ -638,6 +636,12 @@ pub struct InternalManagerRemoveAgentRequest {
     pub room_id: String,
     pub agent_id: String,
     pub target_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InternalManagerRoomInfoRequest {
+    pub room_id: String,
+    pub agent_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

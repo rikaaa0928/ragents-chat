@@ -599,7 +599,6 @@ impl RoomCoordinator {
             .store
             .get_room(&agent.room_id)?
             .ok_or_else(|| anyhow::anyhow!("room {} not found", agent.room_id))?;
-        let all_agents = self.store.list_room_agents(&room.room_id)?;
         let unread = self.store.list_room_messages_for_agent(
             &room.room_id,
             agent.last_delivered_seq,
@@ -623,19 +622,12 @@ impl RoomCoordinator {
 
         let (updated_agent, act) = if !unread.is_empty() {
             let max_seq = room.last_msg_seq;
-            let formatted = format_delivery_payload(
-                &room,
-                &all_agents,
-                &agent,
-                &unread,
-                DeliveryMode::DirectMention,
-            );
+            let formatted =
+                format_delivery_payload(&room, &agent, &unread, DeliveryMode::DirectMention);
             let metadata = build_chatroom_queue_metadata(&unread, "chatroom_retry", true);
-            let upd = self.store.advance_agent_delivery_cursor(
-                &agent.agent_id,
-                max_seq,
-                room.roster_version,
-            )?;
+            let upd = self
+                .store
+                .advance_agent_delivery_cursor(&agent.agent_id, max_seq)?;
             let resp = self
                 .ragents_client
                 .enqueue_session_message(
@@ -671,11 +663,9 @@ impl RoomCoordinator {
             };
             (upd, act)
         } else {
-            let upd = self.store.advance_agent_delivery_cursor(
-                &agent.agent_id,
-                agent.last_delivered_seq,
-                room.roster_version,
-            )?;
+            let upd = self
+                .store
+                .advance_agent_delivery_cursor(&agent.agent_id, agent.last_delivered_seq)?;
             let resumed = self
                 .ragents_client
                 .resume_session(&upd.active_session_id)
@@ -1291,6 +1281,21 @@ impl RoomCoordinator {
                                         serde_json::json!(room_prompt_url),
                                     );
                                     ext_changed = true;
+                                }
+                                if ag.name.eq_ignore_ascii_case("Manager") {
+                                    let room_info_url = format!(
+                                        "{}/api/v1/internal/manager/room-info",
+                                        self.callback_base_url.trim_end_matches('/')
+                                    );
+                                    if obj.get("chatroom_room_info_url").and_then(|v| v.as_str())
+                                        != Some(room_info_url.as_str())
+                                    {
+                                        obj.insert(
+                                            "chatroom_room_info_url".to_string(),
+                                            serde_json::json!(room_info_url),
+                                        );
+                                        ext_changed = true;
+                                    }
                                 }
                                 let desired_prompts = serde_json::json!(&room.room_prompts);
                                 if obj.get("room_prompts") != Some(&desired_prompts) {
@@ -1964,6 +1969,7 @@ impl RoomCoordinator {
         let add_agent_url = format!("{base}/api/v1/internal/manager/add-agent");
         let remove_agent_url = format!("{base}/api/v1/internal/manager/remove-agent");
         let room_prompt_url = format!("{base}/api/v1/internal/room-prompt");
+        let room_info_url = format!("{base}/api/v1/internal/manager/room-info");
 
         let room_tmp_dir = Self::room_tmp_dir(&room.room_id);
         let extra_tmp_dirs = vec![PathBuf::from(&room_tmp_dir)];
@@ -1978,6 +1984,7 @@ impl RoomCoordinator {
                 "chatroom_add_agent_url": add_agent_url,
                 "chatroom_remove_agent_url": remove_agent_url,
                 "chatroom_room_prompt_url": room_prompt_url,
+                "chatroom_room_info_url": room_info_url,
                 "room_id": room.room_id,
                 "room_name": room.name,
                 "workspace_path": room.workspace_path,
@@ -2060,7 +2067,6 @@ impl RoomCoordinator {
                 created_at: now,
             }],
             last_delivered_seq: room.last_msg_seq,
-            last_roster_version: room.roster_version,
             runtime_state: AgentRuntimeState::Idle,
             active_activation_id: None,
             agent_secret_token,
@@ -2317,7 +2323,6 @@ impl RoomCoordinator {
                 created_at: now,
             }],
             last_delivered_seq: room.last_msg_seq,
-            last_roster_version: 0,
             runtime_state: AgentRuntimeState::Idle,
             active_activation_id: None,
             agent_secret_token,
@@ -2638,6 +2643,178 @@ impl RoomCoordinator {
             "ok": true,
             "removed_agent_id": target.agent_id,
             "removed_name": target.name,
+        }))
+    }
+
+    pub async fn handle_internal_manager_room_info(
+        &self,
+        bearer_token: Option<&str>,
+        req: InternalManagerRoomInfoRequest,
+    ) -> Result<serde_json::Value, (u16, String)> {
+        let mgr_agent = self
+            .store
+            .get_agent(&req.agent_id)
+            .map_err(|e| (500, e.to_string()))?
+            .ok_or_else(|| (404, format!("manager agent {} not found", req.agent_id)))?;
+
+        if mgr_agent.room_id != req.room_id || !mgr_agent.name.eq_ignore_ascii_case("Manager") {
+            return Err((
+                403,
+                "only room @Manager can call chatroom_room_info".to_string(),
+            ));
+        }
+
+        let provided = bearer_token.unwrap_or("");
+        if !constant_time_eq(provided, &mgr_agent.agent_secret_token) {
+            return Err((401, "invalid agent_secret_token".to_string()));
+        }
+
+        let room = self
+            .store
+            .get_room(&req.room_id)
+            .map_err(|e| (500, e.to_string()))?
+            .ok_or_else(|| (404, format!("room {} not found", req.room_id)))?;
+        let agents = self
+            .store
+            .list_room_agents(&req.room_id)
+            .map_err(|e| (500, e.to_string()))?;
+        let mut schedules = Vec::new();
+        for a in &agents {
+            if let Ok(mut list) = self.store.list_agent_schedules(&a.agent_id) {
+                schedules.append(&mut list);
+            }
+        }
+        let pending_pool = self.build_room_pending_pool(&req.room_id);
+        let mgr_settings = self
+            .store
+            .get_manager_settings()
+            .map_err(|e| (500, e.to_string()))?;
+        let available_models: Vec<String> = self
+            .ragents_client
+            .list_models()
+            .await
+            .map(|resp| resp.models.into_iter().map(|m| m.id).collect())
+            .unwrap_or_default();
+        let cluster_nodes: Vec<serde_json::Value> = self
+            .ragents_client
+            .list_nodes()
+            .await
+            .map(|nodes| {
+                nodes
+                    .into_iter()
+                    .map(|n| {
+                        let status = n.status;
+                        serde_json::json!({
+                            "node_id": n.metadata.id,
+                            "phase": format!("{:?}", status.phase),
+                            "hostname": status.hostname,
+                            "os": status.os,
+                            "arch": status.arch,
+                            "default_model": status.default_model,
+                            "supported_models": status.supported_models,
+                            "allowed_workspace_dirs": status.allowed_workspace_dirs,
+                            "installed_extensions": status.installed_extensions,
+                            "active_runners": status.active_runners,
+                            "max_concurrent_runners": status.max_concurrent_runners,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let room_tmp_dir = Self::room_tmp_dir(&room.room_id);
+        let agent_name_map: std::collections::HashMap<&str, &str> = agents
+            .iter()
+            .map(|a| (a.agent_id.as_str(), a.name.as_str()))
+            .collect();
+
+        let agents_json: Vec<serde_json::Value> = agents
+            .iter()
+            .enumerate()
+            .map(|(idx, a)| {
+                serde_json::json!({
+                    "index": idx,
+                    "is_default_lead": idx == 0,
+                    "agent_id": a.agent_id,
+                    "name": a.name,
+                    "role_title": a.role_title,
+                    "avatar": a.avatar,
+                    "model": a.model,
+                    "reasoning_effort": a.reasoning_effort,
+                    "reasoning_summary": a.reasoning_summary,
+                    "web_search": a.web_search,
+                    "prompt_hint": a.prompt_hint,
+                    "runtime_state": a.runtime_state.as_str(),
+                    "active_session_id": a.active_session_id.as_str(),
+                    "active_activation_id": a.active_activation_id.as_ref().map(|x| x.as_str()),
+                    "last_delivered_seq": a.last_delivered_seq,
+                    "persona_prompt": a.persona_prompt,
+                    "created_by": a.created_by,
+                    "created_at": a.created_at,
+                })
+            })
+            .collect();
+
+        let schedules_json: Vec<serde_json::Value> = schedules
+            .into_iter()
+            .map(|s| {
+                serde_json::json!({
+                    "schedule_id": s.schedule_id,
+                    "agent_id": s.agent_id,
+                    "agent_name": agent_name_map.get(s.agent_id.as_str()).copied().unwrap_or(""),
+                    "title": s.title,
+                    "schedule_summary": s.schedule_summary,
+                    "delivery_mode": s.delivery_mode,
+                    "enabled": s.enabled,
+                    "run_count": s.run_count,
+                    "next_run_at": s.next_run_at,
+                    "last_status": s.last_status,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "room": {
+                "room_id": room.room_id,
+                "name": room.name,
+                "description": room.description,
+                "node_id": room.node_id,
+                "workspace_path": room.workspace_path,
+                "room_tmp_dir": room_tmp_dir,
+                "last_msg_seq": room.last_msg_seq,
+                "peek_enabled": room.peek_enabled,
+                "peek_idle_mode": room.peek_idle_mode,
+                "peek_idle_secs": room.peek_idle_secs,
+                "peek_msg_interval": room.peek_msg_interval,
+                "interject_enabled": room.interject_enabled,
+                "mute_probability": room.mute_probability,
+                "max_agent_relay_depth": room.max_agent_relay_depth,
+                "consecutive_agent_msgs": room.consecutive_agent_msgs,
+                "created_at": room.created_at,
+                "updated_at": room.updated_at,
+            },
+            "room_prompts": format_room_prompts_response(&room),
+            "manager_agent": {
+                "agent_id": mgr_agent.agent_id,
+                "name": mgr_agent.name,
+                "role_title": mgr_agent.role_title,
+                "model": mgr_agent.model,
+                "reasoning_effort": mgr_agent.reasoning_effort,
+                "reasoning_summary": mgr_agent.reasoning_summary,
+                "web_search": mgr_agent.web_search,
+                "runtime_state": mgr_agent.runtime_state.as_str(),
+                "last_delivered_seq": mgr_agent.last_delivered_seq,
+                "active_session_id": mgr_agent.active_session_id.as_str(),
+            },
+            "agents": agents_json,
+            "schedules": schedules_json,
+            "pending_pool": {
+                "total_undelivered_messages": pending_pool.total_undelivered_messages,
+                "per_agent": pending_pool.per_agent,
+            },
+            "cluster_nodes": cluster_nodes,
+            "available_models": available_models,
+            "default_agent_model": mgr_settings.default_agent_model,
         }))
     }
 
@@ -3347,7 +3524,6 @@ impl RoomCoordinator {
             .store
             .get_room(&agent.room_id)?
             .ok_or_else(|| anyhow::anyhow!("room not found"))?;
-        let all_agents = self.store.list_room_agents(&room.room_id)?;
 
         let now = Utc::now();
         let now_ms = now.timestamp_millis();
@@ -3437,7 +3613,6 @@ impl RoomCoordinator {
         let mut payload_text = if !unread.is_empty() {
             let mut s = format_delivery_payload(
                 &room,
-                &all_agents,
                 &agent,
                 &unread,
                 DeliveryMode::PeekAllowed { roll: 100 },
@@ -3488,11 +3663,9 @@ Task Instructions:\n\
             ),
         );
 
-        let updated_agent = self.store.advance_agent_delivery_cursor(
-            &agent.agent_id,
-            max_seq,
-            room.roster_version,
-        )?;
+        let updated_agent = self
+            .store
+            .advance_agent_delivery_cursor(&agent.agent_id, max_seq)?;
 
         let resp = self
             .ragents_client
@@ -3612,7 +3785,6 @@ Task Instructions:\n\
                     let _ = self
                         .deliver_direct_mention_to_agent(
                             &room,
-                            &agents,
                             target_agent,
                             from_human,
                             msg.is_realtime,
@@ -3700,7 +3872,6 @@ Task Instructions:\n\
     async fn deliver_direct_mention_to_agent(
         &self,
         room: &Room,
-        all_agents: &[RoomAgent],
         target_agent: &RoomAgent,
         from_human: bool,
         is_realtime: bool,
@@ -3715,20 +3886,13 @@ Task Instructions:\n\
         }
 
         let max_seq = room.last_msg_seq;
-        let formatted = format_delivery_payload(
-            room,
-            all_agents,
-            target_agent,
-            &unread,
-            DeliveryMode::DirectMention,
-        );
+        let formatted =
+            format_delivery_payload(room, target_agent, &unread, DeliveryMode::DirectMention);
         let metadata = build_chatroom_queue_metadata(&unread, "chatroom_mention", true);
 
-        let updated_agent = self.store.advance_agent_delivery_cursor(
-            &target_agent.agent_id,
-            max_seq,
-            room.roster_version,
-        )?;
+        let updated_agent = self
+            .store
+            .advance_agent_delivery_cursor(&target_agent.agent_id, max_seq)?;
         self.cancel_agent_per_agent_timer(&room.room_id, &target_agent.agent_id);
 
         {
@@ -3823,7 +3987,13 @@ Task Instructions:\n\
                 } else {
                     a.role_title.clone()
                 };
-                format!("@{} ({}, model={})", a.name, role_tag, a.model)
+                format!(
+                    "@{} ({}, model={}, state={})",
+                    a.name,
+                    role_tag,
+                    a.model,
+                    a.runtime_state.as_str()
+                )
             })
             .collect();
 
@@ -3834,19 +4004,23 @@ Task Instructions:\n\
             None => "Room currently has no participant agents; the first recruited agent will become the Default Room Lead.".to_string(),
         };
 
-        let mut formatted = format_delivery_payload(
-            room,
-            all_agents,
-            &mgr_agent,
-            &unread,
-            DeliveryMode::DirectMention,
-        );
+        let room_tmp_dir = Self::room_tmp_dir(&room.room_id);
+        let mut formatted =
+            format_delivery_payload(room, &mgr_agent, &unread, DeliveryMode::DirectMention);
         formatted.push_str(&format!(
-            "\n\n=== [Manager Cluster & Roster Status] ===\n\
+            "\n\n=== [Manager Room & Cluster Status] ===\n\
+             - Room: \"{}\" (id={}, node={}, workspace={:?}, room_tmp_dir={}, room_prompts_v={})\n\
              - Existing Participant Agents in Room: {:?}\n\
              - {}\n\
              - Available Models on Cluster: {:?} (default: {})\n\
-             - Execution Order: 1) Call `chatroom_add_agent` and/or `chatroom_remove_agent` FIRST. 2) Wait for tool results confirming the roster update. 3) Call `chatroom_speak` ONCE to announce the roster update and hand off.",
+             - Inspection Tool: Call `chatroom_room_info` anytime to inspect complete live details (each agent's full persona_prompt, reasoning/web_search config, schedules, pending_pool, cluster_nodes, and room_prompts).\n\
+             - Execution Order (when modifying roster): 1) Call `chatroom_add_agent` / `chatroom_remove_agent` FIRST. 2) Update `room_prompts[0]` via `chatroom_room_prompt(action=\"set_members\", ...)` if needed. 3) Call `chatroom_speak` ONCE to announce changes or answer the room question.",
+            room.name,
+            room.room_id,
+            room.node_id.as_deref().unwrap_or("unassigned"),
+            room.workspace_path,
+            room_tmp_dir,
+            room.room_prompts_version,
             existing_summary,
             lead_hint,
             available_models,
@@ -3855,11 +4029,9 @@ Task Instructions:\n\
 
         let max_seq = room.last_msg_seq;
         let metadata = build_chatroom_queue_metadata(&unread, "chatroom_mention", true);
-        let updated_mgr = self.store.advance_agent_delivery_cursor(
-            &mgr_agent.agent_id,
-            max_seq,
-            room.roster_version,
-        )?;
+        let updated_mgr = self
+            .store
+            .advance_agent_delivery_cursor(&mgr_agent.agent_id, max_seq)?;
 
         {
             let mut dm_guard = self
@@ -4219,7 +4391,7 @@ Task Instructions:\n\
             };
             if can_dispatch_now {
                 let dispatched = self
-                    .dispatch_peek_to_agent(&room, &all_agents, target_agent, &unread, roll, true)
+                    .dispatch_peek_to_agent(&room, target_agent, &unread, roll, true)
                     .await;
                 if !dispatched {
                     {
@@ -4239,7 +4411,7 @@ Task Instructions:\n\
                 }
             }
         } else {
-            self.dispatch_peek_to_agent(&room, &all_agents, target_agent, &unread, roll, false)
+            self.dispatch_peek_to_agent(&room, target_agent, &unread, roll, false)
                 .await;
         }
     }
@@ -4247,7 +4419,6 @@ Task Instructions:\n\
     async fn dispatch_peek_to_agent(
         &self,
         room: &Room,
-        all_agents: &[RoomAgent],
         target_agent: &RoomAgent,
         unread: &[RoomMessage],
         roll: u8,
@@ -4277,7 +4448,7 @@ Task Instructions:\n\
         } else {
             DeliveryMode::PeekMuted { roll }
         };
-        let formatted = format_delivery_payload(room, all_agents, &fresh_agent, unread, mode);
+        let formatted = format_delivery_payload(room, &fresh_agent, unread, mode);
         let source = if allow_speak {
             "chatroom_peek_allowed"
         } else {
@@ -4293,11 +4464,10 @@ Task Instructions:\n\
             },
         );
 
-        let Ok(updated_agent) = self.store.advance_agent_delivery_cursor(
-            &fresh_agent.agent_id,
-            max_seq,
-            room.roster_version,
-        ) else {
+        let Ok(updated_agent) = self
+            .store
+            .advance_agent_delivery_cursor(&fresh_agent.agent_id, max_seq)
+        else {
             return false;
         };
         self.cancel_agent_per_agent_timer(&room.room_id, &fresh_agent.agent_id);
@@ -4562,11 +4732,9 @@ Task Instructions:\n\
                         room.last_msg_seq
                     ),
                 );
-                let _ = self.store.advance_agent_delivery_cursor(
-                    &target_agent.agent_id,
-                    room.last_msg_seq,
-                    target_agent.last_roster_version,
-                );
+                let _ = self
+                    .store
+                    .advance_agent_delivery_cursor(&target_agent.agent_id, room.last_msg_seq);
                 {
                     let mut guard = self
                         .room_peek_states
@@ -4581,7 +4749,7 @@ Task Instructions:\n\
             }
 
             let dispatched = self
-                .dispatch_peek_to_agent(&room, &all_agents, target_agent, &unread, roll, allow_speak)
+                .dispatch_peek_to_agent(&room, target_agent, &unread, roll, allow_speak)
                 .await;
             if !dispatched {
                 {
@@ -4607,35 +4775,11 @@ enum DeliveryMode {
 
 fn format_delivery_payload(
     room: &Room,
-    all_agents: &[RoomAgent],
     target_agent: &RoomAgent,
     unread_messages: &[RoomMessage],
     mode: DeliveryMode,
 ) -> String {
     let mut out = String::new();
-
-    // Only include the room roster header when the room's `roster_version` has changed since last sync
-    if target_agent.last_roster_version < room.roster_version {
-        let mut members = vec![
-            "Human (人类用户)".to_string(),
-            "@Manager (聊天室管家)".to_string(),
-        ];
-        for (idx, ag) in all_agents.iter().enumerate() {
-            if idx == 0 && all_agents.len() > 1 {
-                members.push(format!(
-                    "@{} ({} [Default Room Lead / 默认主导统筹])",
-                    ag.name, ag.role_title
-                ));
-            } else {
-                members.push(format!("@{} ({})", ag.name, ag.role_title));
-            }
-        }
-        out.push_str(&format!(
-            "[Room Roster Updated (v{}): {}]\n\n",
-            room.roster_version,
-            members.join(", ")
-        ));
-    }
 
     match mode {
         DeliveryMode::DirectMention => {

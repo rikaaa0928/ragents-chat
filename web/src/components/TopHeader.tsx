@@ -561,7 +561,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                 ID: {room.room_id}
               </span>
               <span className="text-[11px] text-[var(--text-muted)]">
-                名册 v{room.roster_version} · 消息 #{room.last_msg_seq}
+                消息 #{room.last_msg_seq}
               </span>
               {room.created_at && (
                 <span className="text-[11px] text-[var(--text-muted)]">

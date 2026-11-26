@@ -1221,10 +1221,10 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(
               <div className="p-2 rounded-lg bg-[var(--bg-main)] border border-[var(--border-subtle)] space-y-0.5">
                 <div className="text-[10px] text-[var(--text-muted)] flex items-center gap-1">
                   <Users className="w-3 h-3 text-[var(--text-muted)]" />
-                  <span>名册 / 消息</span>
+                  <span>房间消息</span>
                 </div>
                 <div className="font-semibold text-[var(--text-primary)]">
-                  v{room.roster_version} · #{room.last_msg_seq}
+                  #{room.last_msg_seq}
                 </div>
               </div>
             </div>

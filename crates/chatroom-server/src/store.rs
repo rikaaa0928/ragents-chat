@@ -23,41 +23,40 @@ pub enum ChatStoreError {
 }
 
 const ROOM_SELECT_COLS: &str =
-    "r.room_id, r.name, r.description, r.last_msg_seq, r.roster_version,
+    "r.room_id, r.name, r.description, r.last_msg_seq,
      r.peek_enabled, r.peek_idle_secs, r.peek_msg_interval, r.interject_enabled,
      r.mute_probability, r.max_agent_relay_depth, r.consecutive_agent_msgs,
      r.created_at, r.updated_at, r.node_id, r.workspace_path, r.peek_idle_mode,
      r.room_prompts_json, r.room_prompts_version, r.room_prompts_updated_at, r.room_prompts_updated_by";
 
 fn parse_room_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Room> {
-    let mode_str: String = r.get(16)?;
-    let prompts_raw: String = r.get(17)?;
+    let mode_str: String = r.get(15)?;
+    let prompts_raw: String = r.get(16)?;
     let prompts = normalize_room_prompts(
         serde_json::from_str::<Vec<String>>(&prompts_raw).unwrap_or_else(|_| vec![String::new()]),
     );
-    let updated_at_opt: Option<String> = r.get(19)?;
+    let updated_at_opt: Option<String> = r.get(18)?;
     Ok(Room {
         room_id: r.get(0)?,
         name: r.get(1)?,
         description: r.get(2)?,
-        node_id: r.get(14)?,
-        workspace_path: r.get(15)?,
+        node_id: r.get(13)?,
+        workspace_path: r.get(14)?,
         room_prompts: prompts,
-        room_prompts_version: r.get::<_, i64>(18)? as u64,
+        room_prompts_version: r.get::<_, i64>(17)? as u64,
         room_prompts_updated_at: updated_at_opt.as_deref().map(parse_dt),
-        room_prompts_updated_by: r.get(20)?,
+        room_prompts_updated_by: r.get(19)?,
         last_msg_seq: r.get::<_, i64>(3)? as u64,
-        roster_version: r.get::<_, i64>(4)? as u64,
-        peek_enabled: r.get::<_, i64>(5)? != 0,
+        peek_enabled: r.get::<_, i64>(4)? != 0,
         peek_idle_mode: PeekIdleMode::from_str(&mode_str),
-        peek_idle_secs: r.get::<_, i64>(6)? as u64,
-        peek_msg_interval: r.get::<_, i64>(7)? as u32,
-        interject_enabled: r.get::<_, i64>(8)? != 0,
-        mute_probability: (r.get::<_, i64>(9)?.clamp(0, 100)) as u8,
-        max_agent_relay_depth: r.get::<_, i64>(10)? as u32,
-        consecutive_agent_msgs: r.get::<_, i64>(11)? as u32,
-        created_at: parse_dt(&r.get::<_, String>(12)?),
-        updated_at: parse_dt(&r.get::<_, String>(13)?),
+        peek_idle_secs: r.get::<_, i64>(5)? as u64,
+        peek_msg_interval: r.get::<_, i64>(6)? as u32,
+        interject_enabled: r.get::<_, i64>(7)? != 0,
+        mute_probability: (r.get::<_, i64>(8)?.clamp(0, 100)) as u8,
+        max_agent_relay_depth: r.get::<_, i64>(9)? as u32,
+        consecutive_agent_msgs: r.get::<_, i64>(10)? as u32,
+        created_at: parse_dt(&r.get::<_, String>(11)?),
+        updated_at: parse_dt(&r.get::<_, String>(12)?),
     })
 }
 
@@ -128,7 +127,6 @@ impl ChatroomStore {
                  room_prompts_updated_at TEXT,
                  room_prompts_updated_by TEXT,
                  last_msg_seq            INTEGER NOT NULL DEFAULT 0,
-                 roster_version          INTEGER NOT NULL DEFAULT 1,
                  peek_enabled            INTEGER NOT NULL DEFAULT 0,
                  peek_idle_mode          TEXT NOT NULL DEFAULT 'global',
                  peek_idle_secs          INTEGER NOT NULL DEFAULT 60,
@@ -158,7 +156,6 @@ impl ChatroomStore {
                  active_session_id       TEXT NOT NULL,
                  session_chain_json      TEXT NOT NULL,
                  last_delivered_seq      INTEGER NOT NULL DEFAULT 0,
-                 last_roster_version     INTEGER NOT NULL DEFAULT 0,
                  runtime_state           TEXT NOT NULL DEFAULT 'idle',
                  active_activation_id    TEXT,
                  agent_secret_token      TEXT NOT NULL,
@@ -221,12 +218,13 @@ impl ChatroomStore {
              CREATE INDEX IF NOT EXISTS idx_agent_schedules_due ON agent_schedules(enabled, next_run_at_ms);",
         )?;
 
-        let default_mgr_prompt = "You are @Manager, the AI Chatroom Butler and Team Architect. \
-You manage the room's specialist agent roster using your tools:\n\
-1. When asked to recruit/add new specialist agents, call `chatroom_add_agent` for each required agent FIRST (designing a clear nickname, role_title, emoji avatar, detailed persona_prompt, and choosing an appropriate model from Available Models).\n\
-2. When asked to remove/dismiss existing agents, call `chatroom_remove_agent` FIRST.\n\
-3. Wait until all `chatroom_add_agent` / `chatroom_remove_agent` tool calls have completed.\n\
-4. Finally, call `chatroom_speak` ONCE to announce the roster changes in the chatroom and hand off task coordination ONLY to the Room Lead Agent (do not wake up all newly recruited agents simultaneously).";
+        let default_mgr_prompt = "You are @Manager, the AI Chatroom Butler, Team Architect, and Room Information Authority. \
+You hold full visibility over the room's configuration, workspace/node bindings, shared room prompts, schedules, cluster nodes, available models, and every agent's complete profile:\n\
+1. Call `chatroom_room_info` whenever you need the complete live room state, member details (models, roles, persona_prompts, states), cluster nodes, or available models—especially when a working agent asks you for room or teammate information.\n\
+2. When asked to recruit/add new specialist agents, call `chatroom_add_agent` for each required agent FIRST (designing a clear nickname, role_title, emoji avatar, detailed persona_prompt, and choosing an appropriate model from Available Models).\n\
+3. When asked to remove/dismiss existing agents, call `chatroom_remove_agent` FIRST.\n\
+4. Keep `room_prompts[0]` (`chatroom_room_prompt(action='set_members')`) concise and accurate after team changes so working agents always see current member roles in their system prompt.\n\
+5. Finally, call `chatroom_speak` ONCE to answer room questions, announce changes, or hand off task coordination ONLY to the Room Lead Agent (do not wake up all newly recruited agents simultaneously).";
 
         let now = Utc::now().to_rfc3339();
         conn.execute(
@@ -454,7 +452,6 @@ You manage the room's specialist agent roster using your tools:\n\
             room_prompts_updated_at: prompts_updated_at,
             room_prompts_updated_by: prompts_updated_by,
             last_msg_seq: 0,
-            roster_version: 1,
             peek_enabled: false,
             peek_idle_mode: PeekIdleMode::Global,
             peek_idle_secs: 60,
@@ -472,11 +469,11 @@ You manage the room's specialist agent roster using your tools:\n\
             "INSERT INTO rooms (
                 room_id, name, description, node_id, workspace_path,
                 room_prompts_json, room_prompts_version, room_prompts_updated_at, room_prompts_updated_by,
-                last_msg_seq, roster_version,
+                last_msg_seq,
                 peek_enabled, peek_idle_mode, peek_idle_secs, peek_msg_interval, interject_enabled,
                 mute_probability, max_agent_relay_depth, consecutive_agent_msgs,
                 created_at, updated_at
-             ) VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5, ?6, ?7, 0, 1, 0, 'global', 60, 20, 0, 40, ?8, 0, ?9, ?9)",
+             ) VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5, ?6, ?7, 0, 0, 'global', 60, 20, 0, 40, ?8, 0, ?9, ?9)",
             params![
                 &room.room_id,
                 &room.name,
@@ -771,19 +768,12 @@ You manage the room's specialist agent roster using your tools:\n\
         let mut room = Self::load_room_from_conn(&tx, &agent.room_id)?
             .ok_or_else(|| ChatStoreError::NotFound(format!("room {}", agent.room_id)))?;
 
-        if !agent.name.eq_ignore_ascii_case("Manager") {
-            room.roster_version += 1;
-        }
         room.updated_at = Utc::now();
         agent.last_delivered_seq = room.last_msg_seq;
 
         tx.execute(
-            "UPDATE rooms SET roster_version = ?1, updated_at = ?2 WHERE room_id = ?3",
-            params![
-                room.roster_version as i64,
-                room.updated_at.to_rfc3339(),
-                &room.room_id,
-            ],
+            "UPDATE rooms SET updated_at = ?1 WHERE room_id = ?2",
+            params![room.updated_at.to_rfc3339(), &room.room_id],
         )?;
 
         tx.execute(
@@ -791,10 +781,10 @@ You manage the room's specialist agent roster using your tools:\n\
                 agent_id, room_id, name, role_title, avatar, persona_prompt,
                 model, reasoning_effort, reasoning_summary, web_search, prompt_hint, scheduling_json,
                 root_session_id, active_session_id,
-                session_chain_json, last_delivered_seq, last_roster_version,
+                session_chain_json, last_delivered_seq,
                 runtime_state, active_activation_id,
                 agent_secret_token, created_by, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 &agent.agent_id,
                 &agent.room_id,
@@ -812,7 +802,6 @@ You manage the room's specialist agent roster using your tools:\n\
                 agent.active_session_id.as_str(),
                 serde_json::to_string(&agent.session_chain)?,
                 agent.last_delivered_seq as i64,
-                agent.last_roster_version as i64,
                 agent.runtime_state.as_str(),
                 agent.active_activation_id.as_ref().map(|a| a.as_str()),
                 &agent.agent_secret_token,
@@ -828,9 +817,9 @@ You manage the room's specialist agent roster using your tools:\n\
     fn row_to_agent(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoomAgent> {
         let scheduling_str: String = r.get(11)?;
         let chain_str: String = r.get(14)?;
-        let state_str: String = r.get(17)?;
-        let act_opt: Option<String> = r.get(18)?;
-        let created_str: String = r.get(21)?;
+        let state_str: String = r.get(16)?;
+        let act_opt: Option<String> = r.get(17)?;
+        let created_str: String = r.get(20)?;
         Ok(RoomAgent {
             agent_id: r.get(0)?,
             room_id: r.get(1)?,
@@ -850,11 +839,10 @@ You manage the room's specialist agent roster using your tools:\n\
             active_session_id: SessionId::new(r.get::<_, String>(13)?),
             session_chain: serde_json::from_str(&chain_str).unwrap_or_default(),
             last_delivered_seq: r.get::<_, i64>(15)? as u64,
-            last_roster_version: r.get::<_, i64>(16)? as u64,
             runtime_state: AgentRuntimeState::from_str(&state_str),
             active_activation_id: act_opt.map(ActivationId::new),
-            agent_secret_token: r.get(19)?,
-            created_by: r.get(20)?,
+            agent_secret_token: r.get(18)?,
+            created_by: r.get(19)?,
             created_at: parse_dt(&created_str),
         })
     }
@@ -865,7 +853,7 @@ You manage the room's specialist agent roster using your tools:\n\
             "SELECT agent_id, room_id, name, role_title, avatar, persona_prompt,
                     model, reasoning_effort, reasoning_summary, web_search, prompt_hint, scheduling_json,
                     root_session_id, active_session_id,
-                    session_chain_json, last_delivered_seq, last_roster_version,
+                    session_chain_json, last_delivered_seq,
                     runtime_state, active_activation_id,
                     agent_secret_token, created_by, created_at
              FROM room_agents WHERE room_id = ?1 AND lower(name) != 'manager' ORDER BY created_at ASC",
@@ -887,7 +875,7 @@ You manage the room's specialist agent roster using your tools:\n\
             "SELECT agent_id, room_id, name, role_title, avatar, persona_prompt,
                     model, reasoning_effort, reasoning_summary, web_search, prompt_hint, scheduling_json,
                     root_session_id, active_session_id,
-                    session_chain_json, last_delivered_seq, last_roster_version,
+                    session_chain_json, last_delivered_seq,
                     runtime_state, active_activation_id,
                     agent_secret_token, created_by, created_at
              FROM room_agents WHERE room_id = ?1 AND lower(name) = 'manager' LIMIT 1",
@@ -904,7 +892,7 @@ You manage the room's specialist agent roster using your tools:\n\
             "SELECT agent_id, room_id, name, role_title, avatar, persona_prompt,
                     model, reasoning_effort, reasoning_summary, web_search, prompt_hint, scheduling_json,
                     root_session_id, active_session_id,
-                    session_chain_json, last_delivered_seq, last_roster_version,
+                    session_chain_json, last_delivered_seq,
                     runtime_state, active_activation_id,
                     agent_secret_token, created_by, created_at
              FROM room_agents WHERE agent_id = ?1",
@@ -924,7 +912,7 @@ You manage the room's specialist agent roster using your tools:\n\
             "SELECT agent_id, room_id, name, role_title, avatar, persona_prompt,
                     model, reasoning_effort, reasoning_summary, web_search, prompt_hint, scheduling_json,
                     root_session_id, active_session_id,
-                    session_chain_json, last_delivered_seq, last_roster_version,
+                    session_chain_json, last_delivered_seq,
                     runtime_state, active_activation_id,
                     agent_secret_token, created_by, created_at
              FROM room_agents WHERE active_session_id = ?1",
@@ -1001,7 +989,7 @@ You manage the room's specialist agent roster using your tools:\n\
             params![agent_id, room_id],
         )?;
         tx.execute(
-            "UPDATE rooms SET roster_version = roster_version + 1, updated_at = ?1 WHERE room_id = ?2",
+            "UPDATE rooms SET updated_at = ?1 WHERE room_id = ?2",
             params![Utc::now().to_rfc3339(), room_id],
         )?;
         tx.commit()?;
@@ -1067,15 +1055,13 @@ You manage the room's specialist agent roster using your tools:\n\
         &self,
         agent_id: &str,
         delivered_seq: u64,
-        roster_version: u64,
     ) -> Result<RoomAgent, ChatStoreError> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
             "UPDATE room_agents SET
-                last_delivered_seq = MAX(last_delivered_seq, ?1),
-                last_roster_version = MAX(last_roster_version, ?2)
-             WHERE agent_id = ?3",
-            params![delivered_seq as i64, roster_version as i64, agent_id],
+                last_delivered_seq = MAX(last_delivered_seq, ?1)
+             WHERE agent_id = ?2",
+            params![delivered_seq as i64, agent_id],
         )?;
         drop(conn);
         self.get_agent(agent_id)?

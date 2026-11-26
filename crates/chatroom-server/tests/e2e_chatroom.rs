@@ -1194,6 +1194,16 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
     let mgr_ctx_json = serde_json::to_string(&mgr_inspector.context).unwrap();
     assert!(mgr_ctx_json.contains("chatroom_add_agent"));
     assert!(mgr_ctx_json.contains("chatroom_remove_agent"));
+    assert!(mgr_ctx_json.contains("chatroom_room_info"));
+    {
+        let prompts = seen_tools.lock().unwrap();
+        assert!(
+            !prompts
+                .iter()
+                .any(|(prompt, _)| prompt.contains("[Room Roster Updated")),
+            "obsolete [Room Roster Updated] notification header must never be injected"
+        );
+    }
 
     // 13. Test `allowed_workspace_dirs` restriction when creating an Agent in the room:
     //     `/var/forbidden_ws` must be rejected (400), while a subdirectory under `/tmp` must succeed (201).
@@ -1948,8 +1958,59 @@ async fn test_chatroom_extension_room_prompt_injection() {
     assert!(prepared.system_prompt.contains("[0 · 成员信息]\n- @Lead: 负责拆解任务"));
     assert!(prepared.system_prompt.contains("[1 · 房间公告]\n公告A：提交前必须跑 cargo test"));
     assert!(prepared.system_prompt.contains("[3 · 房间公告]\n公告B：禁止直接修改 .env"));
+    assert!(
+        prepared.system_prompt.contains("ask `@Manager`"),
+        "working agents should be instructed to ask @Manager for room info"
+    );
+    assert!(
+        !prepared.tools.iter().any(|t| t.definition.name == "chatroom_room_info"),
+        "working agents must not see @Manager-only chatroom_room_info tool"
+    );
 
     manager.shutdown().await.unwrap();
+
+    // Manager role receives chatroom_room_info tool (concurrency_safe: true)
+    let mgr_plugin = ragents_core::WasmPlugin::load_from_file_with_workspace(
+        "chatroom",
+        &chatroom_wasm,
+        tmp.path(),
+        &[tmp.path().to_path_buf()],
+    )
+    .await
+    .expect("load chatroom wasm for manager");
+    let mut mgr_hooks = ragents_core::HookManager::empty();
+    let mgr_cfg = serde_json::json!({
+        "is_manager": true,
+        "room_id": "room_test",
+        "room_name": "PromptTestRoom",
+        "agent_id": "agt_mgr_test",
+        "agent_name": "Manager",
+        "agent_role": "聊天室管家",
+        "agent_token": "tok",
+        "chatroom_callback_url": "http://127.0.0.1:18090/api/v1/internal/agent-speak"
+    });
+    mgr_hooks.add_plugin_with_config(mgr_plugin, mgr_cfg).unwrap();
+    mgr_hooks.initialize().await.unwrap();
+    let (mgr_prepared, _, _) = mgr_hooks
+        .prepare_extensions(
+            ragents_core::HOOK_AGENT_PREPARE,
+            None,
+            ragents_core::AgentDraft {
+                system_prompt: "base".into(),
+                model: ragents_core::ModelDraft::new("gpt-4.1"),
+                tools: vec![],
+                context: None,
+            },
+        )
+        .await
+        .unwrap();
+    let room_info_tool = mgr_prepared
+        .tools
+        .iter()
+        .find(|t| t.definition.name == "chatroom_room_info")
+        .expect("@Manager must receive chatroom_room_info tool");
+    assert!(room_info_tool.definition.concurrency_safe);
+    mgr_hooks.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -2053,6 +2114,51 @@ async fn test_room_prompts_lifecycle_permissions_and_session_sync() {
     let mgr_internal = chat_store.get_room_manager_agent(&room_id).unwrap().unwrap();
     let lead_internal = chat_store.get_agent(&created.agents[0].agent_id).unwrap().unwrap();
     let worker_internal = chat_store.get_agent(&worker_pub.agent_id).unwrap().unwrap();
+
+    // 1b. Only @Manager can call `/api/v1/internal/manager/room-info`, and it returns complete room metadata & agents
+    let worker_room_info = http
+        .post(format!("{chat_base}/api/v1/internal/manager/room-info"))
+        .bearer_auth(&worker_internal.agent_secret_token)
+        .json(&InternalManagerRoomInfoRequest {
+            room_id: room_id.clone(),
+            agent_id: worker_internal.agent_id.clone(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(worker_room_info.status().as_u16(), 403);
+
+    let mgr_room_info_resp = http
+        .post(format!("{chat_base}/api/v1/internal/manager/room-info"))
+        .bearer_auth(&mgr_internal.agent_secret_token)
+        .json(&InternalManagerRoomInfoRequest {
+            room_id: room_id.clone(),
+            agent_id: mgr_internal.agent_id.clone(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mgr_room_info_resp.status().as_u16(), 200);
+    let mgr_room_info: serde_json::Value = mgr_room_info_resp.json().await.unwrap();
+    assert_eq!(
+        mgr_room_info.get("room").and_then(|r| r.get("name")).and_then(|v| v.as_str()),
+        Some("PromptSyncRoom")
+    );
+    let info_agents = mgr_room_info
+        .get("agents")
+        .and_then(|v| v.as_array())
+        .expect("agents array in room-info");
+    assert_eq!(info_agents.len(), 2);
+    assert_eq!(info_agents[0].get("name").and_then(|v| v.as_str()), Some("Lead"));
+    assert_eq!(info_agents[0].get("is_default_lead").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(info_agents[1].get("name").and_then(|v| v.as_str()), Some("Worker"));
+    assert_eq!(
+        info_agents[1].get("persona_prompt").and_then(|v| v.as_str()),
+        Some("Worker persona")
+    );
+    assert!(mgr_room_info.get("room_prompts").is_some());
+    assert!(mgr_room_info.get("cluster_nodes").is_some());
+    assert!(mgr_room_info.get("available_models").is_some());
 
     // 2. Worker cannot `set_members` or `add`, but can `list`
     let worker_list = http

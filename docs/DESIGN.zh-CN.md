@@ -99,7 +99,6 @@ CREATE TABLE IF NOT EXISTS rooms (
     name                    TEXT NOT NULL,
     description             TEXT NOT NULL DEFAULT '',
     last_msg_seq            INTEGER NOT NULL DEFAULT 0, -- 房间内单调递增的消息序号 (1, 2, 3...)
-    roster_version          INTEGER NOT NULL DEFAULT 1, -- 群成员名册版本号 (仅当增删 Agent 时 +1)
     peek_enabled            INTEGER NOT NULL DEFAULT 1, -- 窥屏总开关 (0=关闭, 1=开启)
     peek_idle_secs          INTEGER NOT NULL DEFAULT 3, -- 窥屏触发时间间隔 (秒)
     peek_msg_interval       INTEGER NOT NULL DEFAULT 1, -- 窥屏触发对话轮次间隔 (每累计 N 条新消息)
@@ -125,7 +124,6 @@ CREATE TABLE IF NOT EXISTS room_agents (
     active_session_id       TEXT NOT NULL,          -- 当前活跃的 ragents SessionId (随自动压缩平滑演进)
     session_chain_json      TEXT NOT NULL,          -- 完整压缩血缘链记录: [{gen, working_session_id, compaction_session_id}]
     last_delivered_seq      INTEGER NOT NULL DEFAULT 0, -- 已投递给该 Agent 的最高房间消息序号 msg_seq
-    last_roster_version     INTEGER NOT NULL DEFAULT 0, -- 已同步给该 Agent 的群成员名册版本号 (仅变动时增量同步)
     runtime_state           TEXT NOT NULL DEFAULT 'idle', -- 'idle' | 'thinking' | 'waiting_permission'
     active_activation_id    TEXT,                   -- 当前正在运行的 ActivationId
     agent_secret_token      TEXT NOT NULL,          -- 供 chatroom.wasm 回调鉴权使用的一次性/专属 Token
@@ -236,12 +234,12 @@ CREATE TABLE IF NOT EXISTS room_messages (
 
 ## 4. 群聊交互、窥屏掷骰与轮流插嘴状态机 (`RoomCoordinator`)
 
-### 4.1 增量群名册同步与唤醒消息组装格式
+### 4.1 房间信息同步与唤醒消息组装格式
 
-- **群成员名册仅在变动时增量同步（保护 Prefix KV Cache）**：
-  - `chatroom.wasm` 在 `agent.prepare` 注入的 `system_prompt` 保持静态不变，绝不随群成员增减而修改，从而 **100% 保护大模型 Prefix KV Cache**；
-  - 房间维护 `roster_version`（仅在招募新 Agent 或移除 Agent 时 `+1`），每个 Agent 记录 `last_roster_version`；
-  - 仅当 `agent.last_roster_version < room.roster_version` 时，才会在下一次唤醒该 Agent 的消息头部附带一次性的 `[Room Roster Updated (vN): ...]` 名册更新块，并将 `last_roster_version` 更新为 `N`；日常消息往来不再重复附带名册。
+- **统一通过 `room_prompts` 与 `@Manager` 获取房间信息**：
+  - 房间成员分工与公告统一维护在 `room_prompts`（`[0]` 成员信息 + `[1..N]` 房间公告），由 `chatroom.wasm` 注入各成员的系统提示词 `<room_prompt>` 中；
+  - 工作 Agent 对成员名单、模型配置、节点/工作区或其他房间信息有任何疑问时，直接通过 `@Manager` 询问；`@Manager` 可随时调用只读工具 `chatroom_room_info` 获取房间完整实时状态；
+  - 投递给 Agent 的未读消息不再附带冗余的 `[Room Roster Updated]` 通知头。
 
 #### 格式 A：被显式 `@` 唤醒（`Direct Mention`）
 当最新消息（或未读批次中的某条消息）显式 `@` 了 `Agent X` 时：
@@ -575,7 +573,7 @@ ragents-chat/
 * **背景现象**：
   * 旧逻辑中，`@Manager` 招募完新专家后，在入群欢迎消息中同时 `@` 所有新招募的专家与原有成员，导致 3 个 Agent 在同一秒并发启动、各自闭门造车，输出大量交叉抢话与重复内容。
 * **已实施策略**：
-  1. **默认主导 Agent 规则**：当用户未显式指定主导 Agent 时，**房间内的第一个 Agent（按创建时间排序 `agents[0]`，例如建房时的初始 `@Assistant`）自动成为默认主导统筹 Agent (`[Default Room Lead]`)**，前端成员卡片显示 `👑 主导` 标记，群名册同步头 `[Room Roster Updated]` 也会向全体成员标明其主导身份。
+  1. **默认主导 Agent 规则**：当用户未显式指定主导 Agent 时，**房间内的第一个 Agent（按创建时间排序 `agents[0]`，例如建房时的初始 `@Assistant`）自动成为默认主导统筹 Agent (`[Default Room Lead]`)**，前端成员卡片显示 `👑 主导` 标记。
   2. **`@Manager` 单点交接 (`handoff_lead`)**：当某个现有 Agent 呼叫 `@Manager` 招募新成员时，`@Manager` 招完人后**仅 `@` 呼叫它的主导 Agent**；当人类直接通过 `@Manager` 招募新成员时，`@Manager` **仅 `@` 房间内的第一个 Agent（默认主导 Agent）**（若招募前房间为空，则 `@` 新招募的第一位 Agent）。由主导 Agent 统一向新专家分配子任务，彻底消除入群时的全员并发抢话。
 
 #### 5. 连续接力上限 (`max_agent_relay_depth`)、模型自动发现与推理参数配置

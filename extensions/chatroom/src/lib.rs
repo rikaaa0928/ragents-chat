@@ -24,6 +24,8 @@ struct ChatroomPluginConfig {
     #[serde(default)]
     chatroom_room_prompt_url: String,
     #[serde(default)]
+    chatroom_room_info_url: String,
+    #[serde(default)]
     room_id: String,
     #[serde(default)]
     room_name: String,
@@ -70,6 +72,20 @@ impl ChatroomPluginConfig {
             .strip_suffix("/api/v1/internal/agent-speak")
         {
             return format!("{prefix}/api/v1/internal/room-prompt");
+        }
+        String::new()
+    }
+
+    fn resolve_room_info_url(&self) -> String {
+        if !self.chatroom_room_info_url.trim().is_empty() {
+            return self.chatroom_room_info_url.trim().to_string();
+        }
+        if let Some(prefix) = self
+            .chatroom_callback_url
+            .trim()
+            .strip_suffix("/api/v1/internal/agent-speak")
+        {
+            return format!("{prefix}/api/v1/internal/manager/room-info");
         }
         String::new()
     }
@@ -374,23 +390,26 @@ impl exports::ragent::extension::lifecycle::Guest for ChatroomExtension {
                 let protocol_prompt = if cfg.is_manager {
                     format!(
                         "<manager_protocol>\n\
-You are @Manager ({agent_role}), the built-in Chatroom Butler & Specialist Recruiter for room \"{room_name}\".\n\
+You are @Manager ({agent_role}), the built-in Chatroom Butler, Specialist Recruiter, and Room Information Authority for room \"{room_name}\".\n\
 \n\
 CRITICAL RULES FOR @MANAGER TOOL EXECUTION:\n\
-1. ONE STEP AT A TIME (MODIFY ROSTER FIRST, SPEAK SECOND):\n\
+1. FULL ROOM VISIBILITY (`chatroom_room_info`):\n\
+   - Call `chatroom_room_info` anytime to inspect the complete live room state: room metadata/node/workspace/tmp dir, every member agent's role/model/reasoning/state/persona_prompt, shared `room_prompts`, active schedules, pending pool, cluster nodes, and available models.\n\
+   - Working agents rely on you whenever they ask questions about the room or teammates—always give accurate answers backed by `chatroom_room_info`.\n\
+2. ONE STEP AT A TIME (MODIFY ROSTER FIRST, SPEAK SECOND):\n\
    - When asked to recruit/add new specialist agents, call `chatroom_add_agent` for each required agent FIRST.\n\
    - When asked to remove/dismiss existing agents, call `chatroom_remove_agent` FIRST.\n\
-   - Wait until all `chatroom_add_agent` / `chatroom_remove_agent` tool calls have succeeded and updated the room roster.\n\
-   - ONLY AFTER all roster modifications are complete, call `chatroom_speak` ONCE to announce the roster update in the chatroom.\n\
-2. LEAD-AGENT HANDOFF DISCIPLINE:\n\
+   - Wait until all `chatroom_add_agent` / `chatroom_remove_agent` tool calls have succeeded and updated the room.\n\
+   - ONLY AFTER all roster modifications are complete, call `chatroom_speak` ONCE to announce the change in the chatroom.\n\
+3. LEAD-AGENT HANDOFF DISCIPLINE:\n\
    - When you call `chatroom_speak` after recruiting new specialist agents, put ONLY the Room Lead Coordinator (or the Agent who called you) in `mentions` (e.g. `mentions: [\"Assistant\"]`) so the Lead Agent can assign tasks in order.\n\
    - NEVER put all newly recruited agents in `mentions` simultaneously!\n\
-   - If you only removed agents or answered a question from @Human without needing another Agent to act immediately, set `mentions: [\"Human\"]` or `[]`.\n\
-3. PRIVATE INNER LOOP vs PUBLIC SPEECH:\n\
+   - If you only removed agents or answered a question from @Human or a working agent without needing another Agent to act immediately, put only the requester in `mentions` (e.g. `[\"Human\"]` or the asking agent) or `[]`.\n\
+4. PRIVATE INNER LOOP vs PUBLIC SPEECH:\n\
    - Normal assistant text output is private to your internal session. You MUST call `chatroom_speak` so your final reply appears in the chatroom.\n\
-4. SHARED ROOM PROMPT (`chatroom_room_prompt`):\n\
+5. SHARED ROOM PROMPT (`chatroom_room_prompt`):\n\
    - This room maintains a shared string list (`[0]` = member roster & division of labor; `[1..N]` = shared announcements) appended into EVERY agent's system prompt.\n\
-   - When you recruit/remove agents or reorganize team duties, consider calling `chatroom_room_prompt` (`action: \"list\"` then `\"set_members\"`) to keep `[0]` concise and accurate.\n\
+   - When you recruit/remove agents or reorganize team duties, update `[0]` via `chatroom_room_prompt` (`action: \"list\"` then `\"set_members\"`) so every agent always sees concise, accurate member roles.\n\
    - You can also manage announcements (`add`/`update`/`remove`/`clear_announcements`) when needed; pass `expected_version` from `list` when updating or removing by index.\n\
 </manager_protocol>"
                     )
@@ -415,10 +434,11 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
    - Even if another Agent @mentioned you, if the task is already complete or you have no new substantive information to add, DO NOT call `chatroom_speak`—simply finish your internal turn with a brief private note or summary in your own words.\n\
    - After calling `chatroom_speak`, finish your internal turn naturally with a short private summary of what you did (never repeat fixed boilerplate words).\n\
    - All chatroom messages are visible to @Human and all members. Contribute ONLY incremental domain insights; NEVER copy-paste or re-summarize a full guide that was already posted in earlier messages unless @Human explicitly asks for a new revision.\n\
-4. DEFAULT LEAD AGENT, @MANAGER RECRUITMENT & SHARED ROOM PROMPT:\n\
-   - Unless @Human designates another lead, the FIRST Agent in the room roster (marked `[Default Room Lead]`) is the lead coordinator: responsible for decomposing tasks, delegating specific subtasks to specialists via `mentions`, and doing a single concise wrap-up (with `mentions: [\"Human\"]` ONLY) once specialists finish.\n\
-   - The Default Room Lead can also use `chatroom_room_prompt` (`action: \"list\" | \"add\" | \"update\" | \"remove\" | \"clear_announcements\"`) to maintain persistent room-wide announcements (`[1..N]`) that are injected into every agent's system prompt (pass `expected_version` when updating or removing by index). Regular specialists have read-only access.\n\
-   - If a task requires adding or removing a specialist Agent in the room, call `chatroom_speak` with `mentions: [\"Manager\"]` and describe the needed role, model, and skills.\n\
+4. DEFAULT LEAD AGENT, @MANAGER CONSULTATION & SHARED ROOM PROMPT:\n\
+   - The shared room prompt section (when present) shows member overview (`[0]`) and room announcements (`[1..N]`).\n\
+   - If you have ANY question about room members, teammate roles/models, room workspace/node configuration, or need to recruit/remove a specialist Agent or update `[0]` member info, ask `@Manager` via `chatroom_speak` (`mentions: [\"Manager\"]`). `@Manager` holds full live room visibility.\n\
+   - Unless @Human designates another lead, the Default Room Lead (first participant agent, or as indicated in the shared room prompt) coordinates task decomposition, delegates subtasks to specialists via `mentions`, and delivers a single concise wrap-up (with `mentions: [\"Human\"]` ONLY) once specialists finish.\n\
+   - The Default Room Lead can also use `chatroom_room_prompt` (`action: \"list\" | \"add\" | \"update\" | \"remove\" | \"clear_announcements\"`) to maintain persistent room-wide announcements (`[1..N]`) injected into every agent's system prompt (pass `expected_version` when updating or removing by index). Regular specialists have read-only access.\n\
 5. PRIVATE WHISPERS & VISIBILITY ISOLATION (`visible_to`):\n\
    - By default (`visible_to` omitted or empty `[]`), your `chatroom_speak` message is public to everyone in the room.\n\
    - If you need to send a secret/private message (e.g. secret role assignment, night-phase action in Werewolf, or private backchannel), pass `visible_to: [\"TargetAgentName\"]` in `chatroom_speak`. Only the participants listed in `visible_to` (plus yourself and @Human observer) can see that message; all other Agents are physically blinded from reading it.\n\
@@ -446,6 +466,17 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
 
                 let mut tools = Vec::new();
                 if cfg.is_manager {
+                    tools.push(json!({
+                        "enabled": true,
+                        "concurrency_safe": true,
+                        "name": "chatroom_room_info",
+                        "description": "Inspect complete live room information (@Manager only): room metadata/node/workspace/tmp dir, all participant agents (including roles, models, reasoning settings, runtime states, and full persona_prompt), shared room_prompts, schedules, pending pool, cluster nodes, and available models.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    }));
                     tools.push(json!({
                         "enabled": true,
                         "concurrency_safe": false,
@@ -668,6 +699,11 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                         obj.insert("concurrency_safe".to_string(), json!(is_read));
                     }
                     Ok(json!({ "action": "continue", "payload": payload }).to_string())
+                } else if tool_name == "chatroom_room_info" {
+                    if let Some(obj) = payload.as_object_mut() {
+                        obj.insert("concurrency_safe".to_string(), json!(true));
+                    }
+                    Ok(json!({ "action": "continue", "payload": payload }).to_string())
                 } else {
                     Ok(json!({ "action": "unchanged" }).to_string())
                 }
@@ -775,6 +811,54 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                             Ok((status, resp_body)) => ToolResult {
                                 success: false,
                                 output: format!("Failed to remove agent (HTTP {status}): {resp_body}"),
+                                error: Some(format!("HTTP {status}: {resp_body}")),
+                            },
+                            Err(err) => ToolResult {
+                                success: false,
+                                output: format!("Failed to reach chatroom server: {err}"),
+                                error: Some(err),
+                            },
+                        };
+                        Ok(json!({ "action": "continue", "payload": result }).to_string())
+                    }
+                    "chatroom_room_info" => {
+                        if !cfg.is_manager {
+                            let res = ToolResult {
+                                success: false,
+                                output: "Permission denied: only @Manager can call chatroom_room_info.".to_string(),
+                                error: Some("permission_denied".to_string()),
+                            };
+                            return Ok(json!({ "action": "continue", "payload": res }).to_string());
+                        }
+                        let room_info_url = cfg.resolve_room_info_url();
+                        if room_info_url.is_empty() {
+                            let res = ToolResult {
+                                success: false,
+                                output: "chatroom_room_info_url is not configured".to_string(),
+                                error: Some("missing_room_info_url".to_string()),
+                            };
+                            return Ok(json!({ "action": "continue", "payload": res }).to_string());
+                        }
+                        let payload = json!({
+                            "room_id": cfg.room_id,
+                            "agent_id": cfg.agent_id,
+                        });
+                        let body_bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+                        let result = match post_json_via_wasi_http(
+                            &room_info_url,
+                            &cfg.agent_token,
+                            &body_bytes,
+                        ) {
+                            Ok((status, resp_body)) if (200..300).contains(&status) => ToolResult {
+                                success: true,
+                                output: resp_body,
+                                error: None,
+                            },
+                            Ok((status, resp_body)) => ToolResult {
+                                success: false,
+                                output: format!(
+                                    "Failed to inspect room info (HTTP {status}): {resp_body}"
+                                ),
                                 error: Some(format!("HTTP {status}: {resp_body}")),
                             },
                             Err(err) => ToolResult {
