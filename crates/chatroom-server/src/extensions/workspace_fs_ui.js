@@ -472,7 +472,9 @@ export async function mount(container, ctx) {
       `;
     }
 
+    const prevScrollTop = contentEl.scrollTop;
     contentEl.innerHTML = distBannerHtml + listHtml + previewHtml;
+    contentEl.scrollTop = prevScrollTop;
 
     contentEl.querySelectorAll('[data-dist-retry]').forEach((btn) => {
       btn.addEventListener('click', async (e) => {

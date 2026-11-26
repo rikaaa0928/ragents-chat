@@ -55,6 +55,7 @@ pub struct RoomCoordinator {
     pending_realtime_seqs: Arc<Mutex<HashMap<String, Vec<(Vec<i64>, Vec<u64>)>>>>,
     pending_normal_activations: Arc<Mutex<HashMap<String, Vec<(ActivationId, Vec<u64>)>>>>,
     started_activation_ids: Arc<Mutex<HashSet<ActivationId>>>,
+    last_agent_activity: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl RoomCoordinator {
@@ -81,6 +82,7 @@ impl RoomCoordinator {
             pending_realtime_seqs: Arc::new(Mutex::new(HashMap::new())),
             pending_normal_activations: Arc::new(Mutex::new(HashMap::new())),
             started_activation_ids: Arc::new(Mutex::new(HashSet::new())),
+            last_agent_activity: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1035,6 +1037,25 @@ impl RoomCoordinator {
     }
 
     pub fn emit_room_event(&self, event: ChatroomEvent) {
+        if let ChatroomEvent::AgentActivity {
+            ref agent_id,
+            ref activity,
+            ..
+        } = event
+        {
+            let mut guard = self
+                .last_agent_activity
+                .lock()
+                .expect("last_agent_activity mutex poisoned");
+            if guard.get(agent_id).map(|s| s.as_str()) == Some(activity.as_str()) {
+                return;
+            }
+            if activity.is_empty() {
+                guard.remove(agent_id);
+            } else {
+                guard.insert(agent_id.clone(), activity.clone());
+            }
+        }
         let _ = self.room_event_tx.send(event);
     }
 

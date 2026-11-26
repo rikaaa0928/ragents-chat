@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback, useSyncExternalStore } from 'react';
 import {
   Users,
   Sparkles,
@@ -42,6 +42,9 @@ import {
   Code2,
 } from 'lucide-react';
 import { MarkdownRenderer } from './MarkdownRenderer';
+import { copyTextToClipboard } from '../utils/clipboard';
+import { LiveStreamBufferStore } from '../utils/liveStreamStore';
+import { useStickyAutoScroll } from '../hooks/useStickyAutoScroll';
 import {
   Room,
   RoomAgent,
@@ -82,6 +85,483 @@ function extractPartArrayText(val: unknown): string {
   return JSON.stringify(val);
 }
 
+function formatValueAsYaml(val: unknown, indent = 0): string {
+  const pad = '  '.repeat(indent);
+  if (val === null || val === undefined) return 'null';
+  if (typeof val === 'boolean' || typeof val === 'number') return String(val);
+  if (typeof val === 'string') {
+    if (val === '') return '""';
+    const normalized = val.replace(/\r\n/g, '\n');
+    if (normalized.includes('\n')) {
+      const childPad = '  '.repeat(indent + 1);
+      return (
+        '|\n' +
+        normalized
+          .split('\n')
+          .map((line) => `${childPad}${line}`)
+          .join('\n')
+      );
+    }
+    return normalized;
+  }
+  if (Array.isArray(val)) {
+    if (val.length === 0) return '[]';
+    return val
+      .map((entry) => {
+        if (
+          entry === null ||
+          entry === undefined ||
+          typeof entry === 'boolean' ||
+          typeof entry === 'number'
+        ) {
+          return `${pad}- ${String(entry)}`;
+        }
+        if (typeof entry === 'string') {
+          const norm = entry.replace(/\r\n/g, '\n');
+          if (!norm.includes('\n')) {
+            return `${pad}- ${norm === '' ? '""' : norm}`;
+          }
+          const childPad = '  '.repeat(indent + 1);
+          return (
+            `${pad}- |\n` +
+            norm
+              .split('\n')
+              .map((l) => `${childPad}${l}`)
+              .join('\n')
+          );
+        }
+        const nested = formatValueAsYaml(entry, indent + 1);
+        return `${pad}-\n${nested}`;
+      })
+      .join('\n');
+  }
+  if (typeof val === 'object') {
+    const entries = Object.entries(val as Record<string, unknown>);
+    if (entries.length === 0) return '{}';
+    return entries
+      .map(([k, v]) => {
+        if (
+          v === null ||
+          v === undefined ||
+          typeof v === 'boolean' ||
+          typeof v === 'number'
+        ) {
+          return `${pad}${k}: ${String(v)}`;
+        }
+        if (typeof v === 'string') {
+          const norm = v.replace(/\r\n/g, '\n');
+          if (!norm.includes('\n')) {
+            return `${pad}${k}: ${norm === '' ? '""' : norm}`;
+          }
+          const childPad = '  '.repeat(indent + 1);
+          return (
+            `${pad}${k}: |\n` +
+            norm
+              .split('\n')
+              .map((l) => `${childPad}${l}`)
+              .join('\n')
+          );
+        }
+        if (Array.isArray(v) && v.length === 0) {
+          return `${pad}${k}: []`;
+        }
+        if (
+          typeof v === 'object' &&
+          !Array.isArray(v) &&
+          Object.keys(v as Record<string, unknown>).length === 0
+        ) {
+          return `${pad}${k}: {}`;
+        }
+        return `${pad}${k}:\n${formatValueAsYaml(v, indent + 1)}`;
+      })
+      .join('\n');
+  }
+  return String(val);
+}
+
+function formatItemTimestamp(iso: string): { short: string; full: string } | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const short = d.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const full = d.toLocaleString([], {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  return { short, full };
+}
+
+interface InspectorContextItemCardProps {
+  item: ContextItem;
+  blockId: string;
+  timestampIso: string;
+  collapseMode: 'default' | 'collapsed' | 'expanded';
+  manualCollapse: boolean | undefined;
+  isRawBlock: boolean;
+  isCopied: boolean;
+  mentionAgents: RoomAgent[];
+  onToggleCollapse: (blockId: string, currentlyCollapsed: boolean) => void;
+  onToggleRaw: (blockId: string) => void;
+  onCopyBlock: (blockId: string, text: string) => void;
+}
+
+const InspectorContextItemCard: React.FC<InspectorContextItemCardProps> = React.memo(
+  ({
+    item,
+    blockId,
+    timestampIso,
+    collapseMode,
+    manualCollapse,
+    isRawBlock,
+    isCopied,
+    mentionAgents,
+    onToggleCollapse,
+    onToggleRaw,
+    onCopyBlock,
+  }) => {
+    const parsed = useMemo(() => {
+      const rawContentText = extractPartArrayText(item.content);
+      const rawSummaryText = extractPartArrayText(item.summary);
+      const rawText = [rawSummaryText, rawContentText].filter(Boolean).join('\n\n');
+      const isCompaction = rawText.startsWith('[Compaction Summary]');
+
+      let kind: 'compaction' | 'reasoning' | 'function_call' | 'function_call_output' | 'web_search_call' | 'message' =
+        'message';
+      let title = 'Context';
+      let preview = rawText.replace(/\s+/g, ' ').slice(0, 68);
+      let bodyContent = rawText;
+      let rawJsonForCopy: string | null = null;
+      let badgeColor = 'text-emerald-600 dark:text-emerald-400';
+      const isMarkdownCapable =
+        isCompaction ||
+        item.type === 'reasoning' ||
+        (item.type === 'message' && String(item.role || 'user') !== 'user');
+
+      if (isCompaction) {
+        kind = 'compaction';
+        title = 'Compaction Summary';
+        badgeColor = 'text-amber-600 dark:text-amber-400';
+      } else if (item.type === 'reasoning') {
+        kind = 'reasoning';
+        const firstLine =
+          rawText
+            .split('\n')
+            .map((l) => l.replace(/^\*\*|\*\*$/g, '').trim())
+            .find(Boolean) || 'Thought / 内部推理链';
+        title = `Thought: ${firstLine.slice(0, 42)}`;
+        bodyContent = rawText || '(已完成内部推理)';
+        preview = bodyContent.replace(/\s+/g, ' ').slice(0, 60);
+        badgeColor = 'text-violet-600 dark:text-violet-400';
+      } else if (item.type === 'function_call') {
+        kind = 'function_call';
+        title = `ToolCall: ${String(item.name || 'tool')}${
+          item.duration_ms ? ` (${item.duration_ms}ms)` : ''
+        }`;
+        let parsedArgs: unknown = item.arguments ?? {};
+        if (typeof item.arguments === 'string') {
+          try {
+            parsedArgs = JSON.parse(item.arguments);
+          } catch (_) {
+            parsedArgs = item.arguments;
+          }
+        }
+        rawJsonForCopy =
+          typeof parsedArgs === 'string'
+            ? parsedArgs
+            : JSON.stringify(parsedArgs, null, 2);
+        bodyContent = formatValueAsYaml(parsedArgs);
+        preview = bodyContent.replace(/\s+/g, ' ').slice(0, 60);
+        badgeColor = 'text-blue-600 dark:text-blue-400';
+      } else if (item.type === 'function_call_output') {
+        kind = 'function_call_output';
+        title = `ToolResult${item.name ? `: ${String(item.name)}` : ''}`;
+        let parsedOut: unknown = item.output ?? '';
+        if (typeof item.output === 'string') {
+          const trimmedOut = item.output.trim();
+          if (
+            (trimmedOut.startsWith('{') && trimmedOut.endsWith('}')) ||
+            (trimmedOut.startsWith('[') && trimmedOut.endsWith(']'))
+          ) {
+            try {
+              parsedOut = JSON.parse(trimmedOut);
+            } catch (_) {
+              parsedOut = item.output;
+            }
+          }
+        }
+        rawJsonForCopy =
+          typeof parsedOut === 'string'
+            ? JSON.stringify({ output: parsedOut }, null, 2)
+            : JSON.stringify(parsedOut, null, 2);
+        bodyContent =
+          typeof parsedOut === 'string' ? parsedOut : formatValueAsYaml(parsedOut);
+        preview = bodyContent.replace(/\s+/g, ' ').slice(0, 60);
+        badgeColor = 'text-cyan-600 dark:text-cyan-400';
+      } else if (item.type === 'web_search_call') {
+        kind = 'web_search_call';
+        const action = item.action || {};
+        const query =
+          typeof action.query === 'string'
+            ? action.query
+            : Array.isArray(action.queries)
+            ? action.queries.join(' | ')
+            : '';
+        title = `WebSearch${query ? `: ${query.slice(0, 38)}` : ''}`;
+        const wsPayload = {
+          status: item.status || 'completed',
+          action,
+        };
+        rawJsonForCopy = JSON.stringify(wsPayload, null, 2);
+        bodyContent = formatValueAsYaml(wsPayload);
+        preview = query || bodyContent.replace(/\s+/g, ' ').slice(0, 60);
+        badgeColor = 'text-sky-600 dark:text-sky-400';
+      } else if (item.type === 'message') {
+        const role = String(item.role || 'user');
+        title =
+          role === 'user'
+            ? 'Context:user (聊天室上下文载荷)'
+            : `Context:${role} (内部草稿)`;
+      }
+
+      const lineCount = bodyContent ? bodyContent.split(/\r?\n/).length : 0;
+      return {
+        kind,
+        title,
+        preview,
+        bodyContent,
+        rawJsonForCopy,
+        badgeColor,
+        isMarkdownCapable,
+        lineCount,
+      };
+    }, [item]);
+
+    const icon =
+      parsed.kind === 'compaction' ? (
+        <Package className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+      ) : parsed.kind === 'reasoning' ? (
+        <Brain className="w-3.5 h-3.5 text-violet-500 shrink-0" />
+      ) : parsed.kind === 'function_call' ? (
+        <Wrench className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+      ) : parsed.kind === 'function_call_output' ? (
+        <Terminal className="w-3.5 h-3.5 text-cyan-500 shrink-0" />
+      ) : parsed.kind === 'web_search_call' ? (
+        <Compass className="w-3.5 h-3.5 text-sky-500 shrink-0" />
+      ) : (
+        <Inbox className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+      );
+
+    const defaultCollapsed = parsed.lineCount > 10;
+    const isCollapsed =
+      manualCollapse !== undefined
+        ? manualCollapse
+        : collapseMode === 'collapsed'
+        ? true
+        : collapseMode === 'expanded'
+        ? false
+        : defaultCollapsed;
+
+    const ts = useMemo(() => formatItemTimestamp(timestampIso), [timestampIso]);
+
+    return (
+      <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-code)] overflow-hidden">
+        <div
+          onClick={() => onToggleCollapse(blockId, isCollapsed)}
+          className="px-3 py-2 flex items-center justify-between gap-2 cursor-pointer hover:bg-[var(--bg-hover)]"
+        >
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            {isCollapsed ? (
+              <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+            ) : (
+              <ChevronDown className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
+            )}
+            {icon}
+            <span className={`font-semibold text-[11.5px] shrink-0 ${parsed.badgeColor}`}>
+              {parsed.title}
+            </span>
+            {isCollapsed && (
+              <span className="text-[11px] text-[var(--text-muted)] truncate">
+                {parsed.preview}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {ts && (
+              <span
+                title={ts.full}
+                className="text-[10px] font-mono-code text-[var(--text-muted)] px-1 py-0.2 rounded bg-[var(--bg-surface)]/70"
+              >
+                {ts.short}
+              </span>
+            )}
+            {parsed.isMarkdownCapable && (
+              <>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleRaw(blockId);
+                  }}
+                  className="px-1.5 py-0.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] text-[10px] font-mono-code text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1 cursor-pointer transition-colors"
+                  title={isRawBlock ? '切换为 Markdown 渲染' : '查看 Markdown 原文'}
+                >
+                  {isRawBlock ? (
+                    <>
+                      <Eye className="w-2.5 h-2.5 text-blue-500" />
+                      <span>渲染</span>
+                    </>
+                  ) : (
+                    <>
+                      <Code2 className="w-2.5 h-2.5" />
+                      <span>原文</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCopyBlock(blockId, parsed.bodyContent);
+                  }}
+                  className="px-1.5 py-0.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] text-[10px] font-mono-code text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1 cursor-pointer transition-colors"
+                  title="复制全文"
+                >
+                  {isCopied ? (
+                    <Check className="w-2.5 h-2.5 text-emerald-500" />
+                  ) : (
+                    <Copy className="w-2.5 h-2.5" />
+                  )}
+                </button>
+              </>
+            )}
+            {parsed.rawJsonForCopy !== null && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onCopyBlock(blockId, parsed.rawJsonForCopy!);
+                }}
+                className="px-1.5 py-0.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] text-[10px] font-mono-code text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1 cursor-pointer transition-colors"
+                title="以标准 JSON 格式复制原始载荷"
+              >
+                {isCopied ? (
+                  <>
+                    <Check className="w-2.5 h-2.5 text-emerald-500" />
+                    <span className="text-emerald-600 dark:text-emerald-400">
+                      JSON
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-2.5 h-2.5" />
+                    <span>JSON</span>
+                  </>
+                )}
+              </button>
+            )}
+            <span className="text-[10px] text-[var(--text-muted)]">
+              {parsed.lineCount}行
+            </span>
+          </div>
+        </div>
+
+        {!isCollapsed &&
+          (parsed.isMarkdownCapable && !isRawBlock ? (
+            <div className="px-3 pb-2.5 pt-2 border-t border-[var(--border-subtle)]">
+              <MarkdownRenderer
+                content={parsed.bodyContent}
+                variant="compact"
+                agents={mentionAgents}
+              />
+            </div>
+          ) : (
+            <div className="px-3 pb-2.5 pt-1 border-t border-[var(--border-subtle)] text-[11.5px] leading-relaxed text-[var(--text-secondary)] whitespace-pre-wrap break-words">
+              {parsed.bodyContent}
+            </div>
+          ))}
+      </div>
+    );
+  }
+);
+InspectorContextItemCard.displayName = 'InspectorContextItemCard';
+
+interface InspectorLiveBuffersProps {
+  liveStreamStore: LiveStreamBufferStore;
+  mentionAgents: RoomAgent[];
+  hasItems: boolean;
+  canEditPrompt: boolean;
+}
+
+const InspectorLiveBuffers: React.FC<InspectorLiveBuffersProps> = React.memo(
+  ({ liveStreamStore, mentionAgents, hasItems, canEditPrompt }) => {
+    const live = useSyncExternalStore(
+      liveStreamStore.subscribe,
+      liveStreamStore.getSnapshot,
+      liveStreamStore.getSnapshot
+    );
+
+    if (!hasItems && !live.reasoning && !live.text) {
+      return (
+        <div className="py-16 text-center text-[var(--text-muted)] font-sans text-xs space-y-1">
+          <div>该 Session 尚未产生思考或工具调用记录</div>
+          {canEditPrompt && (
+            <div className="text-[11px] text-emerald-500">
+              提示：点击右上角「透视配置 ➔ System Prompt」可在首次运行前修改该 Agent 的人设提示词
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    return (
+      <>
+        {live.reasoning && (
+          <div className="rounded-xl border border-violet-500/40 bg-violet-500/[0.06] p-3 space-y-1.5">
+            <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-violet-500">
+              <Brain className="w-3.5 h-3.5 animate-spin" />
+              <span>💭 实时思考流 (Reasoning Delta)</span>
+              <span className="inline-block w-1.5 h-3 bg-violet-500 animate-pulse rounded-xs" />
+            </div>
+            <MarkdownRenderer
+              content={live.reasoning}
+              variant="compact"
+              streaming
+              agents={mentionAgents}
+            />
+          </div>
+        )}
+
+        {live.text && (
+          <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/[0.06] p-3 space-y-1.5">
+            <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-emerald-500">
+              <Terminal className="w-3.5 h-3.5" />
+              <span>✍️ 实时输出流 (Output Delta)</span>
+              <span className="inline-block w-1.5 h-3 bg-emerald-500 animate-pulse rounded-xs" />
+            </div>
+            <MarkdownRenderer
+              content={live.text}
+              variant="compact"
+              streaming
+              agents={mentionAgents}
+            />
+          </div>
+        )}
+      </>
+    );
+  }
+);
+InspectorLiveBuffers.displayName = 'InspectorLiveBuffers';
+
 interface RightInspectorPaneProps {
   flowColumnOpen: boolean;
   onCloseFlowColumn: () => void;
@@ -98,8 +578,7 @@ interface RightInspectorPaneProps {
   availableModels: string[];
   onRefreshModels?: () => Promise<void> | void;
   refreshingModels?: boolean;
-  liveReasoningBuffer: string;
-  liveStreamBuffer: string;
+  liveStreamStore: LiveStreamBufferStore;
   onSelectAgent: (agentId: string, sessionId?: string) => void;
   onOpenRecruitModal: () => void;
   onOpenAddAgentModal: () => void;
@@ -140,7 +619,7 @@ interface RightInspectorPaneProps {
   onWithdrawQueuedMessage: (agentId: string, msgSeq: number) => void;
 }
 
-export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
+export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(({
   flowColumnOpen,
   onCloseFlowColumn,
   flowLogs,
@@ -156,8 +635,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   availableModels,
   onRefreshModels,
   refreshingModels = false,
-  liveReasoningBuffer,
-  liveStreamBuffer,
+  liveStreamStore,
   onSelectAgent,
   onOpenRecruitModal,
   onOpenAddAgentModal,
@@ -195,11 +673,6 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   const [manualCollapseOverrides, setManualCollapseOverrides] = useState<Record<string, boolean>>({});
   const [logFilter, setLogFilter] = useState<'all' | 'thought' | 'tool' | 'context'>('all');
 
-  // Sticky Bottom Auto-Follow State for Inspector Log
-  const [logPinnedToBottom, setLogPinnedToBottom] = useState(true);
-  const logPinnedToBottomRef = useRef(true);
-  const lastLogScrollTopRef = useRef(0);
-
   // Prompt Editor Local Form State
   const [roleDraft, setRoleDraft] = useState('');
   const [promptDraft, setPromptDraft] = useState('');
@@ -230,102 +703,8 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
     });
   };
 
-  const formatValueAsYaml = (val: unknown, indent = 0): string => {
-    const pad = '  '.repeat(indent);
-    if (val === null || val === undefined) return 'null';
-    if (typeof val === 'boolean' || typeof val === 'number') return String(val);
-    if (typeof val === 'string') {
-      if (val === '') return '""';
-      const normalized = val.replace(/\r\n/g, '\n');
-      if (normalized.includes('\n')) {
-        const childPad = '  '.repeat(indent + 1);
-        return (
-          '|\n' +
-          normalized
-            .split('\n')
-            .map((line) => `${childPad}${line}`)
-            .join('\n')
-        );
-      }
-      return normalized;
-    }
-    if (Array.isArray(val)) {
-      if (val.length === 0) return '[]';
-      return val
-        .map((entry) => {
-          if (
-            entry === null ||
-            entry === undefined ||
-            typeof entry === 'boolean' ||
-            typeof entry === 'number'
-          ) {
-            return `${pad}- ${String(entry)}`;
-          }
-          if (typeof entry === 'string') {
-            const norm = entry.replace(/\r\n/g, '\n');
-            if (!norm.includes('\n')) {
-              return `${pad}- ${norm === '' ? '""' : norm}`;
-            }
-            const childPad = '  '.repeat(indent + 1);
-            return (
-              `${pad}- |\n` +
-              norm
-                .split('\n')
-                .map((l) => `${childPad}${l}`)
-                .join('\n')
-            );
-          }
-          const nested = formatValueAsYaml(entry, indent + 1);
-          return `${pad}-\n${nested}`;
-        })
-        .join('\n');
-    }
-    if (typeof val === 'object') {
-      const entries = Object.entries(val as Record<string, unknown>);
-      if (entries.length === 0) return '{}';
-      return entries
-        .map(([k, v]) => {
-          if (
-            v === null ||
-            v === undefined ||
-            typeof v === 'boolean' ||
-            typeof v === 'number'
-          ) {
-            return `${pad}${k}: ${String(v)}`;
-          }
-          if (typeof v === 'string') {
-            const norm = v.replace(/\r\n/g, '\n');
-            if (!norm.includes('\n')) {
-              return `${pad}${k}: ${norm === '' ? '""' : norm}`;
-            }
-            const childPad = '  '.repeat(indent + 1);
-            return (
-              `${pad}${k}: |\n` +
-              norm
-                .split('\n')
-                .map((l) => `${childPad}${l}`)
-                .join('\n')
-            );
-          }
-          if (Array.isArray(v) && v.length === 0) {
-            return `${pad}${k}: []`;
-          }
-          if (
-            typeof v === 'object' &&
-            !Array.isArray(v) &&
-            Object.keys(v as Record<string, unknown>).length === 0
-          ) {
-            return `${pad}${k}: {}`;
-          }
-          return `${pad}${k}:\n${formatValueAsYaml(v, indent + 1)}`;
-        })
-        .join('\n');
-    }
-    return String(val);
-  };
-
-  const logScrollRef = useRef<HTMLDivElement | null>(null);
   const flowScrollRef = useRef<HTMLDivElement | null>(null);
+  const prevFlowOpenRef = useRef(false);
 
   const inspectedAgent = inspector?.agent || null;
   const items = inspector?.context?.effective_items || [];
@@ -338,8 +717,28 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   const rtQueuedCount = realtimeQueue.length;
   const normQueuedCount = normalQueue.length;
 
+  const inspectorResetKey = `${inspectedAgent?.agent_id || ''}:${inspector?.selected_session_id || ''}`;
+  const {
+    containerRef: logScrollRef,
+    contentRef: logContentRef,
+    pinnedRef: logPinnedToBottomRef,
+    isPinned: logPinnedToBottom,
+    scrollToBottom: scrollLogToBottom,
+    scrollContainerProps: logScrollContainerProps,
+  } = useStickyAutoScroll({
+    repinThresholdPx: 12,
+    resetKey: inspectorResetKey,
+    enabled: inspectorColumnOpen && Boolean(inspectedAgent),
+  });
+
+  const mentionSignature = agents
+    .map((a) => `${a.agent_id}\0${a.name}\0${a.role_title}\0${a.model}`)
+    .join('\n');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const stableMentionAgents = useMemo(() => agents, [mentionSignature]);
+
   // Resolve per-item timestamp (`created_at`) from server-computed `item_timestamps`, `local_batches`, live SSE items, and session lineage
-  const itemTimestampMap = (() => {
+  const itemTimestampMap = useMemo(() => {
     const byId = new Map<string, string>();
     const byCallKey = new Map<string, string>();
     const positionalTimes: string[] = [];
@@ -403,29 +802,14 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
       }
       return '';
     });
-  })();
-
-  const formatItemTimestamp = (iso: string): { short: string; full: string } | null => {
-    if (!iso) return null;
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return null;
-    const short = d.toLocaleTimeString([], {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    });
-    const full = d.toLocaleString([], {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    });
-    return { short, full };
-  };
+  }, [
+    items,
+    serverTimestamps,
+    localBatches,
+    inspector?.events,
+    inspectedAgent?.session_chain,
+    inspector?.selected_session_id,
+  ]);
 
   const getAlertKey = (env: {
     event_id?: string;
@@ -439,7 +823,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
 
   // Map each `activation_interrupted` / `activation_failed` event to the exact `items` index
   // where it occurred in the session context stream (instead of piling at the bottom).
-  const alertsByItemIndex = (() => {
+  const alertsByItemIndex = useMemo(() => {
     const map = new Map<
       number,
       NonNullable<InspectorSnapshot['events']>[number][]
@@ -522,7 +906,8 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
     }
 
     return map;
-  })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, inspector?.events, inspector?.selected_session_id, dismissedAlertIds]);
 
   const latestFailedOrInterruptedEvent = (() => {
     const allEvents = inspector?.events || [];
@@ -617,83 +1002,17 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
     );
   };
 
-  const scrollLogToBottom = () => {
-    const el = logScrollRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-    lastLogScrollTopRef.current = el.scrollTop;
-    logPinnedToBottomRef.current = true;
-    setLogPinnedToBottom(true);
-    requestAnimationFrame(() => {
-      const cur = logScrollRef.current;
-      if (cur && logPinnedToBottomRef.current) {
-        cur.scrollTop = cur.scrollHeight;
-        lastLogScrollTopRef.current = cur.scrollTop;
-      }
-    });
-  };
-
-  const handleLogScroll = () => {
-    const el = logScrollRef.current;
-    if (!el) return;
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    const scrolledUp = el.scrollTop < lastLogScrollTopRef.current - 4;
-    lastLogScrollTopRef.current = el.scrollTop;
-
-    if (distanceFromBottom <= 48) {
-      if (!logPinnedToBottomRef.current) {
-        logPinnedToBottomRef.current = true;
-        setLogPinnedToBottom(true);
-      }
-    } else if (scrolledUp) {
-      if (logPinnedToBottomRef.current) {
-        logPinnedToBottomRef.current = false;
-        setLogPinnedToBottom(false);
-      }
-    }
-  };
-
-  // Reset sticky-bottom and overrides when switching agent or session
+  // Reset manual overrides when switching agent or session
   useEffect(() => {
     setManualCollapseOverrides({});
-    logPinnedToBottomRef.current = true;
-    setLogPinnedToBottom(true);
-    scrollLogToBottom();
   }, [inspectedAgent?.agent_id, inspector?.selected_session_id]);
 
-  // Keep following bottom when new items or streaming buffers arrive
+  // Follow bottom on new context items only when user hasn't scrolled away
   useEffect(() => {
     if (logPinnedToBottomRef.current) {
       scrollLogToBottom();
     }
-  }, [
-    items.length,
-    liveReasoningBuffer,
-    liveStreamBuffer,
-    logFilter,
-    collapseMode,
-    inspectorColumnOpen,
-  ]);
-
-  // MutationObserver + ResizeObserver to guarantee sticky bottom even when large blocks render asynchronously
-  useEffect(() => {
-    const el = logScrollRef.current;
-    if (!el) return;
-    const snapIfPinned = () => {
-      if (logPinnedToBottomRef.current && logScrollRef.current) {
-        logScrollRef.current.scrollTop = logScrollRef.current.scrollHeight;
-        lastLogScrollTopRef.current = logScrollRef.current.scrollTop;
-      }
-    };
-    const mo = new MutationObserver(snapIfPinned);
-    mo.observe(el, { childList: true, subtree: true, characterData: true });
-    const ro = new ResizeObserver(snapIfPinned);
-    ro.observe(el);
-    return () => {
-      mo.disconnect();
-      ro.disconnect();
-    };
-  }, [inspectedAgent?.agent_id, inspector?.selected_session_id, inspectorColumnOpen]);
+  }, [items.length, inspectorColumnOpen, logPinnedToBottomRef, scrollLogToBottom]);
 
   useEffect(() => {
     if (rtQueuedCount + normQueuedCount > 0) {
@@ -702,8 +1021,13 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
   }, [rtQueuedCount, normQueuedCount]);
 
   useEffect(() => {
-    if (flowColumnOpen && flowScrollRef.current) {
-      flowScrollRef.current.scrollTop = flowScrollRef.current.scrollHeight;
+    const justOpened = flowColumnOpen && !prevFlowOpenRef.current;
+    prevFlowOpenRef.current = flowColumnOpen;
+    const el = flowScrollRef.current;
+    if (!flowColumnOpen || !el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (justOpened || distanceFromBottom <= 40) {
+      el.scrollTop = el.scrollHeight;
     }
   }, [flowLogs.length, flowColumnOpen]);
 
@@ -720,7 +1044,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
     }
   }, [inspector?.pending_permissions?.length]);
 
-  const toggleBlockCollapse = (id: string, currentlyCollapsed: boolean) => {
+  const toggleBlockCollapse = useCallback((id: string, currentlyCollapsed: boolean) => {
     if (typeof window !== 'undefined' && window.getSelection()?.toString()) {
       return;
     }
@@ -728,7 +1052,24 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
       ...prev,
       [id]: !currentlyCollapsed,
     }));
-  };
+  }, []);
+
+  const handleToggleRawBlock = useCallback((id: string) => {
+    setRawBlockIds((prev) => ({
+      ...prev,
+      [id]: !prev[id],
+    }));
+  }, []);
+
+  const handleCopyBlock = useCallback((id: string, text: string) => {
+    copyTextToClipboard(text).then((ok) => {
+      if (!ok) return;
+      setCopiedBlockId(id);
+      window.setTimeout(() => {
+        setCopiedBlockId((cur) => (cur === id ? null : cur));
+      }, 1500);
+    });
+  }, []);
 
   const handleSelectCollapseMode = (mode: 'default' | 'collapsed' | 'expanded') => {
     setCollapseMode(mode);
@@ -2370,27 +2711,17 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
             <div className="flex-1 min-h-0 relative flex flex-col overflow-hidden">
               <div
                 ref={logScrollRef}
-                onScroll={handleLogScroll}
-                className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2 font-mono-code text-xs"
+                {...logScrollContainerProps}
+                className="flex-1 min-h-0 overflow-y-auto p-3 font-mono-code text-xs"
               >
-                {(alertsByItemIndex.get(-1) || []).map((env, aIdx) =>
-                  renderInlineAlertCard(env, aIdx)
-                )}
+                <div ref={logContentRef} className="space-y-2">
+                  {(alertsByItemIndex.get(-1) || []).map((env, aIdx) =>
+                    renderInlineAlertCard(env, aIdx)
+                  )}
 
-                {items.length === 0 && !liveReasoningBuffer && !liveStreamBuffer ? (
-                  <div className="py-16 text-center text-[var(--text-muted)] font-sans text-xs space-y-1">
-                    <div>该 Session 尚未产生思考或工具调用记录</div>
-                    {inspector?.can_edit_prompt && (
-                      <div className="text-[11px] text-emerald-500">
-                        提示：点击右上角「透视配置 ➔ System Prompt」可在首次运行前修改该 Agent 的人设提示词
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  items.map((item: ContextItem, idx: number) => {
+                  {items.map((item: ContextItem, idx: number) => {
                     const blockId = item.id || `item-${idx}`;
                     const trailingAlerts = alertsByItemIndex.get(idx) || [];
-
                     const rawContentText = extractPartArrayText(item.content);
                     const rawSummaryText = extractPartArrayText(item.summary);
                     const rawText = [rawSummaryText, rawContentText]
@@ -2398,325 +2729,63 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
                       .join('\n\n');
                     const isCompaction = rawText.startsWith('[Compaction Summary]');
 
-                    if (logFilter === 'thought' && item.type !== 'reasoning') return null;
-                    if (
-                      logFilter === 'tool' &&
-                      item.type !== 'function_call' &&
-                      item.type !== 'function_call_output' &&
-                      item.type !== 'web_search_call'
-                    )
-                      return null;
-                    if (logFilter === 'context' && item.type !== 'message') return null;
+                    const passesFilter =
+                      logFilter === 'all' ||
+                      (logFilter === 'thought' && item.type === 'reasoning') ||
+                      (logFilter === 'tool' &&
+                        (item.type === 'function_call' ||
+                          item.type === 'function_call_output' ||
+                          item.type === 'web_search_call')) ||
+                      (logFilter === 'context' &&
+                        item.type === 'message' &&
+                        !isCompaction);
 
-                    let icon = <Inbox className="w-3.5 h-3.5 text-emerald-500 shrink-0" />;
-                    let title = 'Context';
-                    let preview = rawText.replace(/\s+/g, ' ').slice(0, 68);
-                    let bodyContent = rawText;
-                    let rawJsonForCopy: string | null = null;
-                    let badgeColor = 'text-emerald-600 dark:text-emerald-400';
-                    const isMarkdownCapable =
-                      isCompaction ||
-                      item.type === 'reasoning' ||
-                      (item.type === 'message' &&
-                        String(item.role || 'user') !== 'user');
-                    const isRawBlock = Boolean(rawBlockIds[blockId]);
-
-                    if (isCompaction) {
-                      icon = <Package className="w-3.5 h-3.5 text-amber-500 shrink-0" />;
-                      title = 'Compaction Summary';
-                      badgeColor = 'text-amber-600 dark:text-amber-400';
-                    } else if (item.type === 'reasoning') {
-                      icon = <Brain className="w-3.5 h-3.5 text-violet-500 shrink-0" />;
-                      const firstLine =
-                        rawText
-                          .split('\n')
-                          .map((l) => l.replace(/^\*\*|\*\*$/g, '').trim())
-                          .find(Boolean) || 'Thought / 内部推理链';
-                      title = `Thought: ${firstLine.slice(0, 42)}`;
-                      bodyContent = rawText || '(已完成内部推理)';
-                      preview = bodyContent.replace(/\s+/g, ' ').slice(0, 60);
-                      badgeColor = 'text-violet-600 dark:text-violet-400';
-                    } else if (item.type === 'function_call') {
-                      icon = <Wrench className="w-3.5 h-3.5 text-blue-500 shrink-0" />;
-                      title = `ToolCall: ${String(item.name || 'tool')}${
-                        item.duration_ms ? ` (${item.duration_ms}ms)` : ''
-                      }`;
-                      let parsedArgs: unknown = item.arguments ?? {};
-                      if (typeof item.arguments === 'string') {
-                        try {
-                          parsedArgs = JSON.parse(item.arguments);
-                        } catch (_) {
-                          parsedArgs = item.arguments;
-                        }
-                      }
-                      rawJsonForCopy =
-                        typeof parsedArgs === 'string'
-                          ? parsedArgs
-                          : JSON.stringify(parsedArgs, null, 2);
-                      bodyContent = formatValueAsYaml(parsedArgs);
-                      preview = bodyContent.replace(/\s+/g, ' ').slice(0, 60);
-                      badgeColor = 'text-blue-600 dark:text-blue-400';
-                    } else if (item.type === 'function_call_output') {
-                      icon = <Terminal className="w-3.5 h-3.5 text-cyan-500 shrink-0" />;
-                      title = `ToolResult${item.name ? `: ${String(item.name)}` : ''}`;
-                      let parsedOut: unknown = item.output ?? '';
-                      if (typeof item.output === 'string') {
-                        const trimmedOut = item.output.trim();
-                        if (
-                          (trimmedOut.startsWith('{') && trimmedOut.endsWith('}')) ||
-                          (trimmedOut.startsWith('[') && trimmedOut.endsWith(']'))
-                        ) {
-                          try {
-                            parsedOut = JSON.parse(trimmedOut);
-                          } catch (_) {
-                            parsedOut = item.output;
-                          }
-                        }
-                      }
-                      rawJsonForCopy =
-                        typeof parsedOut === 'string'
-                          ? JSON.stringify({ output: parsedOut }, null, 2)
-                          : JSON.stringify(parsedOut, null, 2);
-                      bodyContent =
-                        typeof parsedOut === 'string'
-                          ? parsedOut
-                          : formatValueAsYaml(parsedOut);
-                      preview = bodyContent.replace(/\s+/g, ' ').slice(0, 60);
-                      badgeColor = 'text-cyan-600 dark:text-cyan-400';
-                    } else if (item.type === 'web_search_call') {
-                      icon = <Compass className="w-3.5 h-3.5 text-sky-500 shrink-0" />;
-                      const action = item.action || {};
-                      const query =
-                        typeof action.query === 'string'
-                          ? action.query
-                          : Array.isArray(action.queries)
-                          ? action.queries.join(' | ')
-                          : '';
-                      title = `WebSearch${query ? `: ${query.slice(0, 38)}` : ''}`;
-                      const wsPayload = {
-                        status: item.status || 'completed',
-                        action,
-                      };
-                      rawJsonForCopy = JSON.stringify(wsPayload, null, 2);
-                      bodyContent = formatValueAsYaml(wsPayload);
-                      preview = query || bodyContent.replace(/\s+/g, ' ').slice(0, 60);
-                      badgeColor = 'text-sky-600 dark:text-sky-400';
-                    } else if (item.type === 'message') {
-                      const role = String(item.role || 'user');
-                      title =
-                        role === 'user'
-                          ? 'Context:user (聊天室上下文载荷)'
-                          : `Context:${role} (内部草稿)`;
+                    if (!passesFilter) {
+                      return trailingAlerts.length > 0 ? (
+                        <React.Fragment key={blockId}>
+                          {trailingAlerts.map((env, aIdx) =>
+                            renderInlineAlertCard(env, aIdx)
+                          )}
+                        </React.Fragment>
+                      ) : null;
                     }
-
-                    const lineCount = bodyContent
-                      ? bodyContent.split(/\r?\n/).length
-                      : 0;
-                    const defaultCollapsed = lineCount > 10;
-                    const isCollapsed =
-                      blockId in manualCollapseOverrides
-                        ? manualCollapseOverrides[blockId]
-                        : collapseMode === 'collapsed'
-                        ? true
-                        : collapseMode === 'expanded'
-                        ? false
-                        : defaultCollapsed;
 
                     return (
                       <React.Fragment key={blockId}>
-                        <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-code)] overflow-hidden">
-                          <div
-                            onClick={() => toggleBlockCollapse(blockId, isCollapsed)}
-                            className="px-3 py-2 flex items-center justify-between gap-2 cursor-pointer hover:bg-[var(--bg-hover)]"
-                          >
-                            <div className="flex items-center gap-2 min-w-0 flex-1">
-                              {isCollapsed ? (
-                                <ChevronRight className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
-                              ) : (
-                                <ChevronDown className="w-3.5 h-3.5 text-[var(--text-muted)] shrink-0" />
-                              )}
-                              {icon}
-                              <span className={`font-semibold text-[11.5px] shrink-0 ${badgeColor}`}>
-                                {title}
-                              </span>
-                              {isCollapsed && (
-                                <span className="text-[11px] text-[var(--text-muted)] truncate">
-                                  {preview}
-                                </span>
-                              )}
-                            </div>
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              {(() => {
-                                const ts = formatItemTimestamp(
-                                  itemTimestampMap[idx] || ''
-                                );
-                                if (!ts) return null;
-                                return (
-                                  <span
-                                    title={ts.full}
-                                    className="text-[10px] font-mono-code text-[var(--text-muted)] px-1 py-0.2 rounded bg-[var(--bg-surface)]/70"
-                                  >
-                                    {ts.short}
-                                  </span>
-                                );
-                              })()}
-                              {isMarkdownCapable && (
-                                <>
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setRawBlockIds((prev) => ({
-                                        ...prev,
-                                        [blockId]: !prev[blockId],
-                                      }));
-                                    }}
-                                    className="px-1.5 py-0.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] text-[10px] font-mono-code text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1 cursor-pointer transition-colors"
-                                    title={isRawBlock ? '切换为 Markdown 渲染' : '查看 Markdown 原文'}
-                                  >
-                                    {isRawBlock ? (
-                                      <>
-                                        <Eye className="w-2.5 h-2.5 text-blue-500" />
-                                        <span>渲染</span>
-                                      </>
-                                    ) : (
-                                      <>
-                                        <Code2 className="w-2.5 h-2.5" />
-                                        <span>原文</span>
-                                      </>
-                                    )}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      navigator.clipboard
-                                        .writeText(bodyContent)
-                                        .then(() => {
-                                          setCopiedBlockId(blockId);
-                                          setTimeout(() => {
-                                            setCopiedBlockId((cur) =>
-                                              cur === blockId ? null : cur
-                                            );
-                                          }, 1500);
-                                        })
-                                        .catch(() => {});
-                                    }}
-                                    className="px-1.5 py-0.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] text-[10px] font-mono-code text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1 cursor-pointer transition-colors"
-                                    title="复制全文"
-                                  >
-                                    {copiedBlockId === blockId ? (
-                                      <Check className="w-2.5 h-2.5 text-emerald-500" />
-                                    ) : (
-                                      <Copy className="w-2.5 h-2.5" />
-                                    )}
-                                  </button>
-                                </>
-                              )}
-                              {rawJsonForCopy !== null && (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    navigator.clipboard
-                                      .writeText(rawJsonForCopy!)
-                                      .then(() => {
-                                        setCopiedBlockId(blockId);
-                                        setTimeout(() => {
-                                          setCopiedBlockId((cur) =>
-                                            cur === blockId ? null : cur
-                                          );
-                                        }, 1500);
-                                      })
-                                      .catch(() => {});
-                                  }}
-                                  className="px-1.5 py-0.5 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-hover)] text-[10px] font-mono-code text-[var(--text-secondary)] hover:text-[var(--text-primary)] flex items-center gap-1 cursor-pointer transition-colors"
-                                  title="以标准 JSON 格式复制原始载荷"
-                                >
-                                  {copiedBlockId === blockId ? (
-                                    <>
-                                      <Check className="w-2.5 h-2.5 text-emerald-500" />
-                                      <span className="text-emerald-600 dark:text-emerald-400">
-                                        JSON
-                                      </span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Copy className="w-2.5 h-2.5" />
-                                      <span>JSON</span>
-                                    </>
-                                  )}
-                                </button>
-                              )}
-                              <span className="text-[10px] text-[var(--text-muted)]">
-                                {lineCount}行
-                              </span>
-                            </div>
-                          </div>
-
-                          {!isCollapsed &&
-                            (isMarkdownCapable && !isRawBlock ? (
-                              <div className="px-3 pb-2.5 pt-2 border-t border-[var(--border-subtle)]">
-                                <MarkdownRenderer
-                                  content={bodyContent}
-                                  variant="compact"
-                                  agents={agents}
-                                />
-                              </div>
-                            ) : (
-                              <div className="px-3 pb-2.5 pt-1 border-t border-[var(--border-subtle)] text-[11.5px] leading-relaxed text-[var(--text-secondary)] whitespace-pre-wrap break-words">
-                                {bodyContent}
-                              </div>
-                            ))}
-                        </div>
+                        <InspectorContextItemCard
+                          item={item}
+                          blockId={blockId}
+                          timestampIso={itemTimestampMap[idx] || ''}
+                          collapseMode={collapseMode}
+                          manualCollapse={manualCollapseOverrides[blockId]}
+                          isRawBlock={Boolean(rawBlockIds[blockId])}
+                          isCopied={copiedBlockId === blockId}
+                          mentionAgents={stableMentionAgents}
+                          onToggleCollapse={toggleBlockCollapse}
+                          onToggleRaw={handleToggleRawBlock}
+                          onCopyBlock={handleCopyBlock}
+                        />
                         {trailingAlerts.map((env, aIdx) =>
                           renderInlineAlertCard(env, aIdx)
                         )}
                       </React.Fragment>
                     );
-                  })
-                )}
+                  })}
 
-                {/* Live Streaming Reasoning Slot */}
-                {liveReasoningBuffer && (
-                  <div className="rounded-xl border border-violet-500/40 bg-violet-500/[0.06] p-3 space-y-1.5">
-                    <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-violet-500">
-                      <Brain className="w-3.5 h-3.5 animate-spin" />
-                      <span>💭 实时思考流 (Reasoning Delta)</span>
-                      <span className="inline-block w-1.5 h-3 bg-violet-500 animate-pulse rounded-xs" />
-                    </div>
-                    <MarkdownRenderer
-                      content={liveReasoningBuffer}
-                      variant="compact"
-                      streaming
-                      agents={agents}
-                    />
-                  </div>
-                )}
-
-                {/* Live Streaming Output Slot */}
-                {liveStreamBuffer && (
-                  <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/[0.06] p-3 space-y-1.5">
-                    <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-emerald-500">
-                      <Terminal className="w-3.5 h-3.5" />
-                      <span>✍️ 实时输出流 (Output Delta)</span>
-                      <span className="inline-block w-1.5 h-3 bg-emerald-500 animate-pulse rounded-xs" />
-                    </div>
-                    <MarkdownRenderer
-                      content={liveStreamBuffer}
-                      variant="compact"
-                      streaming
-                      agents={agents}
-                    />
-                  </div>
-                )}
+                  <InspectorLiveBuffers
+                    liveStreamStore={liveStreamStore}
+                    mentionAgents={stableMentionAgents}
+                    hasItems={items.length > 0}
+                    canEditPrompt={Boolean(inspector?.can_edit_prompt)}
+                  />
+                </div>
               </div>
 
               {/* Floating Jump-to-Bottom Pill in Inspector */}
               {!logPinnedToBottom && (
                 <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10">
                   <button
-                    onClick={scrollLogToBottom}
+                    onClick={() => scrollLogToBottom(true)}
                     className="px-3 py-1 rounded-full bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] shadow-md text-[11px] font-medium flex items-center gap-1 cursor-pointer hover:bg-[var(--bg-surface)]"
                   >
                     <ArrowDown className="w-3 h-3" />
@@ -2730,4 +2799,5 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = ({
       </aside>
     </div>
   );
-};
+});
+RightInspectorPane.displayName = 'RightInspectorPane';

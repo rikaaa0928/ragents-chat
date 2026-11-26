@@ -223,7 +223,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </div>
 
       {/* Scrollable Navigation Content */}
-      <div className="flex-1 overflow-y-auto px-2 py-1 space-y-2">
+      <div className="flex-1 min-h-0 overflow-y-auto px-2 py-1 space-y-2">
         {/* Collapsible Rooms Root Section */}
         <div>
           <button

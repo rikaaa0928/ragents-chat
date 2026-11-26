@@ -19,7 +19,76 @@ import { ChatArea, UploadedTempAttachment } from './components/ChatArea';
 import { RightInspectorPane } from './components/RightInspectorPane';
 import { Modals, ActiveModalType } from './components/Modals';
 import { ExtensionSlotHost } from './components/ExtensionSlotHost';
+import { LiveStreamBufferStore } from './utils/liveStreamStore';
 import { X } from 'lucide-react';
+
+function reuseUnchangedArrayElements<T>(prev: T[], next: T[]): T[] {
+  if (prev.length === next.length && JSON.stringify(prev) === JSON.stringify(next)) {
+    return prev;
+  }
+  return next.map((item, idx) => {
+    const prevItem = prev[idx];
+    if (prevItem !== undefined && JSON.stringify(prevItem) === JSON.stringify(item)) {
+      return prevItem;
+    }
+    return item;
+  });
+}
+
+function mergeInspectorSnapshot(
+  prev: InspectorSnapshot | null,
+  next: InspectorSnapshot
+): InspectorSnapshot {
+  if (!prev || prev.selected_session_id !== next.selected_session_id) {
+    return next;
+  }
+  const prevItems = prev.context?.effective_items || [];
+  const nextItems = next.context?.effective_items || [];
+  const mergedItems = reuseUnchangedArrayElements(prevItems, nextItems);
+
+  const prevTimestamps = prev.item_timestamps || [];
+  const nextTimestamps = next.item_timestamps || [];
+  const mergedTimestamps = reuseUnchangedArrayElements(prevTimestamps, nextTimestamps);
+
+  const prevEvents = prev.events || [];
+  const nextEvents = next.events || [];
+  const mergedEvents = reuseUnchangedArrayElements(prevEvents, nextEvents);
+
+  const sameAgent = JSON.stringify(prev.agent) === JSON.stringify(next.agent);
+  const sameQueues =
+    JSON.stringify(prev.message_queues) === JSON.stringify(next.message_queues);
+  const samePerms =
+    JSON.stringify(prev.pending_permissions) === JSON.stringify(next.pending_permissions);
+  const samePermSummary =
+    JSON.stringify(prev.permission_summary) === JSON.stringify(next.permission_summary);
+  const sameSchedules =
+    JSON.stringify(prev.schedules) === JSON.stringify(next.schedules);
+  const sameSession =
+    JSON.stringify(prev.session) === JSON.stringify(next.session);
+  const sameBatches =
+    JSON.stringify(prev.context?.local_batches) ===
+    JSON.stringify(next.context?.local_batches);
+
+  return {
+    ...next,
+    agent: sameAgent ? prev.agent : next.agent,
+    session: sameSession ? prev.session : next.session,
+    pending_permissions: samePerms ? prev.pending_permissions : next.pending_permissions,
+    context: {
+      effective_items: mergedItems,
+      local_batches: sameBatches
+        ? prev.context?.local_batches
+        : next.context?.local_batches,
+    },
+    item_timestamps: mergedTimestamps,
+    events: mergedEvents,
+    message_queues: sameQueues ? prev.message_queues : next.message_queues,
+    permission_summary: samePermSummary
+      ? prev.permission_summary
+      : next.permission_summary,
+    schedules: sameSchedules ? prev.schedules : next.schedules,
+  };
+}
 
 const DEFAULT_MANAGER_SETTINGS: ManagerSettings = {
   manager_model: '',
@@ -111,8 +180,11 @@ export const App: React.FC = () => {
   const [inspectorSnap, setInspectorSnap] = useState<InspectorSnapshot | null>(null);
   const [agentActivities, setAgentActivities] = useState<Record<string, string>>({});
   const [peekStatusBanner, setPeekStatusBanner] = useState('');
-  const [liveReasoningBuffer, setLiveReasoningBuffer] = useState('');
-  const [liveStreamBuffer, setLiveStreamBuffer] = useState('');
+  const liveStreamStoreRef = useRef<LiveStreamBufferStore | null>(null);
+  if (!liveStreamStoreRef.current) {
+    liveStreamStoreRef.current = new LiveStreamBufferStore();
+  }
+  const liveStreamStore = liveStreamStoreRef.current;
   const [restoredDraft, setRestoredDraft] = useState<{
     text: string;
     seq: number;
@@ -159,7 +231,15 @@ export const App: React.FC = () => {
   const roomEsRef = useRef<EventSource | null>(null);
   const inspectorEsRef = useRef<EventSource | null>(null);
   const inspectorAbortRef = useRef<AbortController | null>(null);
+  const inspectorRefreshTimerRef = useRef<number | null>(null);
   const currentRoomIdRef = useRef<string | null>(currentRoomId);
+  const currentDetailRef = useRef<RoomDetailResponse | null>(currentDetail);
+  const selectedMentionsRef = useRef<Set<string>>(selectedMentions);
+  const leadAutoPreselectedRef = useRef<boolean>(leadAutoPreselected);
+  const principalRef = useRef<ChatPrincipal | null>(principal);
+  const managerSettingsRef = useRef<ManagerSettings>(managerSettings);
+  const inspectorSnapRef = useRef<InspectorSnapshot | null>(inspectorSnap);
+  const authTokenRef = useRef<string>(authToken);
   const inspectedAgentIdRef = useRef<string | null>(null);
   const inspectedSessionIdRef = useRef<string | null>(null);
   const inspectorColumnOpenRef = useRef<boolean>(inspectorColumnOpen);
@@ -170,6 +250,34 @@ export const App: React.FC = () => {
       localStorage.setItem('ragents_chat_room_id', currentRoomId);
     }
   }, [currentRoomId]);
+
+  useEffect(() => {
+    currentDetailRef.current = currentDetail;
+  }, [currentDetail]);
+
+  useEffect(() => {
+    selectedMentionsRef.current = selectedMentions;
+  }, [selectedMentions]);
+
+  useEffect(() => {
+    leadAutoPreselectedRef.current = leadAutoPreselected;
+  }, [leadAutoPreselected]);
+
+  useEffect(() => {
+    principalRef.current = principal;
+  }, [principal]);
+
+  useEffect(() => {
+    managerSettingsRef.current = managerSettings;
+  }, [managerSettings]);
+
+  useEffect(() => {
+    inspectorSnapRef.current = inspectorSnap;
+  }, [inspectorSnap]);
+
+  useEffect(() => {
+    authTokenRef.current = authToken;
+  }, [authToken]);
 
   useEffect(() => {
     inspectedAgentIdRef.current = inspectedAgentId;
@@ -260,9 +368,14 @@ export const App: React.FC = () => {
         const merged = { ...prev, ...s };
         return JSON.stringify(prev) === JSON.stringify(merged) ? prev : merged;
       });
-      setClusterNodes(data.cluster_nodes || []);
+      const nextNodes: ClusterNode[] = data.cluster_nodes || [];
+      setClusterNodes((prev) =>
+        JSON.stringify(prev) === JSON.stringify(nextNodes) ? prev : nextNodes
+      );
       const catalog: ClusterModelsResponse | null = data.cluster_models || null;
-      setClusterModels(catalog);
+      setClusterModels((prev) =>
+        JSON.stringify(prev) === JSON.stringify(catalog) ? prev : catalog
+      );
       applyModelsFromCatalog(catalog, s);
       return data;
     } catch (_) {
@@ -277,15 +390,17 @@ export const App: React.FC = () => {
         '/api/v1/models/refresh',
         { method: 'POST' }
       );
-      setClusterModels(catalog);
-      applyModelsFromCatalog(catalog, managerSettings);
+      setClusterModels((prev) =>
+        JSON.stringify(prev) === JSON.stringify(catalog) ? prev : catalog
+      );
+      applyModelsFromCatalog(catalog, managerSettingsRef.current);
       await refreshAvailableModels();
     } catch (_) {
       // error is already surfaced by apiFetch
     } finally {
       setRefreshingModels(false);
     }
-  }, [apiFetch, applyModelsFromCatalog, managerSettings, refreshAvailableModels]);
+  }, [apiFetch, applyModelsFromCatalog, refreshAvailableModels]);
 
   const refreshInspectorSnapshot = useCallback(
     async (
@@ -293,6 +408,10 @@ export const App: React.FC = () => {
       sessionId: string | null = null,
       resetBuffers = true
     ) => {
+      if (inspectorRefreshTimerRef.current !== null) {
+        window.clearTimeout(inspectorRefreshTimerRef.current);
+        inspectorRefreshTimerRef.current = null;
+      }
       if (inspectorAbortRef.current) {
         inspectorAbortRef.current.abort();
       }
@@ -349,13 +468,31 @@ export const App: React.FC = () => {
       inspectedSessionIdRef.current = sessionId;
       setInspectedAgentId(snap.agent.agent_id);
       setInspectedSessionId(sessionId);
-      setInspectorSnap(normalized);
+      setInspectorSnap((prev) => mergeInspectorSnapshot(prev, normalized));
       if (resetBuffers) {
-        setLiveReasoningBuffer('');
-        setLiveStreamBuffer('');
+        liveStreamStore.reset();
       }
     },
-    [apiFetch]
+    [apiFetch, liveStreamStore]
+  );
+
+  const scheduleInspectorRefresh = useCallback(
+    (
+      agentId: string,
+      sessionId: string | null = null,
+      delayMs = 160
+    ) => {
+      if (inspectorRefreshTimerRef.current !== null) {
+        window.clearTimeout(inspectorRefreshTimerRef.current);
+      }
+      inspectorRefreshTimerRef.current = window.setTimeout(() => {
+        inspectorRefreshTimerRef.current = null;
+        if (!inspectorColumnOpenRef.current) return;
+        if (inspectedAgentIdRef.current !== agentId) return;
+        refreshInspectorSnapshot(agentId, sessionId, false).catch(() => {});
+      }, delayMs);
+    },
+    [refreshInspectorSnapshot]
   );
 
   const subscribeInspectorStream = useCallback(
@@ -401,29 +538,27 @@ export const App: React.FC = () => {
           const evType = ev.type || ev.kind;
 
           if (evType === 'model_reasoning_delta') {
-            setLiveReasoningBuffer((prev) => prev + (ev.delta || ''));
+            liveStreamStore.appendReasoning(ev.delta || '');
           } else if (evType === 'model_text_delta') {
-            setLiveStreamBuffer((prev) => prev + (ev.delta || ''));
+            liveStreamStore.appendText(ev.delta || '');
           } else if (evType === 'activation_submitted') {
             if (ev.items && ev.items.length > 0) {
               appendContextItems(ev.items, env.created_at);
             }
             if (inspectorColumnOpenRef.current) {
-              refreshInspectorSnapshot(agentId, sessionId, false);
+              scheduleInspectorRefresh(agentId, sessionId, 160);
             }
           } else if (
             evType === 'activation_started' ||
             evType === 'realtime_messages_drained'
           ) {
             if (inspectorColumnOpenRef.current) {
-              refreshInspectorSnapshot(agentId, sessionId, false);
+              scheduleInspectorRefresh(agentId, sessionId, 160);
             }
           } else if (evType === 'turn_started') {
-            setLiveReasoningBuffer('');
-            setLiveStreamBuffer('');
+            liveStreamStore.reset();
           } else if (evType === 'turn_completed') {
-            setLiveReasoningBuffer('');
-            setLiveStreamBuffer('');
+            liveStreamStore.reset();
             if (ev.items && ev.items.length > 0) {
               appendContextItems(ev.items, env.created_at);
             }
@@ -454,7 +589,7 @@ export const App: React.FC = () => {
         }
       };
     },
-    [refreshInspectorSnapshot]
+    [liveStreamStore, refreshInspectorSnapshot, scheduleInspectorRefresh]
   );
 
   // Manage Inspector snapshot & SSE stream lazily based on whether the Inspector column is open
@@ -467,6 +602,10 @@ export const App: React.FC = () => {
       if (inspectorAbortRef.current) {
         inspectorAbortRef.current.abort();
         inspectorAbortRef.current = null;
+      }
+      if (inspectorRefreshTimerRef.current !== null) {
+        window.clearTimeout(inspectorRefreshTimerRef.current);
+        inspectorRefreshTimerRef.current = null;
       }
       return;
     }
@@ -510,10 +649,10 @@ export const App: React.FC = () => {
               )
             );
             if (inspectorColumnOpenRef.current && inspectedAgentIdRef.current) {
-              refreshInspectorSnapshot(
+              scheduleInspectorRefresh(
                 inspectedAgentIdRef.current,
                 inspectedSessionIdRef.current,
-                false
+                200
               );
             }
           } else if (ev.type === 'message_withdrawn') {
@@ -525,10 +664,10 @@ export const App: React.FC = () => {
               };
             });
             if (inspectorColumnOpenRef.current && inspectedAgentIdRef.current) {
-              refreshInspectorSnapshot(
+              scheduleInspectorRefresh(
                 inspectedAgentIdRef.current,
                 inspectedSessionIdRef.current,
-                false
+                200
               );
             }
           } else if (ev.type === 'agent_updated') {
@@ -537,26 +676,33 @@ export const App: React.FC = () => {
                 prev ? { ...prev, manager_agent: ev.agent } : prev
               );
             } else if (ev.agent) {
+              const prevAgents = currentDetailRef.current?.agents || [];
+              if (prevAgents.length === 0) {
+                setSelectedMentions(new Set([ev.agent.name]));
+                setLeadAutoPreselected(true);
+              }
               setCurrentDetail((prev) => {
                 if (!prev) return prev;
-                const prevCount = prev.agents.length;
                 const idx = prev.agents.findIndex(
                   (a) => a.agent_id === ev.agent.agent_id
                 );
                 const nextAgents = [...prev.agents];
                 if (idx >= 0) nextAgents[idx] = ev.agent;
                 else nextAgents.push(ev.agent);
-                if (prevCount === 0 && nextAgents.length > 0) {
-                  setSelectedMentions(new Set([nextAgents[0].name]));
-                  setLeadAutoPreselected(true);
-                }
-                setRoomsList((list) =>
-                  list.map((r) =>
-                    r.room.room_id === roomId ? { ...r, agents: nextAgents } : r
-                  )
-                );
                 return { ...prev, agents: nextAgents };
               });
+              setRoomsList((list) =>
+                list.map((r) => {
+                  if (r.room.room_id !== roomId) return r;
+                  const idx = r.agents.findIndex(
+                    (a) => a.agent_id === ev.agent.agent_id
+                  );
+                  const nextAgents = [...r.agents];
+                  if (idx >= 0) nextAgents[idx] = ev.agent;
+                  else nextAgents.push(ev.agent);
+                  return { ...r, agents: nextAgents };
+                })
+              );
             }
             if (
               ev.agent &&
@@ -567,33 +713,42 @@ export const App: React.FC = () => {
               );
             }
           } else if (ev.type === 'agent_removed') {
+            const prevAgents = currentDetailRef.current?.agents || [];
+            const removedAgent = prevAgents.find(
+              (a) => a.agent_id === ev.agent_id
+            );
+            const nextAgentsPreview = prevAgents.filter(
+              (a) => a.agent_id !== ev.agent_id
+            );
+            if (removedAgent) {
+              setSelectedMentions((sel) => {
+                if (!sel.has(removedAgent.name)) return sel;
+                const nextSel = new Set(sel);
+                nextSel.delete(removedAgent.name);
+                if (nextSel.size === 0 && nextAgentsPreview.length > 0) {
+                  nextSel.add(nextAgentsPreview[0].name);
+                  setLeadAutoPreselected(true);
+                }
+                return nextSel;
+              });
+            }
             setCurrentDetail((prev) => {
               if (!prev) return prev;
-              const removedAgent = prev.agents.find(
-                (a) => a.agent_id === ev.agent_id
-              );
-              const nextAgents = prev.agents.filter(
-                (a) => a.agent_id !== ev.agent_id
-              );
-              if (removedAgent) {
-                setSelectedMentions((sel) => {
-                  if (!sel.has(removedAgent.name)) return sel;
-                  const nextSel = new Set(sel);
-                  nextSel.delete(removedAgent.name);
-                  if (nextSel.size === 0 && nextAgents.length > 0) {
-                    nextSel.add(nextAgents[0].name);
-                    setLeadAutoPreselected(true);
-                  }
-                  return nextSel;
-                });
-              }
-              setRoomsList((list) =>
-                list.map((r) =>
-                  r.room.room_id === roomId ? { ...r, agents: nextAgents } : r
-                )
-              );
-              return { ...prev, agents: nextAgents };
+              return {
+                ...prev,
+                agents: prev.agents.filter((a) => a.agent_id !== ev.agent_id),
+              };
             });
+            setRoomsList((list) =>
+              list.map((r) =>
+                r.room.room_id === roomId
+                  ? {
+                      ...r,
+                      agents: r.agents.filter((a) => a.agent_id !== ev.agent_id),
+                    }
+                  : r
+              )
+            );
           } else if (ev.type === 'room_updated') {
             setCurrentDetail((prev) =>
               prev ? { ...prev, room: ev.room } : prev
@@ -625,10 +780,14 @@ export const App: React.FC = () => {
             setInspectorColumnOpen(true);
             refreshInspectorSnapshot(ev.agent_id, null, false);
           } else if (ev.type === 'agent_activity') {
-            setAgentActivities((prev) => ({
-              ...prev,
-              [ev.agent_id]: ev.activity || '',
-            }));
+            setAgentActivities((prev) => {
+              const nextActivity = ev.activity || '';
+              if ((prev[ev.agent_id] || '') === nextActivity) return prev;
+              return {
+                ...prev,
+                [ev.agent_id]: nextActivity,
+              };
+            });
           } else if (ev.type === 'agent_schedules_updated') {
             if (inspectedAgentIdRef.current === ev.agent_id) {
               setInspectorSnap((prev) =>
@@ -643,7 +802,7 @@ export const App: React.FC = () => {
         }
       };
     },
-    [refreshInspectorSnapshot]
+    [refreshInspectorSnapshot, scheduleInspectorRefresh]
   );
 
   const handleSelectRoom = useCallback(
@@ -757,127 +916,413 @@ export const App: React.FC = () => {
     return () => clearInterval(timer);
   }, [activeModal, activeExtModal, refreshAvailableModels]);
 
-  const handleInspectAgent = async (
-    agentId: string,
-    sessionId?: string,
-    autoOpenPane = true
-  ) => {
-    const nextSessionId = sessionId || null;
-    const sameSelection =
-      inspectedAgentIdRef.current === agentId &&
-      inspectedSessionIdRef.current === nextSessionId &&
-      inspectorColumnOpenRef.current === (autoOpenPane ? true : inspectorColumnOpenRef.current);
-    inspectedAgentIdRef.current = agentId;
-    inspectedSessionIdRef.current = nextSessionId;
-    setInspectedAgentId(agentId);
-    setInspectedSessionId(nextSessionId);
-    setLiveReasoningBuffer('');
-    setLiveStreamBuffer('');
-    if (autoOpenPane) {
-      if (isMobileViewport()) {
-        setSidebarCollapsed(true);
-        setActiveExtRightColumnId(null);
-        setFlowColumnOpen(false);
-        setRosterColumnOpen(false);
+  const handleInspectAgent = useCallback(
+    async (
+      agentId: string,
+      sessionId?: string,
+      autoOpenPane = true
+    ) => {
+      const nextSessionId = sessionId || null;
+      const sameSelection =
+        inspectedAgentIdRef.current === agentId &&
+        inspectedSessionIdRef.current === nextSessionId &&
+        inspectorColumnOpenRef.current ===
+          (autoOpenPane ? true : inspectorColumnOpenRef.current);
+      inspectedAgentIdRef.current = agentId;
+      inspectedSessionIdRef.current = nextSessionId;
+      setInspectedAgentId(agentId);
+      setInspectedSessionId(nextSessionId);
+      liveStreamStore.reset();
+      if (autoOpenPane) {
+        if (isMobileViewport()) {
+          setSidebarCollapsed(true);
+          setActiveExtRightColumnId(null);
+          setFlowColumnOpen(false);
+          setRosterColumnOpen(false);
+        }
+        setInspectorColumnOpen(true);
       }
-      setInspectorColumnOpen(true);
-    }
-    if (sameSelection && inspectorColumnOpenRef.current) {
-      await refreshInspectorSnapshot(agentId, nextSessionId);
-      subscribeInspectorStream(agentId, nextSessionId);
-    }
-  };
+      if (sameSelection && inspectorColumnOpenRef.current) {
+        await refreshInspectorSnapshot(agentId, nextSessionId);
+        subscribeInspectorStream(agentId, nextSessionId);
+      }
+    },
+    [liveStreamStore, refreshInspectorSnapshot, subscribeInspectorStream]
+  );
 
-  const handleToggleMention = (name: string) => {
+  const handleToggleMention = useCallback((name: string) => {
+    const agents = currentDetailRef.current?.agents || [];
+    const wasLeadAuto = leadAutoPreselectedRef.current;
+    if (wasLeadAuto) {
+      setLeadAutoPreselected(false);
+    }
     setSelectedMentions((prev) => {
       const next = new Set(prev);
-      const agents = currentDetail?.agents || [];
-      if (leadAutoPreselected) {
-        setLeadAutoPreselected(false);
-        if (agents.length > 0 && name !== agents[0].name) {
-          next.clear();
-          next.add(name);
-          return next;
-        }
+      if (wasLeadAuto && agents.length > 0 && name !== agents[0].name) {
+        next.clear();
+        next.add(name);
+        return next;
       }
       if (next.has(name)) next.delete(name);
       else next.add(name);
       return next;
     });
-  };
+  }, []);
 
-  const handleSendMessage = async (content: string, isRealtime: boolean) => {
-    if (!currentDetail || !currentRoomId) return;
-    const lowerContent = content.toLowerCase();
-    const hasInlineMention =
-      content.includes('@') &&
-      (['manager', ...currentDetail.agents.map((a) => a.name.toLowerCase())].some(
-        (name) => {
-          const needle = `@${name}`;
-          const idx = lowerContent.indexOf(needle);
-          if (idx === -1) return false;
-          const nextCh = content.slice(idx + needle.length, idx + needle.length + 1);
-          return !nextCh || /[\s,，:：;；!?！？()（）\[\]{}<>]/.test(nextCh);
-        }
-      ) || content.trimStart().startsWith('@'));
-    const mentions =
-      leadAutoPreselected && hasInlineMention
-        ? []
-        : Array.from(selectedMentions);
+  const handleSendMessage = useCallback(
+    async (content: string, isRealtime: boolean) => {
+      const detail = currentDetailRef.current;
+      const roomId = currentRoomIdRef.current;
+      if (!detail || !roomId) return;
+      const lowerContent = content.toLowerCase();
+      const hasInlineMention =
+        content.includes('@') &&
+        (['manager', ...detail.agents.map((a) => a.name.toLowerCase())].some(
+          (name) => {
+            const needle = `@${name}`;
+            const idx = lowerContent.indexOf(needle);
+            if (idx === -1) return false;
+            const nextCh = content.slice(
+              idx + needle.length,
+              idx + needle.length + 1
+            );
+            return !nextCh || /[\s,，:：;；!?！？()（）\[\]{}<>]/.test(nextCh);
+          }
+        ) || content.trimStart().startsWith('@'));
+      const mentions =
+        leadAutoPreselectedRef.current && hasInlineMention
+          ? []
+          : Array.from(selectedMentionsRef.current);
 
-    await apiFetch(`/api/v1/rooms/${currentRoomId}/messages`, {
-      method: 'POST',
-      body: JSON.stringify({
-        sender_name: principal?.display_name || 'Human',
-        content,
-        mentions,
-        is_realtime: isRealtime,
-      }),
-    });
-    if (currentDetail.agents.length > 0) {
-      setSelectedMentions(new Set([currentDetail.agents[0].name]));
-      setLeadAutoPreselected(true);
-    }
-  };
-
-  const handleUploadTempFile = async (file: File): Promise<UploadedTempAttachment> => {
-    if (!currentRoomId) {
-      throw new Error('请先选择聊天室');
-    }
-    const fname = file.name || `upload-${Date.now()}.bin`;
-    const q = `?filename=${encodeURIComponent(fname)}&sub_dir=uploads&dedupe=1`;
-    const headers: Record<string, string> = {
-      'Content-Type': file.type || 'application/octet-stream',
-    };
-    if (authToken) {
-      headers['Authorization'] = `Bearer ${authToken}`;
-    }
-    const res = await fetch(
-      `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(currentRoomId)}/upload-raw${q}`,
-      {
-        method: 'PUT',
-        headers,
-        body: file,
+      await apiFetch(`/api/v1/rooms/${roomId}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({
+          sender_name: principalRef.current?.display_name || 'Human',
+          content,
+          mentions,
+          is_realtime: isRealtime,
+        }),
+      });
+      if (detail.agents.length > 0) {
+        setSelectedMentions(new Set([detail.agents[0].name]));
+        setLeadAutoPreselected(true);
       }
-    );
-    if (!res.ok) {
-      const errText = await res.text();
-      pushApiError(
-        'PUT',
-        `/api/v1/ext/workspace_fs/rooms/${currentRoomId}/upload-raw`,
-        res.status,
-        errText || `HTTP ${res.status}`
+    },
+    [apiFetch]
+  );
+
+  const handleUploadTempFile = useCallback(
+    async (file: File): Promise<UploadedTempAttachment> => {
+      const roomId = currentRoomIdRef.current;
+      if (!roomId) {
+        throw new Error('请先选择聊天室');
+      }
+      const fname = file.name || `upload-${Date.now()}.bin`;
+      const q = `?filename=${encodeURIComponent(fname)}&sub_dir=uploads&dedupe=1`;
+      const headers: Record<string, string> = {
+        'Content-Type': file.type || 'application/octet-stream',
+      };
+      if (authTokenRef.current) {
+        headers['Authorization'] = `Bearer ${authTokenRef.current}`;
+      }
+      const res = await fetch(
+        `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(roomId)}/upload-raw${q}`,
+        {
+          method: 'PUT',
+          headers,
+          body: file,
+        }
       );
-      throw new Error(errText || `HTTP ${res.status}`);
-    }
-    const data = await res.json();
-    window.dispatchEvent(
-      new CustomEvent('ragents-workspace-fs-uploaded', {
-        detail: { roomId: currentRoomId, ...data },
-      })
-    );
-    return data;
-  };
+      if (!res.ok) {
+        const errText = await res.text();
+        pushApiError(
+          'PUT',
+          `/api/v1/ext/workspace_fs/rooms/${roomId}/upload-raw`,
+          res.status,
+          errText || `HTTP ${res.status}`
+        );
+        throw new Error(errText || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      window.dispatchEvent(
+        new CustomEvent('ragents-workspace-fs-uploaded', {
+          detail: { roomId, ...data },
+        })
+      );
+      return data;
+    },
+    [pushApiError]
+  );
+
+  const handleRetryAgent = useCallback(
+    async (agentId: string, dismissMsgSeq?: number) => {
+      await apiFetch(`/api/v1/agents/${encodeURIComponent(agentId)}/retry`, {
+        method: 'POST',
+        body: JSON.stringify({ dismiss_msg_seq: dismissMsgSeq ?? null }),
+      });
+      if (dismissMsgSeq) {
+        setCurrentDetail((prev) =>
+          prev
+            ? {
+                ...prev,
+                messages: prev.messages.filter(
+                  (m) => m.msg_seq !== dismissMsgSeq
+                ),
+              }
+            : prev
+        );
+      }
+      if (inspectedAgentIdRef.current === agentId) {
+        await refreshInspectorSnapshot(
+          agentId,
+          inspectedSessionIdRef.current,
+          false
+        );
+      }
+    },
+    [apiFetch, refreshInspectorSnapshot]
+  );
+
+  const handleInspectAgentOpen = useCallback(
+    (id: string) => handleInspectAgent(id, undefined, true),
+    [handleInspectAgent]
+  );
+
+  const handleSelectInspectorAgent = useCallback(
+    (id: string, sessId?: string) => handleInspectAgent(id, sessId, true),
+    [handleInspectAgent]
+  );
+
+  const handleOpenRecruitModal = useCallback(() => setActiveModal('recruit'), []);
+
+  const handleCloseFlowColumn = useCallback(() => setFlowColumnOpen(false), []);
+  const handleCloseRosterColumn = useCallback(() => setRosterColumnOpen(false), []);
+  const handleCloseInspectorColumn = useCallback(
+    () => setInspectorColumnOpen(false),
+    []
+  );
+
+  const handleOpenAddAgentModal = useCallback(async () => {
+    await refreshAvailableModels();
+    setActiveModal('addAgent');
+  }, [refreshAvailableModels]);
+
+  const handleOpenManagerSettings = useCallback(async () => {
+    await refreshAvailableModels();
+    setActiveModal('managerSettings');
+  }, [refreshAvailableModels]);
+
+  const handleRemoveAgent = useCallback(
+    async (agentId: string) => {
+      const snap = inspectorSnapRef.current;
+      const targetRoomId =
+        (snap?.agent.agent_id === agentId ? snap.agent.room_id : null) ||
+        currentRoomIdRef.current;
+      if (!targetRoomId) return;
+      await apiFetch(`/api/v1/rooms/${targetRoomId}/agents/${agentId}`, {
+        method: 'DELETE',
+      });
+    },
+    [apiFetch]
+  );
+
+  const handleUpdateAgentConfig = useCallback(
+    async (agentId: string, patch: any) => {
+      const snap = inspectorSnapRef.current;
+      const targetRoomId =
+        (snap?.agent.agent_id === agentId ? snap.agent.room_id : null) ||
+        currentRoomIdRef.current;
+      if (!targetRoomId) return;
+      const updated = await apiFetch(
+        `/api/v1/rooms/${targetRoomId}/agents/${agentId}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify(patch),
+        }
+      );
+      setInspectorSnap((prev) =>
+        prev && prev.agent.agent_id === agentId ? { ...prev, agent: updated } : prev
+      );
+      setCurrentDetail((prev) => {
+        if (!prev) return prev;
+        if (prev.manager_agent?.agent_id === agentId) {
+          return { ...prev, manager_agent: updated };
+        }
+        return {
+          ...prev,
+          agents: prev.agents.map((a) => (a.agent_id === agentId ? updated : a)),
+        };
+      });
+      if (inspectedAgentIdRef.current === agentId) {
+        await refreshInspectorSnapshot(
+          agentId,
+          inspectedSessionIdRef.current,
+          false
+        );
+      }
+    },
+    [apiFetch, refreshInspectorSnapshot]
+  );
+
+  const handleResolvePermission = useCallback(
+    async (
+      actId: string,
+      reqId: string,
+      decision: string,
+      overridePath: string | null
+    ) => {
+      const targetAgentId = inspectedAgentIdRef.current;
+      if (!targetAgentId) return;
+      await apiFetch(`/api/v1/agents/${targetAgentId}/approve`, {
+        method: 'POST',
+        body: JSON.stringify({
+          activation_id: actId,
+          request_id: reqId,
+          decision,
+          override_path: overridePath,
+        }),
+      });
+      await refreshInspectorSnapshot(targetAgentId, inspectedSessionIdRef.current);
+    },
+    [apiFetch, refreshInspectorSnapshot]
+  );
+
+  const handleCancelAgent = useCallback(
+    async (agentId: string) => {
+      await apiFetch(`/api/v1/agents/${agentId}/cancel`, { method: 'POST' });
+    },
+    [apiFetch]
+  );
+
+  const handleRevokePermissionRule = useCallback(
+    async (agentId: string, rule: any, sessionId?: string) => {
+      const updatedSummary = await apiFetch(
+        `/api/v1/agents/${encodeURIComponent(agentId)}/permissions/revoke`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            scope: rule.scope,
+            category: rule.category,
+            list_kind: rule.list_kind,
+            rule: rule.rule,
+            session_id: sessionId || null,
+          }),
+        }
+      );
+      setInspectorSnap((prev) =>
+        prev
+          ? {
+              ...prev,
+              permission_summary: updatedSummary,
+            }
+          : prev
+      );
+    },
+    [apiFetch]
+  );
+
+  const handleToggleSchedule = useCallback(
+    async (agentId: string, scheduleId: string, enabled: boolean) => {
+      const updated = await apiFetch(
+        `/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ enabled }),
+        }
+      );
+      setInspectorSnap((prev) =>
+        prev && prev.agent.agent_id === agentId
+          ? {
+              ...prev,
+              schedules: (prev.schedules || []).map((s) =>
+                s.schedule_id === scheduleId ? updated : s
+              ),
+            }
+          : prev
+      );
+    },
+    [apiFetch]
+  );
+
+  const handleRunScheduleNow = useCallback(
+    async (agentId: string, scheduleId: string) => {
+      const updated = await apiFetch(
+        `/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}/run`,
+        {
+          method: 'POST',
+        }
+      );
+      setInspectorSnap((prev) =>
+        prev && prev.agent.agent_id === agentId
+          ? {
+              ...prev,
+              schedules: (prev.schedules || []).map((s) =>
+                s.schedule_id === scheduleId ? updated : s
+              ),
+            }
+          : prev
+      );
+    },
+    [apiFetch]
+  );
+
+  const handleDeleteSchedule = useCallback(
+    async (agentId: string, scheduleId: string) => {
+      const remaining = await apiFetch(
+        `/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`,
+        {
+          method: 'DELETE',
+        }
+      );
+      setInspectorSnap((prev) =>
+        prev && prev.agent.agent_id === agentId
+          ? {
+              ...prev,
+              schedules: Array.isArray(remaining)
+                ? remaining
+                : (prev.schedules || []).filter(
+                    (s) => s.schedule_id !== scheduleId
+                  ),
+            }
+          : prev
+      );
+    },
+    [apiFetch]
+  );
+
+  const handleWithdrawQueuedMessage = useCallback(
+    async (agentId: string, msgSeq: number) => {
+      const res = await apiFetch(
+        `/api/v1/agents/${agentId}/queue/${msgSeq}/withdraw`,
+        { method: 'POST' }
+      );
+      if (res?.message_queues) {
+        setInspectorSnap((prev) =>
+          prev && prev.agent.agent_id === agentId
+            ? { ...prev, message_queues: res.message_queues }
+            : prev
+        );
+      }
+      setCurrentDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              messages: prev.messages.filter((m) => m.msg_seq !== msgSeq),
+            }
+          : prev
+      );
+      if (
+        res?.withdrawn_message?.sender_kind === 'human' &&
+        res?.withdrawn_message?.content
+      ) {
+        setRestoredDraft({
+          text: String(res.withdrawn_message.content),
+          seq: Date.now(),
+        });
+      }
+    },
+    [apiFetch]
+  );
 
   const handleUpdateRoomControls = async (patch: Partial<Room>) => {
     if (!currentRoomId || !currentDetail) return;
@@ -1122,29 +1567,9 @@ export const App: React.FC = () => {
           onToggleMention={handleToggleMention}
           onSendMessage={handleSendMessage}
           onUploadTempFile={handleUploadTempFile}
-          onRetryAgent={async (agentId, dismissMsgSeq) => {
-            await apiFetch(`/api/v1/agents/${encodeURIComponent(agentId)}/retry`, {
-              method: 'POST',
-              body: JSON.stringify({ dismiss_msg_seq: dismissMsgSeq ?? null }),
-            });
-            if (dismissMsgSeq) {
-              setCurrentDetail((prev) =>
-                prev
-                  ? {
-                      ...prev,
-                      messages: prev.messages.filter(
-                        (m) => m.msg_seq !== dismissMsgSeq
-                      ),
-                    }
-                  : prev
-              );
-            }
-            if (inspectedAgentId === agentId) {
-              await refreshInspectorSnapshot(agentId, inspectedSessionId, false);
-            }
-          }}
-          onInspectAgent={(id) => handleInspectAgent(id, undefined, true)}
-          onOpenRecruitModal={() => setActiveModal('recruit')}
+          onRetryAgent={handleRetryAgent}
+          onInspectAgent={handleInspectAgentOpen}
+          onOpenRecruitModal={handleOpenRecruitModal}
           restoredDraft={restoredDraft}
         />
       </main>
@@ -1186,12 +1611,12 @@ export const App: React.FC = () => {
       {/* 3. Right Three Independent Vertical Columns (流程轨迹竖列 + 群成员竖列 + 具体 Agent 透视竖列) */}
       <RightInspectorPane
         flowColumnOpen={flowColumnOpen}
-        onCloseFlowColumn={() => setFlowColumnOpen(false)}
+        onCloseFlowColumn={handleCloseFlowColumn}
         flowLogs={currentDetail?.flow_logs || []}
         rosterColumnOpen={rosterColumnOpen}
-        onCloseRosterColumn={() => setRosterColumnOpen(false)}
+        onCloseRosterColumn={handleCloseRosterColumn}
         inspectorColumnOpen={inspectorColumnOpen}
-        onCloseInspectorColumn={() => setInspectorColumnOpen(false)}
+        onCloseInspectorColumn={handleCloseInspectorColumn}
         room={currentDetail?.room || null}
         managerAgent={currentDetail?.manager_agent || null}
         agents={currentDetail?.agents || []}
@@ -1200,197 +1625,21 @@ export const App: React.FC = () => {
         availableModels={availableModels}
         onRefreshModels={handleForceRefreshModels}
         refreshingModels={refreshingModels}
-        liveReasoningBuffer={liveReasoningBuffer}
-        liveStreamBuffer={liveStreamBuffer}
-        onSelectAgent={(id, sessId) => handleInspectAgent(id, sessId, true)}
-        onOpenRecruitModal={() => setActiveModal('recruit')}
-        onOpenAddAgentModal={async () => {
-          await refreshAvailableModels();
-          setActiveModal('addAgent');
-        }}
-        onOpenManagerSettings={async () => {
-          await refreshAvailableModels();
-          setActiveModal('managerSettings');
-        }}
-        onRemoveAgent={async (agentId) => {
-          const targetRoomId =
-            (inspectorSnap?.agent.agent_id === agentId
-              ? inspectorSnap.agent.room_id
-              : null) || currentRoomId;
-          if (!targetRoomId) return;
-          await apiFetch(`/api/v1/rooms/${targetRoomId}/agents/${agentId}`, {
-            method: 'DELETE',
-          });
-        }}
-        onUpdateAgentConfig={async (agentId, patch) => {
-          const targetRoomId =
-            (inspectorSnap?.agent.agent_id === agentId
-              ? inspectorSnap.agent.room_id
-              : null) || currentRoomId;
-          if (!targetRoomId) return;
-          const updated = await apiFetch(
-            `/api/v1/rooms/${targetRoomId}/agents/${agentId}`,
-            {
-              method: 'PATCH',
-              body: JSON.stringify(patch),
-            }
-          );
-          setInspectorSnap((prev) =>
-            prev && prev.agent.agent_id === agentId
-              ? { ...prev, agent: updated }
-              : prev
-          );
-          setCurrentDetail((prev) => {
-            if (!prev) return prev;
-            if (prev.manager_agent?.agent_id === agentId) {
-              return { ...prev, manager_agent: updated };
-            }
-            return {
-              ...prev,
-              agents: prev.agents.map((a) =>
-                a.agent_id === agentId ? updated : a
-              ),
-            };
-          });
-          if (inspectedAgentId === agentId) {
-            await refreshInspectorSnapshot(agentId, inspectedSessionId, false);
-          }
-        }}
-        onResolvePermission={async (actId, reqId, decision, overridePath) => {
-          if (!inspectedAgentId) return;
-          await apiFetch(`/api/v1/agents/${inspectedAgentId}/approve`, {
-            method: 'POST',
-            body: JSON.stringify({
-              activation_id: actId,
-              request_id: reqId,
-              decision,
-              override_path: overridePath,
-            }),
-          });
-          await refreshInspectorSnapshot(inspectedAgentId, inspectedSessionId);
-        }}
-        onCancelAgent={async (agentId) => {
-          await apiFetch(`/api/v1/agents/${agentId}/cancel`, { method: 'POST' });
-        }}
-        onRetryAgent={async (agentId) => {
-          await apiFetch(`/api/v1/agents/${encodeURIComponent(agentId)}/retry`, {
-            method: 'POST',
-            body: JSON.stringify({}),
-          });
-          if (inspectedAgentId === agentId) {
-            await refreshInspectorSnapshot(agentId, inspectedSessionId, false);
-          }
-        }}
-        onRevokePermissionRule={async (agentId, rule, sessionId) => {
-          const updatedSummary = await apiFetch(
-            `/api/v1/agents/${encodeURIComponent(agentId)}/permissions/revoke`,
-            {
-              method: 'POST',
-              body: JSON.stringify({
-                scope: rule.scope,
-                category: rule.category,
-                list_kind: rule.list_kind,
-                rule: rule.rule,
-                session_id: sessionId || null,
-              }),
-            }
-          );
-          setInspectorSnap((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  permission_summary: updatedSummary,
-                }
-              : prev
-          );
-        }}
-        onToggleSchedule={async (agentId, scheduleId, enabled) => {
-          const updated = await apiFetch(
-            `/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`,
-            {
-              method: 'PATCH',
-              body: JSON.stringify({ enabled }),
-            }
-          );
-          setInspectorSnap((prev) =>
-            prev && prev.agent.agent_id === agentId
-              ? {
-                  ...prev,
-                  schedules: (prev.schedules || []).map((s) =>
-                    s.schedule_id === scheduleId ? updated : s
-                  ),
-                }
-              : prev
-          );
-        }}
-        onRunScheduleNow={async (agentId, scheduleId) => {
-          const updated = await apiFetch(
-            `/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}/run`,
-            {
-              method: 'POST',
-            }
-          );
-          setInspectorSnap((prev) =>
-            prev && prev.agent.agent_id === agentId
-              ? {
-                  ...prev,
-                  schedules: (prev.schedules || []).map((s) =>
-                    s.schedule_id === scheduleId ? updated : s
-                  ),
-                }
-              : prev
-          );
-        }}
-        onDeleteSchedule={async (agentId, scheduleId) => {
-          const remaining = await apiFetch(
-            `/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`,
-            {
-              method: 'DELETE',
-            }
-          );
-          setInspectorSnap((prev) =>
-            prev && prev.agent.agent_id === agentId
-              ? {
-                  ...prev,
-                  schedules: Array.isArray(remaining)
-                    ? remaining
-                    : (prev.schedules || []).filter(
-                        (s) => s.schedule_id !== scheduleId
-                      ),
-                }
-              : prev
-          );
-        }}
-        onWithdrawQueuedMessage={async (agentId, msgSeq) => {
-          const res = await apiFetch(
-            `/api/v1/agents/${agentId}/queue/${msgSeq}/withdraw`,
-            { method: 'POST' }
-          );
-          if (res?.message_queues) {
-            setInspectorSnap((prev) =>
-              prev && prev.agent.agent_id === agentId
-                ? { ...prev, message_queues: res.message_queues }
-                : prev
-            );
-          }
-          setCurrentDetail((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  messages: prev.messages.filter((m) => m.msg_seq !== msgSeq),
-                }
-              : prev
-          );
-          if (
-            res?.withdrawn_message?.sender_kind === 'human' &&
-            res?.withdrawn_message?.content
-          ) {
-            setRestoredDraft({
-              text: String(res.withdrawn_message.content),
-              seq: Date.now(),
-            });
-          }
-        }}
+        liveStreamStore={liveStreamStore}
+        onSelectAgent={handleSelectInspectorAgent}
+        onOpenRecruitModal={handleOpenRecruitModal}
+        onOpenAddAgentModal={handleOpenAddAgentModal}
+        onOpenManagerSettings={handleOpenManagerSettings}
+        onRemoveAgent={handleRemoveAgent}
+        onUpdateAgentConfig={handleUpdateAgentConfig}
+        onResolvePermission={handleResolvePermission}
+        onCancelAgent={handleCancelAgent}
+        onRetryAgent={handleRetryAgent}
+        onRevokePermissionRule={handleRevokePermissionRule}
+        onToggleSchedule={handleToggleSchedule}
+        onRunScheduleNow={handleRunScheduleNow}
+        onDeleteSchedule={handleDeleteSchedule}
+        onWithdrawQueuedMessage={handleWithdrawQueuedMessage}
       />
 
       {/* 4. Modals */}

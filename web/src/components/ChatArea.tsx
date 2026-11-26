@@ -26,6 +26,8 @@ import {
 } from 'lucide-react';
 import { Room, RoomAgent, ChatMessage, SendShortcutMode } from '../types';
 import { MarkdownRenderer } from './MarkdownRenderer';
+import { copyTextToClipboard } from '../utils/clipboard';
+import { useStickyAutoScroll } from '../hooks/useStickyAutoScroll';
 
 export interface UploadedTempAttachment {
   dist_id?: string;
@@ -127,7 +129,7 @@ function extractAttachmentsFromText(
 
 const MessageAttachmentsGrid: React.FC<{
   attachments: ExtractedAttachment[];
-}> = ({ attachments }) => {
+}> = React.memo(({ attachments }) => {
   if (attachments.length === 0) return null;
   return (
     <div className="flex flex-wrap gap-2 pt-1">
@@ -169,7 +171,8 @@ const MessageAttachmentsGrid: React.FC<{
       })}
     </div>
   );
-};
+});
+MessageAttachmentsGrid.displayName = 'MessageAttachmentsGrid';
 
 function stripLeadingRedundantMentions(content: string, mentions: string[]): string {
   let rest = String(content || '').trimStart();
@@ -612,503 +615,342 @@ const ChatMessageRow: React.FC<ChatMessageRowProps> = React.memo(
 );
 ChatMessageRow.displayName = 'ChatMessageRow';
 
-export const ChatArea: React.FC<ChatAreaProps> = ({
-  room,
-  agents,
-  messages,
-  selectedMentions,
-  sendShortcutMode,
-  onChangeSendShortcutMode,
-  onToggleMention,
-  onSendMessage,
-  onUploadTempFile,
-  onRetryAgent,
-  onInspectAgent,
-  onOpenRecruitModal,
-  restoredDraft,
-}) => {
-  const [inputText, setInputText] = useState('');
-  const [isRealtimeMsg, setIsRealtimeMsg] = useState(false); // 默认为非实时消息
-  const [mentionBarOpen, setMentionBarOpen] = useState(false);
-  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachmentItem[]>([]);
-  const [uploadingAttachments, setUploadingAttachments] = useState(false);
-  const [roomDistributingFiles, setRoomDistributingFiles] = useState<DistributingFileStatus[]>([]);
-  const [expandedMetaSeqs, setExpandedMetaSeqs] = useState<Set<number>>(new Set());
-  const [rawMessageSeqs, setRawMessageSeqs] = useState<Set<number>>(new Set());
-  const [copiedMessageSeq, setCopiedMessageSeq] = useState<number | null>(null);
-  const [dismissedSystemKeys, setDismissedSystemKeys] = useState<Set<string>>(() => {
-    try {
-      const raw = localStorage.getItem('ragents_dismissed_system_msgs');
-      if (raw) {
-        const arr = JSON.parse(raw);
-        if (Array.isArray(arr)) return new Set(arr.map(String));
-      }
-    } catch (_) {}
-    return new Set();
-  });
+interface ChatComposerProps {
+  room: Room | null;
+  agents: RoomAgent[];
+  selectedMentions: Set<string>;
+  sendShortcutMode: SendShortcutMode;
+  onChangeSendShortcutMode: (mode: SendShortcutMode) => void;
+  onToggleMention: (name: string) => void;
+  onSendMessage: (content: string, isRealtime: boolean) => void;
+  onUploadTempFile?: (file: File) => Promise<UploadedTempAttachment>;
+  onOpenRecruitModal: () => void;
+  onSendSubmitted: () => void;
+  restoredDraft?: { text: string; seq: number } | null;
+}
 
-  const dismissSystemMessage = useCallback((sysKey: string) => {
-    setDismissedSystemKeys((prev) => {
-      const next = new Set(prev);
-      next.add(sysKey);
-      try {
-        localStorage.setItem(
-          'ragents_dismissed_system_msgs',
-          JSON.stringify(Array.from(next).slice(-500))
-        );
-      } catch (_) {}
-      return next;
-    });
-  }, []);
-  const [pinnedToBottom, setPinnedToBottom] = useState(true);
-  const [showJumpBottom, setShowJumpBottom] = useState(false);
+const ChatComposer: React.FC<ChatComposerProps> = React.memo(
+  ({
+    room,
+    agents,
+    selectedMentions,
+    sendShortcutMode,
+    onChangeSendShortcutMode,
+    onToggleMention,
+    onSendMessage,
+    onUploadTempFile,
+    onOpenRecruitModal,
+    onSendSubmitted,
+    restoredDraft,
+  }) => {
+    const [inputText, setInputText] = useState('');
+    const [isRealtimeMsg, setIsRealtimeMsg] = useState(false);
+    const [mentionBarOpen, setMentionBarOpen] = useState(false);
+    const [pendingAttachments, setPendingAttachments] = useState<PendingAttachmentItem[]>([]);
+    const [uploadingAttachments, setUploadingAttachments] = useState(false);
+    const [roomDistributingFiles, setRoomDistributingFiles] = useState<DistributingFileStatus[]>([]);
 
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const isComposingRef = useRef(false);
-  const lastCompositionEndTimeRef = useRef(0);
-  const lastScrollTopRef = useRef(0);
-  const pinnedToBottomRef = useRef(true);
+    const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+    const fileInputRef = useRef<HTMLInputElement | null>(null);
+    const isComposingRef = useRef(false);
+    const lastCompositionEndTimeRef = useRef(0);
 
-  const scrollToBottom = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-    lastScrollTopRef.current = el.scrollTop;
-    pinnedToBottomRef.current = true;
-    setPinnedToBottom(true);
-    setShowJumpBottom(false);
-    requestAnimationFrame(() => {
-      const cur = scrollRef.current;
-      if (cur && pinnedToBottomRef.current) {
-        cur.scrollTop = cur.scrollHeight;
-        lastScrollTopRef.current = cur.scrollTop;
-      }
-    });
-  };
+    useEffect(() => {
+      if (!restoredDraft || !restoredDraft.text) return;
+      setInputText((prev) =>
+        prev.trim() ? `${prev}\n${restoredDraft.text}` : restoredDraft.text
+      );
+      requestAnimationFrame(() => {
+        textareaRef.current?.focus();
+      });
+    }, [restoredDraft?.seq]);
 
-  useEffect(() => {
-    pinnedToBottomRef.current = true;
-    scrollToBottom();
-  }, [room?.room_id]);
-
-  useEffect(() => {
-    if (!restoredDraft || !restoredDraft.text) return;
-    setInputText((prev) =>
-      prev.trim() ? `${prev}\n${restoredDraft.text}` : restoredDraft.text
-    );
-    requestAnimationFrame(() => {
-      textareaRef.current?.focus();
-    });
-  }, [restoredDraft?.seq]);
-
-  useEffect(() => {
-    if (pinnedToBottomRef.current || pinnedToBottom) {
-      scrollToBottom();
-    } else {
-      setShowJumpBottom(true);
-    }
-  }, [messages.length, messages[messages.length - 1]?.msg_seq]);
-
-  const handleScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    const scrolledUp = el.scrollTop < lastScrollTopRef.current - 4;
-    lastScrollTopRef.current = el.scrollTop;
-
-    if (distanceFromBottom <= 56) {
-      pinnedToBottomRef.current = true;
-      setPinnedToBottom(true);
-      setShowJumpBottom(false);
-    } else if (scrolledUp) {
-      pinnedToBottomRef.current = false;
-      setPinnedToBottom(false);
-    }
-  };
-
-  const toggleMsgMeta = useCallback((seq: number) => {
-    setExpandedMetaSeqs((prev) => {
-      const next = new Set(prev);
-      if (next.has(seq)) next.delete(seq);
-      else next.add(seq);
-      return next;
-    });
-  }, []);
-
-  const toggleRawMessage = useCallback((seq: number) => {
-    setRawMessageSeqs((prev) => {
-      const next = new Set(prev);
-      if (next.has(seq)) next.delete(seq);
-      else next.add(seq);
-      return next;
-    });
-  }, []);
-
-  const copyMessageContent = useCallback((seq: number, text: string) => {
-    navigator.clipboard
-      ?.writeText(text)
-      .then(() => {
-        setCopiedMessageSeq(seq);
-        window.setTimeout(() => {
-          setCopiedMessageSeq((cur) => (cur === seq ? null : cur));
-        }, 1500);
-      })
-      .catch(() => {});
-  }, []);
-
-  const startUploadForPendingItem = async (item: PendingAttachmentItem) => {
-    if (!onUploadTempFile) return;
-    setPendingAttachments((prev) =>
-      prev.map((x) =>
-        x.id === item.id ? { ...x, status: 'uploading_server', error: undefined } : x
-      )
-    );
-    try {
-      const uploaded = await onUploadTempFile(item.file);
-      const isReady = uploaded.distribute_phase === 'completed';
-      const isFailed = uploaded.distribute_phase === 'failed';
+    const startUploadForPendingItem = async (item: PendingAttachmentItem) => {
+      if (!onUploadTempFile) return;
       setPendingAttachments((prev) =>
         prev.map((x) =>
-          x.id === item.id
-            ? {
-                ...x,
-                uploaded,
-                status: isReady ? 'ready' : isFailed ? 'failed' : 'distributing_node',
-                distributedBytes: uploaded.distributed_bytes ?? 0,
-                totalBytes: uploaded.size ?? item.file.size,
-              }
-            : x
+          x.id === item.id ? { ...x, status: 'uploading_server', error: undefined } : x
         )
       );
-    } catch (err: any) {
-      setPendingAttachments((prev) =>
-        prev.map((x) =>
-          x.id === item.id
-            ? { ...x, status: 'failed', error: err?.message || '上传失败' }
-            : x
-        )
-      );
-    }
-  };
-
-  useEffect(() => {
-    if (!room?.room_id) {
-      setRoomDistributingFiles([]);
-      return;
-    }
-    let cancelled = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
-
-    const fetchStatus = async () => {
       try {
-        const headers: Record<string, string> = {};
-        const tok = localStorage.getItem('ragents_auth_token');
-        if (tok) headers['Authorization'] = `Bearer ${tok}`;
-        const res = await fetch(
-          `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(room.room_id)}/distribute-status`,
-          { headers }
-        );
-        if (!res.ok || cancelled) return;
-        const data = await res.json();
-        const list: DistributingFileStatus[] = data.distributing_files || [];
-        if (cancelled) return;
-        setRoomDistributingFiles(list.filter((d) => d.phase !== 'completed'));
-
-        if (list.length > 0) {
-          const byId = new Map(list.map((d) => [d.dist_id, d]));
-          setPendingAttachments((prev) =>
-            prev.map((item) => {
-              const distId = item.uploaded?.dist_id;
-              if (!distId) return item;
-              const st = byId.get(distId);
-              if (!st) {
-                return item.status === 'distributing_node'
-                  ? { ...item, status: 'ready', distributedBytes: item.totalBytes }
-                  : item;
-              }
-              return {
-                ...item,
-                status:
-                  st.phase === 'completed'
-                    ? 'ready'
-                    : st.phase === 'failed'
-                    ? 'failed'
-                    : 'distributing_node',
-                distributedBytes: st.distributed_bytes,
-                totalBytes: st.total_bytes || item.file.size,
-                error: st.error,
-              };
-            })
-          );
-        }
-
-        const hasActive = list.some((d) => d.phase === 'distributing');
-        if (!hasActive && timer) {
-          clearInterval(timer);
-          timer = null;
-        }
-      } catch (_) {}
-    };
-
-    const ensurePolling = () => {
-      fetchStatus();
-      if (!timer) {
-        timer = setInterval(fetchStatus, 450);
-      }
-    };
-
-    fetchStatus();
-    const onUploaded = (ev: any) => {
-      if (!ev?.detail?.roomId || ev.detail.roomId === room.room_id) {
-        ensurePolling();
-      }
-    };
-    window.addEventListener('ragents-workspace-fs-uploaded', onUploaded);
-    return () => {
-      cancelled = true;
-      if (timer) clearInterval(timer);
-      window.removeEventListener('ragents-workspace-fs-uploaded', onUploaded);
-    };
-  }, [room?.room_id]);
-
-  const retryDistributeOnNode = async (distId: string) => {
-    if (!room?.room_id || !distId) return;
-    const headers: Record<string, string> = {};
-    const tok = localStorage.getItem('ragents_auth_token');
-    if (tok) headers['Authorization'] = `Bearer ${tok}`;
-    await fetch(
-      `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(room.room_id)}/distribute-retry?dist_id=${encodeURIComponent(distId)}`,
-      { method: 'POST', headers }
-    );
-    window.dispatchEvent(
-      new CustomEvent('ragents-workspace-fs-uploaded', {
-        detail: { roomId: room.room_id, dist_id: distId },
-      })
-    );
-  };
-
-  const addFilesToPending = (files: File[]) => {
-    if (!files || files.length === 0) return;
-    const items: PendingAttachmentItem[] = files.map((file) => {
-      const isImage = file.type.startsWith('image/');
-      const ext = file.name.includes('.')
-        ? file.name.slice(file.name.lastIndexOf('.'))
-        : isImage
-        ? '.png'
-        : '.bin';
-      const normalizedFile =
-        !file.name || file.name === 'image.png'
-          ? new File([file], `paste-${Date.now()}${ext}`, { type: file.type })
-          : file;
-      return {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        file: normalizedFile,
-        previewUrl: isImage ? URL.createObjectURL(normalizedFile) : null,
-        isImage,
-        status: 'uploading_server',
-        totalBytes: normalizedFile.size,
-        distributedBytes: 0,
-      };
-    });
-    setPendingAttachments((prev) => [...prev, ...items]);
-    items.forEach((item) => {
-      startUploadForPendingItem(item);
-    });
-  };
-
-  const removePendingAttachment = (id: string) => {
-    setPendingAttachments((prev) => {
-      const target = prev.find((x) => x.id === id);
-      if (target?.previewUrl) {
-        URL.revokeObjectURL(target.previewUrl);
-      }
-      return prev.filter((x) => x.id !== id);
-    });
-  };
-
-  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    const files: File[] = [];
-    for (let i = 0; i < items.length; i += 1) {
-      const item = items[i];
-      if (item.kind === 'file') {
-        const f = item.getAsFile();
-        if (f) files.push(f);
-      }
-    }
-    if (files.length > 0) {
-      e.preventDefault();
-      addFilesToPending(files);
-    }
-  };
-
-  const handleSend = async () => {
-    const trimmed = inputText.trim();
-    if ((!trimmed && pendingAttachments.length === 0) || !room || uploadingAttachments) {
-      return;
-    }
-
-    let attachmentLines: string[] = [];
-    if (pendingAttachments.length > 0 && onUploadTempFile) {
-      setUploadingAttachments(true);
-      try {
-        for (const item of pendingAttachments) {
-          const uploaded = item.uploaded ?? (await onUploadTempFile(item.file));
-          const tagKind = uploaded.is_image || item.isImage ? 'Image' : 'File';
-          attachmentLines.push(`[Attached ${tagKind}: ${uploaded.agent_path}]`);
-        }
-        pendingAttachments.forEach((item) => {
-          if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
-        });
-        setPendingAttachments([]);
-      } catch (_) {
-        setUploadingAttachments(false);
-        return;
-      }
-      setUploadingAttachments(false);
-    }
-
-    const finalContent = [trimmed, ...attachmentLines].filter(Boolean).join('\n');
-    if (!finalContent) return;
-
-    setInputText('');
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-    }
-    setPinnedToBottom(true);
-    onSendMessage(finalContent, isRealtimeMsg);
-  };
-
-  const handleCompositionStart = () => {
-    isComposingRef.current = true;
-  };
-
-  const handleCompositionEnd = () => {
-    isComposingRef.current = false;
-    lastCompositionEndTimeRef.current = performance.now();
-  };
-
-  const handleKeyUp = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' || !isComposingRef.current) {
-      lastCompositionEndTimeRef.current = 0;
-    }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    const nativeEvent = e.nativeEvent;
-    const justEndedComposition =
-      lastCompositionEndTimeRef.current > 0 &&
-      performance.now() - lastCompositionEndTimeRef.current < 100;
-
-    if (
-      nativeEvent.isComposing ||
-      isComposingRef.current ||
-      nativeEvent.keyCode === 229 ||
-      e.keyCode === 229 ||
-      e.key === 'Process' ||
-      justEndedComposition
-    ) {
-      lastCompositionEndTimeRef.current = 0;
-      return;
-    }
-
-    if (e.key === 'Enter') {
-      const isMobileDevice =
-        typeof window !== 'undefined' &&
-        (window.innerWidth < 768 ||
-          Boolean(window.matchMedia?.('(pointer: coarse)').matches));
-      if (isMobileDevice) {
-        // 移动端回车始终换行，通过显式发送按钮发送
-        return;
-      }
-      if (sendShortcutMode === 'enter_send') {
-        if (!e.shiftKey) {
-          e.preventDefault();
-          handleSend();
-        }
-      } else {
-        if (e.shiftKey) {
-          e.preventDefault();
-          handleSend();
-        }
-      }
-    }
-  };
-
-  const agentLookup = useMemo(() => {
-    const map = new Map<string, RoomAgent>();
-    agents.forEach((a) => {
-      map.set(a.agent_id, a);
-      map.set(a.name.toLowerCase(), a);
-    });
-    return map;
-  }, [agents]);
-
-  return (
-    <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden bg-[var(--bg-main)] relative">
-      {/* Scrollable Conversation Timeline */}
-      <div
-        ref={scrollRef}
-        onScroll={handleScroll}
-        className="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 py-6"
-      >
-        <div className="max-w-[780px] mx-auto space-y-6">
-          {messages.length === 0 ? (
-            <div className="py-24 text-center space-y-3">
-              <div className="w-11 h-11 rounded-2xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] flex items-center justify-center mx-auto text-[var(--text-primary)]">
-                <Bot className="w-5 h-5" />
-              </div>
-              <h3 className="text-base font-semibold text-[var(--text-primary)]">
-                开始多智能体协同对话
-              </h3>
-              <p className="text-xs text-[var(--text-muted)] max-w-md mx-auto leading-relaxed">
-                直接发送消息与当前 Agent 协作，或点名 <code className="px-1 py-0.5 rounded bg-[var(--bg-surface)]">@Manager</code> 动态招募更多领域的专家智能体入群。
-              </p>
-            </div>
-          ) : (
-            messages.map((m) => (
-              <ChatMessageRow
-                key={m.msg_seq}
-                message={m}
-                roomId={room?.room_id}
-                agents={agents}
-                agentLookup={agentLookup}
-                isMetaExpanded={expandedMetaSeqs.has(m.msg_seq)}
-                isRawMode={rawMessageSeqs.has(m.msg_seq)}
-                isCopied={copiedMessageSeq === m.msg_seq}
-                isDismissedSystem={
-                  m.sender_kind === 'system' &&
-                  dismissedSystemKeys.has(`${room?.room_id || ''}:${m.msg_seq}`)
+        const uploaded = await onUploadTempFile(item.file);
+        const isReady = uploaded.distribute_phase === 'completed';
+        const isFailed = uploaded.distribute_phase === 'failed';
+        setPendingAttachments((prev) =>
+          prev.map((x) =>
+            x.id === item.id
+              ? {
+                  ...x,
+                  uploaded,
+                  status: isReady ? 'ready' : isFailed ? 'failed' : 'distributing_node',
+                  distributedBytes: uploaded.distributed_bytes ?? 0,
+                  totalBytes: uploaded.size ?? item.file.size,
                 }
-                onToggleMeta={toggleMsgMeta}
-                onToggleRaw={toggleRawMessage}
-                onCopyMessage={copyMessageContent}
-                onDismissSystem={dismissSystemMessage}
-                onRetryAgent={onRetryAgent}
-                onInspectAgent={onInspectAgent}
-              />
-            ))
-          )}
-        </div>
-      </div>
+              : x
+          )
+        );
+      } catch (err: any) {
+        setPendingAttachments((prev) =>
+          prev.map((x) =>
+            x.id === item.id
+              ? { ...x, status: 'failed', error: err?.message || '上传失败' }
+              : x
+          )
+        );
+      }
+    };
 
-      {/* Floating Jump-to-Bottom Pill */}
-      {showJumpBottom && (
-        <div className="absolute bottom-36 sm:bottom-32 left-1/2 -translate-x-1/2 z-10">
-          <button
-            onClick={scrollToBottom}
-            className="px-3.5 py-1.5 rounded-full bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] shadow-md text-xs font-medium flex items-center gap-1.5 cursor-pointer hover:bg-[var(--bg-surface)]"
-          >
-            <ArrowDown className="w-3.5 h-3.5" />
-            <span>有新消息 · 回到最新</span>
-          </button>
-        </div>
-      )}
+    useEffect(() => {
+      if (!room?.room_id) {
+        setRoomDistributingFiles((prev) => (prev.length === 0 ? prev : []));
+        return;
+      }
+      let cancelled = false;
+      let timer: ReturnType<typeof setInterval> | null = null;
 
-      {/* Bottom Floating Codex Composer */}
+      const fetchStatus = async () => {
+        try {
+          const headers: Record<string, string> = {};
+          const tok = localStorage.getItem('ragents_auth_token');
+          if (tok) headers['Authorization'] = `Bearer ${tok}`;
+          const res = await fetch(
+            `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(room.room_id)}/distribute-status`,
+            { headers }
+          );
+          if (!res.ok || cancelled) return;
+          const data = await res.json();
+          const list: DistributingFileStatus[] = data.distributing_files || [];
+          if (cancelled) return;
+          const nextActive = list.filter((d) => d.phase !== 'completed');
+          setRoomDistributingFiles((prev) => {
+            if (prev.length === 0 && nextActive.length === 0) return prev;
+            if (JSON.stringify(prev) === JSON.stringify(nextActive)) return prev;
+            return nextActive;
+          });
+
+          if (list.length > 0) {
+            const byId = new Map(list.map((d) => [d.dist_id, d]));
+            setPendingAttachments((prev) => {
+              if (prev.length === 0) return prev;
+              return prev.map((item) => {
+                const distId = item.uploaded?.dist_id;
+                if (!distId) return item;
+                const st = byId.get(distId);
+                if (!st) {
+                  return item.status === 'distributing_node'
+                    ? { ...item, status: 'ready', distributedBytes: item.totalBytes }
+                    : item;
+                }
+                return {
+                  ...item,
+                  status:
+                    st.phase === 'completed'
+                      ? 'ready'
+                      : st.phase === 'failed'
+                      ? 'failed'
+                      : 'distributing_node',
+                  distributedBytes: st.distributed_bytes,
+                  totalBytes: st.total_bytes || item.file.size,
+                  error: st.error,
+                };
+              });
+            });
+          }
+
+          const hasActive = list.some((d) => d.phase === 'distributing');
+          if (!hasActive && timer) {
+            clearInterval(timer);
+            timer = null;
+          }
+        } catch (_) {}
+      };
+
+      const ensurePolling = () => {
+        fetchStatus();
+        if (!timer) {
+          timer = setInterval(fetchStatus, 450);
+        }
+      };
+
+      fetchStatus();
+      const onUploaded = (ev: any) => {
+        if (!ev?.detail?.roomId || ev.detail.roomId === room.room_id) {
+          ensurePolling();
+        }
+      };
+      window.addEventListener('ragents-workspace-fs-uploaded', onUploaded);
+      return () => {
+        cancelled = true;
+        if (timer) clearInterval(timer);
+        window.removeEventListener('ragents-workspace-fs-uploaded', onUploaded);
+      };
+    }, [room?.room_id]);
+
+    const retryDistributeOnNode = async (distId: string) => {
+      if (!room?.room_id || !distId) return;
+      const headers: Record<string, string> = {};
+      const tok = localStorage.getItem('ragents_auth_token');
+      if (tok) headers['Authorization'] = `Bearer ${tok}`;
+      await fetch(
+        `/api/v1/ext/workspace_fs/rooms/${encodeURIComponent(room.room_id)}/distribute-retry?dist_id=${encodeURIComponent(distId)}`,
+        { method: 'POST', headers }
+      );
+      window.dispatchEvent(
+        new CustomEvent('ragents-workspace-fs-uploaded', {
+          detail: { roomId: room.room_id, dist_id: distId },
+        })
+      );
+    };
+
+    const addFilesToPending = (files: File[]) => {
+      if (!files || files.length === 0) return;
+      const items: PendingAttachmentItem[] = files.map((file) => {
+        const isImage = file.type.startsWith('image/');
+        const ext = file.name.includes('.')
+          ? file.name.slice(file.name.lastIndexOf('.'))
+          : isImage
+          ? '.png'
+          : '.bin';
+        const normalizedFile =
+          !file.name || file.name === 'image.png'
+            ? new File([file], `paste-${Date.now()}${ext}`, { type: file.type })
+            : file;
+        return {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          file: normalizedFile,
+          previewUrl: isImage ? URL.createObjectURL(normalizedFile) : null,
+          isImage,
+          status: 'uploading_server',
+          totalBytes: normalizedFile.size,
+          distributedBytes: 0,
+        };
+      });
+      setPendingAttachments((prev) => [...prev, ...items]);
+      items.forEach((item) => {
+        startUploadForPendingItem(item);
+      });
+    };
+
+    const removePendingAttachment = (id: string) => {
+      setPendingAttachments((prev) => {
+        const target = prev.find((x) => x.id === id);
+        if (target?.previewUrl) {
+          URL.revokeObjectURL(target.previewUrl);
+        }
+        return prev.filter((x) => x.id !== id);
+      });
+    };
+
+    const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const files: File[] = [];
+      for (let i = 0; i < items.length; i += 1) {
+        const item = items[i];
+        if (item.kind === 'file') {
+          const f = item.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length > 0) {
+        e.preventDefault();
+        addFilesToPending(files);
+      }
+    };
+
+    const handleSend = async () => {
+      const trimmed = inputText.trim();
+      if ((!trimmed && pendingAttachments.length === 0) || !room || uploadingAttachments) {
+        return;
+      }
+
+      let attachmentLines: string[] = [];
+      if (pendingAttachments.length > 0 && onUploadTempFile) {
+        setUploadingAttachments(true);
+        try {
+          for (const item of pendingAttachments) {
+            const uploaded = item.uploaded ?? (await onUploadTempFile(item.file));
+            const tagKind = uploaded.is_image || item.isImage ? 'Image' : 'File';
+            attachmentLines.push(`[Attached ${tagKind}: ${uploaded.agent_path}]`);
+          }
+          pendingAttachments.forEach((item) => {
+            if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+          });
+          setPendingAttachments([]);
+        } catch (_) {
+          setUploadingAttachments(false);
+          return;
+        }
+        setUploadingAttachments(false);
+      }
+
+      const finalContent = [trimmed, ...attachmentLines].filter(Boolean).join('\n');
+      if (!finalContent) return;
+
+      setInputText('');
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+      }
+      onSendSubmitted();
+      onSendMessage(finalContent, isRealtimeMsg);
+    };
+
+    const handleCompositionStart = () => {
+      isComposingRef.current = true;
+    };
+
+    const handleCompositionEnd = () => {
+      isComposingRef.current = false;
+      lastCompositionEndTimeRef.current = performance.now();
+    };
+
+    const handleKeyUp = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key === 'Enter' || !isComposingRef.current) {
+        lastCompositionEndTimeRef.current = 0;
+      }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      const nativeEvent = e.nativeEvent;
+      const justEndedComposition =
+        lastCompositionEndTimeRef.current > 0 &&
+        performance.now() - lastCompositionEndTimeRef.current < 100;
+
+      if (
+        nativeEvent.isComposing ||
+        isComposingRef.current ||
+        nativeEvent.keyCode === 229 ||
+        e.keyCode === 229 ||
+        e.key === 'Process' ||
+        justEndedComposition
+      ) {
+        lastCompositionEndTimeRef.current = 0;
+        return;
+      }
+
+      if (e.key === 'Enter') {
+        const isMobileDevice =
+          typeof window !== 'undefined' &&
+          (window.innerWidth < 768 ||
+            Boolean(window.matchMedia?.('(pointer: coarse)').matches));
+        if (isMobileDevice) {
+          return;
+        }
+        if (sendShortcutMode === 'enter_send') {
+          if (!e.shiftKey) {
+            e.preventDefault();
+            handleSend();
+          }
+        } else {
+          if (e.shiftKey) {
+            e.preventDefault();
+            handleSend();
+          }
+        }
+      }
+    };
+
+    return (
       <div className="px-2.5 sm:px-6 pb-[calc(2.25rem+env(safe-area-inset-bottom,0px))] sm:pb-4 pt-1 shrink-0 bg-[var(--bg-main)]">
         <div className="max-w-[780px] mx-auto">
           <div className="rounded-[20px] sm:rounded-[24px] bg-[var(--bg-surface)] border border-[var(--border-default)] shadow-sm focus-within:border-[var(--text-muted)] transition-colors overflow-hidden">
@@ -1211,7 +1053,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               </div>
             )}
 
-            {/* Pending Image / File Attachments Strip (Immediately Staged to Server & Distributed to Node) */}
+            {/* Pending Image / File Attachments Strip */}
             {pendingAttachments.length > 0 && (
               <div className="px-3.5 pt-2.5 pb-1.5 flex items-center flex-wrap gap-2 border-b border-[var(--border-subtle)] bg-[var(--bg-main)]/40">
                 {pendingAttachments.map((item) => {
@@ -1323,7 +1165,6 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             {/* Composer Bottom Toolbar */}
             <div className="px-2.5 sm:px-3 pb-2 sm:pb-2.5 pt-1 flex items-center justify-between gap-1.5 sm:gap-2">
               <div className="flex items-center gap-1 sm:gap-1.5 min-w-0 overflow-x-auto no-scrollbar">
-                {/* Hidden File Input for Image / File Attachment */}
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -1372,7 +1213,6 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   )}
                 </button>
 
-                {/* Message Type Selector: 非实时消息 (default) vs 实时消息 */}
                 <button
                   type="button"
                   onClick={() => setIsRealtimeMsg(!isRealtimeMsg)}
@@ -1400,7 +1240,6 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                   )}
                 </button>
 
-                {/* Send / Newline Shortcut Configuration Selector (Desktop only) */}
                 <div
                   className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[var(--bg-main)] border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)] shrink-0"
                   title="设置发送与换行快捷键模式"
@@ -1432,7 +1271,6 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 </button>
               </div>
 
-              {/* Prominent Send Button (Both Mobile & Desktop) */}
               <button
                 type="button"
                 onClick={handleSend}
@@ -1470,6 +1308,228 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
           </div>
         </div>
       </div>
-    </div>
-  );
-};
+    );
+  }
+);
+ChatComposer.displayName = 'ChatComposer';
+
+export const ChatArea: React.FC<ChatAreaProps> = React.memo(
+  ({
+    room,
+    agents,
+    messages,
+    selectedMentions,
+    sendShortcutMode,
+    onChangeSendShortcutMode,
+    onToggleMention,
+    onSendMessage,
+    onUploadTempFile,
+    onRetryAgent,
+    onInspectAgent,
+    onOpenRecruitModal,
+    restoredDraft,
+  }) => {
+    const [expandedMetaSeqs, setExpandedMetaSeqs] = useState<Set<number>>(new Set());
+    const [rawMessageSeqs, setRawMessageSeqs] = useState<Set<number>>(new Set());
+    const [copiedMessageSeq, setCopiedMessageSeq] = useState<number | null>(null);
+    const [hasUnreadBelow, setHasUnreadBelow] = useState(false);
+    const [dismissedSystemKeys, setDismissedSystemKeys] = useState<Set<string>>(() => {
+      try {
+        const raw = localStorage.getItem('ragents_dismissed_system_msgs');
+        if (raw) {
+          const arr = JSON.parse(raw);
+          if (Array.isArray(arr)) return new Set(arr.map(String));
+        }
+      } catch (_) {}
+      return new Set();
+    });
+
+    const dismissSystemMessage = useCallback((sysKey: string) => {
+      setDismissedSystemKeys((prev) => {
+        const next = new Set(prev);
+        next.add(sysKey);
+        try {
+          localStorage.setItem(
+            'ragents_dismissed_system_msgs',
+            JSON.stringify(Array.from(next).slice(-500))
+          );
+        } catch (_) {}
+        return next;
+      });
+    }, []);
+
+    const {
+      containerRef: scrollRef,
+      contentRef: timelineContentRef,
+      pinnedRef: pinnedToBottomRef,
+      isPinned,
+      scrollToBottom,
+      scrollContainerProps,
+    } = useStickyAutoScroll({
+      repinThresholdPx: 12,
+      resetKey: room?.room_id ?? null,
+    });
+
+    const lastMsgSeq = messages[messages.length - 1]?.msg_seq ?? 0;
+    const prevLastMsgSeqRef = useRef(lastMsgSeq);
+    const prevRoomIdRef = useRef(room?.room_id ?? null);
+
+    useEffect(() => {
+      if (prevRoomIdRef.current !== (room?.room_id ?? null)) {
+        prevRoomIdRef.current = room?.room_id ?? null;
+        prevLastMsgSeqRef.current = lastMsgSeq;
+        setHasUnreadBelow(false);
+        return;
+      }
+      if (lastMsgSeq > prevLastMsgSeqRef.current) {
+        prevLastMsgSeqRef.current = lastMsgSeq;
+        if (pinnedToBottomRef.current) {
+          scrollToBottom();
+        } else {
+          setHasUnreadBelow(true);
+        }
+      } else {
+        prevLastMsgSeqRef.current = lastMsgSeq;
+      }
+    }, [room?.room_id, lastMsgSeq, pinnedToBottomRef, scrollToBottom]);
+
+    useEffect(() => {
+      if (isPinned) {
+        setHasUnreadBelow(false);
+      }
+    }, [isPinned]);
+
+    const handleSendSubmitted = useCallback(() => {
+      scrollToBottom(true);
+    }, [scrollToBottom]);
+
+    const toggleMsgMeta = useCallback((seq: number) => {
+      setExpandedMetaSeqs((prev) => {
+        const next = new Set(prev);
+        if (next.has(seq)) next.delete(seq);
+        else next.add(seq);
+        return next;
+      });
+    }, []);
+
+    const toggleRawMessage = useCallback((seq: number) => {
+      setRawMessageSeqs((prev) => {
+        const next = new Set(prev);
+        if (next.has(seq)) next.delete(seq);
+        else next.add(seq);
+        return next;
+      });
+    }, []);
+
+    const copyMessageContent = useCallback((seq: number, text: string) => {
+      copyTextToClipboard(text).then((ok) => {
+        if (!ok) return;
+        setCopiedMessageSeq(seq);
+        window.setTimeout(() => {
+          setCopiedMessageSeq((cur) => (cur === seq ? null : cur));
+        }, 1500);
+      });
+    }, []);
+
+    // Stabilize agent metadata for message rows so runtime_state / token_usage
+    // updates do NOT re-render the entire chat message history.
+    const mentionSignature = agents
+      .map((a) => `${a.agent_id}\0${a.name}\0${a.avatar}\0${a.role_title}\0${a.model}`)
+      .join('\n');
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const stableMentionAgents = useMemo(() => agents, [mentionSignature]);
+
+    const agentLookup = useMemo(() => {
+      const map = new Map<string, RoomAgent>();
+      stableMentionAgents.forEach((a) => {
+        map.set(a.agent_id, a);
+        map.set(a.name.toLowerCase(), a);
+      });
+      return map;
+    }, [stableMentionAgents]);
+
+    return (
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden bg-[var(--bg-main)] relative">
+        {/* Scrollable Conversation Timeline */}
+        <div
+          ref={scrollRef}
+          {...scrollContainerProps}
+          className="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 py-6"
+        >
+          <div ref={timelineContentRef} className="max-w-[780px] mx-auto space-y-6">
+            {messages.length === 0 ? (
+              <div className="py-24 text-center space-y-3">
+                <div className="w-11 h-11 rounded-2xl bg-[var(--bg-surface)] border border-[var(--border-subtle)] flex items-center justify-center mx-auto text-[var(--text-primary)]">
+                  <Bot className="w-5 h-5" />
+                </div>
+                <h3 className="text-base font-semibold text-[var(--text-primary)]">
+                  开始多智能体协同对话
+                </h3>
+                <p className="text-xs text-[var(--text-muted)] max-w-md mx-auto leading-relaxed">
+                  直接发送消息与当前 Agent 协作，或点名{' '}
+                  <code className="px-1 py-0.5 rounded bg-[var(--bg-surface)]">
+                    @Manager
+                  </code>{' '}
+                  动态招募更多领域的专家智能体入群。
+                </p>
+              </div>
+            ) : (
+              messages.map((m) => (
+                <ChatMessageRow
+                  key={m.msg_seq}
+                  message={m}
+                  roomId={room?.room_id}
+                  agents={stableMentionAgents}
+                  agentLookup={agentLookup}
+                  isMetaExpanded={expandedMetaSeqs.has(m.msg_seq)}
+                  isRawMode={rawMessageSeqs.has(m.msg_seq)}
+                  isCopied={copiedMessageSeq === m.msg_seq}
+                  isDismissedSystem={
+                    m.sender_kind === 'system' &&
+                    dismissedSystemKeys.has(`${room?.room_id || ''}:${m.msg_seq}`)
+                  }
+                  onToggleMeta={toggleMsgMeta}
+                  onToggleRaw={toggleRawMessage}
+                  onCopyMessage={copyMessageContent}
+                  onDismissSystem={dismissSystemMessage}
+                  onRetryAgent={onRetryAgent}
+                  onInspectAgent={onInspectAgent}
+                />
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Floating Jump-to-Bottom Pill */}
+        {hasUnreadBelow && !isPinned && (
+          <div className="absolute bottom-36 sm:bottom-32 left-1/2 -translate-x-1/2 z-10">
+            <button
+              onClick={() => scrollToBottom(true)}
+              className="px-3.5 py-1.5 rounded-full bg-[var(--bg-elevated)] text-[var(--text-primary)] border border-[var(--border-default)] shadow-md text-xs font-medium flex items-center gap-1.5 cursor-pointer hover:bg-[var(--bg-surface)]"
+            >
+              <ArrowDown className="w-3.5 h-3.5" />
+              <span>有新消息 · 回到最新</span>
+            </button>
+          </div>
+        )}
+
+        {/* Bottom Floating Codex Composer */}
+        <ChatComposer
+          room={room}
+          agents={agents}
+          selectedMentions={selectedMentions}
+          sendShortcutMode={sendShortcutMode}
+          onChangeSendShortcutMode={onChangeSendShortcutMode}
+          onToggleMention={onToggleMention}
+          onSendMessage={onSendMessage}
+          onUploadTempFile={onUploadTempFile}
+          onOpenRecruitModal={onOpenRecruitModal}
+          onSendSubmitted={handleSendSubmitted}
+          restoredDraft={restoredDraft}
+        />
+      </div>
+    );
+  }
+);
+ChatArea.displayName = 'ChatArea';

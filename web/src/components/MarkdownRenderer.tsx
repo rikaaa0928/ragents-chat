@@ -1,10 +1,11 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useContext, useEffect, useMemo, useState } from 'react';
 import Markdown, { Components, defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import rehypeHighlight from 'rehype-highlight';
 import { Check, ChevronDown, ChevronRight, Copy } from 'lucide-react';
 import { RoomAgent } from '../types';
+import { copyTextToClipboard } from '../utils/clipboard';
 
 export interface MarkdownRendererProps {
   content: string;
@@ -158,13 +159,11 @@ const MarkdownCodeBlock: React.FC<{
 
   const handleCopy = () => {
     const textToCopy = rawText.replace(/\n$/, '');
-    navigator.clipboard
-      ?.writeText(textToCopy)
-      .then(() => {
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1500);
-      })
-      .catch(() => {});
+    copyTextToClipboard(textToCopy).then((ok) => {
+      if (!ok) return;
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    });
   };
 
   return (
@@ -226,6 +225,15 @@ interface MentionLookupEntry {
   agent: RoomAgent;
   lowerNeedle: string;
 }
+
+interface MarkdownMentionContextValue {
+  entries: MentionLookupEntry[];
+  onInspectAgent?: (agentId: string) => void;
+}
+
+const MarkdownMentionContext = React.createContext<MarkdownMentionContextValue>({
+  entries: [],
+});
 
 function renderMentionsInString(
   text: string,
@@ -322,6 +330,96 @@ function mapMentionChildren(
   });
 }
 
+function makeMentionWrapper<T extends keyof React.JSX.IntrinsicElements>(
+  Tag: T
+): React.FC<React.JSX.IntrinsicElements[T]> {
+  const Wrapper: React.FC<React.JSX.IntrinsicElements[T]> = ({
+    children,
+    ...props
+  }) => {
+    const { entries, onInspectAgent } = useContext(MarkdownMentionContext);
+    return React.createElement(
+      Tag,
+      props,
+      mapMentionChildren(children, entries, onInspectAgent)
+    );
+  };
+  Wrapper.displayName = `Md_${String(Tag)}`;
+  return Wrapper;
+}
+
+const MdPre: Components['pre'] = ({ children }) => (
+  <MarkdownCodeBlock>{children}</MarkdownCodeBlock>
+);
+
+const MdTable: Components['table'] = ({ children, ...props }) => (
+  <div className="ragents-md-table-wrap my-2.5 overflow-x-auto rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-main)]">
+    <table {...props}>{children}</table>
+  </div>
+);
+
+const MdAnchor: Components['a'] = ({ href, children, ...props }) => (
+  <a
+    {...props}
+    href={href}
+    target="_blank"
+    rel="noopener noreferrer"
+    className="ragents-md-link"
+  >
+    {children}
+  </a>
+);
+
+const MdImg: Components['img'] = ({ src, alt, ...props }) => (
+  <img
+    {...props}
+    src={src}
+    alt={alt || ''}
+    loading="lazy"
+    className="my-2 max-h-80 max-w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] object-contain"
+  />
+);
+
+const MdInput: Components['input'] = ({ type, checked, ...props }) => {
+  if (type === 'checkbox') {
+    return (
+      <input
+        type="checkbox"
+        checked={Boolean(checked)}
+        readOnly
+        tabIndex={-1}
+        className="mr-1.5 align-middle accent-blue-500 pointer-events-none"
+      />
+    );
+  }
+  return <input type={type} checked={checked} {...props} />;
+};
+
+// Module-level constant component map guarantees React NEVER unmounts/remounts
+// Markdown DOM nodes (<p>, <li>, <pre>, <table>, etc.) across re-renders,
+// preserving active text selection and horizontal scroll positions.
+const STATIC_MARKDOWN_COMPONENTS: Components = {
+  pre: MdPre,
+  table: MdTable,
+  a: MdAnchor,
+  img: MdImg,
+  input: MdInput,
+  p: makeMentionWrapper('p'),
+  li: makeMentionWrapper('li'),
+  blockquote: makeMentionWrapper('blockquote'),
+  td: makeMentionWrapper('td'),
+  th: makeMentionWrapper('th'),
+  h1: makeMentionWrapper('h1'),
+  h2: makeMentionWrapper('h2'),
+  h3: makeMentionWrapper('h3'),
+  h4: makeMentionWrapper('h4'),
+  h5: makeMentionWrapper('h5'),
+  h6: makeMentionWrapper('h6'),
+  strong: makeMentionWrapper('strong'),
+  em: makeMentionWrapper('em'),
+  del: makeMentionWrapper('del'),
+};
+
 export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
   ({
     content,
@@ -337,6 +435,10 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
       return streaming ? balanceStreamingFences(text) : text;
     }, [throttled, streaming]);
 
+    const agentsSignature = (agents || [])
+      .map((a) => `${a.agent_id}\0${a.name}\0${a.role_title}\0${a.model}`)
+      .join('\n');
+
     const mentionEntries = useMemo<MentionLookupEntry[]>(() => {
       if (!agents || agents.length === 0) return [];
       return [...agents]
@@ -346,120 +448,13 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
           agent,
           lowerNeedle: `@${agent.name.toLowerCase()}`,
         }));
-    }, [agents]);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [agentsSignature]);
 
-    const components = useMemo<Components>(
+    const mentionCtx = useMemo<MarkdownMentionContextValue>(
       () => ({
-        pre: ({ children }) => <MarkdownCodeBlock>{children}</MarkdownCodeBlock>,
-        table: ({ children, ...props }) => (
-          <div className="ragents-md-table-wrap my-2.5 overflow-x-auto rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-main)]">
-            <table {...props}>{children}</table>
-          </div>
-        ),
-        a: ({ href, children, ...props }) => (
-          <a
-            {...props}
-            href={href}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ragents-md-link"
-          >
-            {children}
-          </a>
-        ),
-        img: ({ src, alt, ...props }) => (
-          <img
-            {...props}
-            src={src}
-            alt={alt || ''}
-            loading="lazy"
-            className="my-2 max-h-80 max-w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] object-contain"
-          />
-        ),
-        input: ({ type, checked, ...props }) => {
-          if (type === 'checkbox') {
-            return (
-              <input
-                type="checkbox"
-                checked={Boolean(checked)}
-                readOnly
-                tabIndex={-1}
-                className="mr-1.5 align-middle accent-blue-500 pointer-events-none"
-              />
-            );
-          }
-          return <input type={type} checked={checked} {...props} />;
-        },
-        p: ({ children, ...props }) => (
-          <p {...props}>
-            {mapMentionChildren(children, mentionEntries, onInspectAgent)}
-          </p>
-        ),
-        li: ({ children, ...props }) => (
-          <li {...props}>
-            {mapMentionChildren(children, mentionEntries, onInspectAgent)}
-          </li>
-        ),
-        blockquote: ({ children, ...props }) => (
-          <blockquote {...props}>
-            {mapMentionChildren(children, mentionEntries, onInspectAgent)}
-          </blockquote>
-        ),
-        td: ({ children, ...props }) => (
-          <td {...props}>
-            {mapMentionChildren(children, mentionEntries, onInspectAgent)}
-          </td>
-        ),
-        th: ({ children, ...props }) => (
-          <th {...props}>
-            {mapMentionChildren(children, mentionEntries, onInspectAgent)}
-          </th>
-        ),
-        h1: ({ children, ...props }) => (
-          <h1 {...props}>
-            {mapMentionChildren(children, mentionEntries, onInspectAgent)}
-          </h1>
-        ),
-        h2: ({ children, ...props }) => (
-          <h2 {...props}>
-            {mapMentionChildren(children, mentionEntries, onInspectAgent)}
-          </h2>
-        ),
-        h3: ({ children, ...props }) => (
-          <h3 {...props}>
-            {mapMentionChildren(children, mentionEntries, onInspectAgent)}
-          </h3>
-        ),
-        h4: ({ children, ...props }) => (
-          <h4 {...props}>
-            {mapMentionChildren(children, mentionEntries, onInspectAgent)}
-          </h4>
-        ),
-        h5: ({ children, ...props }) => (
-          <h5 {...props}>
-            {mapMentionChildren(children, mentionEntries, onInspectAgent)}
-          </h5>
-        ),
-        h6: ({ children, ...props }) => (
-          <h6 {...props}>
-            {mapMentionChildren(children, mentionEntries, onInspectAgent)}
-          </h6>
-        ),
-        strong: ({ children, ...props }) => (
-          <strong {...props}>
-            {mapMentionChildren(children, mentionEntries, onInspectAgent)}
-          </strong>
-        ),
-        em: ({ children, ...props }) => (
-          <em {...props}>
-            {mapMentionChildren(children, mentionEntries, onInspectAgent)}
-          </em>
-        ),
-        del: ({ children, ...props }) => (
-          <del {...props}>
-            {mapMentionChildren(children, mentionEntries, onInspectAgent)}
-          </del>
-        ),
+        entries: mentionEntries,
+        onInspectAgent,
       }),
       [mentionEntries, onInspectAgent]
     );
@@ -472,16 +467,18 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = React.memo(
         : 'markdown-body--default';
 
     return (
-      <div className={`markdown-body ${variantClass} ${className}`}>
-        <Markdown
-          remarkPlugins={REMARK_PLUGINS}
-          rehypePlugins={REHYPE_PLUGINS as never}
-          urlTransform={safeUrlTransform}
-          components={components}
-        >
-          {preparedText}
-        </Markdown>
-      </div>
+      <MarkdownMentionContext.Provider value={mentionCtx}>
+        <div className={`markdown-body ${variantClass} ${className}`}>
+          <Markdown
+            remarkPlugins={REMARK_PLUGINS}
+            rehypePlugins={REHYPE_PLUGINS as never}
+            urlTransform={safeUrlTransform}
+            components={STATIC_MARKDOWN_COMPONENTS}
+          >
+            {preparedText}
+          </Markdown>
+        </div>
+      </MarkdownMentionContext.Provider>
     );
   }
 );
