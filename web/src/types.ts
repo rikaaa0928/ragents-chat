@@ -4,6 +4,10 @@ export interface Room {
   description: string;
   node_id?: string | null;
   workspace_path?: string | null;
+  room_prompts: string[];
+  room_prompts_version: number;
+  room_prompts_updated_at?: string | null;
+  room_prompts_updated_by?: string | null;
   peek_enabled: boolean;
   peek_idle_mode: 'global' | 'per_agent';
   peek_idle_secs: number;
@@ -16,6 +20,20 @@ export interface Room {
   last_msg_seq: number;
   created_at?: string;
   updated_at?: string;
+}
+
+export interface RoomPromptMutationPayload {
+  action:
+    | 'set_members'
+    | 'add'
+    | 'update'
+    | 'remove'
+    | 'clear_announcements'
+    | 'replace_all';
+  content?: string;
+  index?: number;
+  room_prompts?: string[];
+  expected_version?: number;
 }
 
 export interface CreateRoomPreset {

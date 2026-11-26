@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   PanelLeftOpen,
   PanelRightClose,
@@ -19,8 +19,20 @@ import {
   Server,
   Globe,
   FolderOpen,
+  Pin,
+  Pencil,
+  Plus,
+  Check,
+  RotateCcw,
 } from 'lucide-react';
-import { Room, RoomAgent, ClusterNode, UiContribution } from '../types';
+import {
+  Room,
+  RoomAgent,
+  ClusterNode,
+  UiContribution,
+  RoomPromptMutationPayload,
+} from '../types';
+import { MarkdownRenderer } from './MarkdownRenderer';
 
 interface TopHeaderProps {
   sidebarCollapsed: boolean;
@@ -42,6 +54,8 @@ interface TopHeaderProps {
   inspectorColumnOpen: boolean;
   onToggleInspectorColumn: () => void;
   onUpdateRoomControls: (patch: Partial<Room>) => void;
+  onMutateRoomPrompts: (payload: RoomPromptMutationPayload) => Promise<Room | null>;
+  onInspectAgent?: (agentId: string) => void;
   onResumeRelay: () => void;
   onDeleteRoom: () => void;
 }
@@ -66,12 +80,35 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   inspectorColumnOpen,
   onToggleInspectorColumn,
   onUpdateRoomControls,
+  onMutateRoomPrompts,
+  onInspectAgent,
   onResumeRelay,
   onDeleteRoom,
 }) => {
   // Collapsible drawers state (collapsed by default for clean Codex aesthetic!)
   const [roomInfoOpen, setRoomInfoOpen] = useState(false);
   const [peekConfigOpen, setPeekConfigOpen] = useState(false);
+  const [roomPromptsOpen, setRoomPromptsOpen] = useState(false);
+
+  // Room Prompts editor states
+  const [editingMembers, setEditingMembers] = useState(false);
+  const [membersDraft, setMembersDraft] = useState('');
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [announcementDraft, setAnnouncementDraft] = useState('');
+  const [newAnnouncementDraft, setNewAnnouncementDraft] = useState('');
+  const [editBaseVersion, setEditBaseVersion] = useState<number | null>(null);
+  const [promptBusy, setPromptBusy] = useState(false);
+  const [promptError, setPromptError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setEditingMembers(false);
+    setMembersDraft('');
+    setEditingIndex(null);
+    setAnnouncementDraft('');
+    setNewAnnouncementDraft('');
+    setEditBaseVersion(null);
+    setPromptError(null);
+  }, [room?.room_id]);
 
   if (!room) {
     return (
@@ -121,6 +158,37 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
     ? roomNodeDetail.status.phase === 'ready'
     : true;
 
+  const roomPrompts =
+    room.room_prompts && room.room_prompts.length > 0
+      ? room.room_prompts
+      : [''];
+  const membersPrompt = (roomPrompts[0] || '').trim();
+  const announcementPrompts = roomPrompts.slice(1);
+  const activePromptCount =
+    (membersPrompt ? 1 : 0) +
+    announcementPrompts.filter((item) => item.trim().length > 0).length;
+  const promptVersion = room.room_prompts_version || 0;
+  const hasRemoteVersionDrift =
+    editBaseVersion !== null &&
+    (editingMembers || editingIndex !== null) &&
+    promptVersion !== editBaseVersion;
+
+  const runPromptMutation = async (
+    payload: RoomPromptMutationPayload,
+    onSuccess?: () => void
+  ) => {
+    setPromptBusy(true);
+    setPromptError(null);
+    try {
+      await onMutateRoomPrompts(payload);
+      onSuccess?.();
+    } catch (err: unknown) {
+      setPromptError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPromptBusy(false);
+    }
+  };
+
   return (
     <div className="shrink-0 bg-[var(--bg-main)] border-b border-[var(--border-subtle)] z-20">
       {/* Primary Codex Top Bar */}
@@ -148,7 +216,14 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
 
           {/* Room Selector / Info Trigger (Codex Model Picker Style) */}
           <button
-            onClick={() => setRoomInfoOpen(!roomInfoOpen)}
+            onClick={() => {
+              const next = !roomInfoOpen;
+              setRoomInfoOpen(next);
+              if (next) {
+                setPeekConfigOpen(false);
+                setRoomPromptsOpen(false);
+              }
+            }}
             className={`px-2 py-1.5 rounded-lg flex items-center gap-1.5 text-[13.5px] font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer min-w-0 max-w-full overflow-hidden ${
               roomInfoOpen ? 'bg-[var(--bg-active)]' : ''
             }`}
@@ -224,7 +299,14 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
         <div className="flex items-center gap-1 sm:gap-1.5 shrink-0 overflow-x-auto no-scrollbar">
           {/* 0. Toggle Room Basic Info Drawer (Desktop shortcut; on mobile tapping room title toggles info) */}
           <button
-            onClick={() => setRoomInfoOpen(!roomInfoOpen)}
+            onClick={() => {
+              const next = !roomInfoOpen;
+              setRoomInfoOpen(next);
+              if (next) {
+                setPeekConfigOpen(false);
+                setRoomPromptsOpen(false);
+              }
+            }}
             className={`hidden sm:flex h-8 px-2 rounded-lg text-xs font-medium items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
               roomInfoOpen
                 ? 'bg-[var(--bg-active)] border-[var(--border-default)] text-[var(--text-primary)]'
@@ -236,9 +318,51 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
             <span className="hidden lg:inline">房间信息</span>
           </button>
 
+          {/* 0b. Toggle Shared Room Prompt & Announcements Drawer */}
+          <button
+            onClick={() => {
+              const next = !roomPromptsOpen;
+              setRoomPromptsOpen(next);
+              if (next) {
+                setRoomInfoOpen(false);
+                setPeekConfigOpen(false);
+              }
+            }}
+            className={`h-8 px-1.5 sm:px-2 rounded-lg text-xs font-medium flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+              roomPromptsOpen
+                ? 'bg-[var(--bg-active)] border-[var(--border-default)] text-[var(--text-primary)]'
+                : 'bg-transparent border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'
+            }`}
+            title="查看/编辑房间公共 Prompt（[#0] 成员信息 + [#1..N] 公告列表，注入全体 Agent System Prompt）"
+          >
+            <Pin
+              className={`w-3.5 h-3.5 shrink-0 ${
+                activePromptCount > 0 ? 'text-amber-500' : 'text-[var(--text-muted)]'
+              }`}
+            />
+            <span className="hidden lg:inline">公共 Prompt</span>
+            {activePromptCount > 0 && (
+              <span className="px-1 sm:px-1.5 py-0.2 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[10px] font-semibold">
+                {activePromptCount}
+              </span>
+            )}
+            {roomPromptsOpen ? (
+              <ChevronUp className="hidden sm:block w-3 h-3 text-[var(--text-muted)] shrink-0" />
+            ) : (
+              <ChevronDown className="hidden sm:block w-3 h-3 text-[var(--text-muted)] shrink-0" />
+            )}
+          </button>
+
           {/* 1. Toggle Peek & Turn-Taking Config Drawer */}
           <button
-            onClick={() => setPeekConfigOpen(!peekConfigOpen)}
+            onClick={() => {
+              const next = !peekConfigOpen;
+              setPeekConfigOpen(next);
+              if (next) {
+                setRoomInfoOpen(false);
+                setRoomPromptsOpen(false);
+              }
+            }}
             className={`h-8 px-1.5 sm:px-2 rounded-lg text-xs font-medium flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
               peekConfigOpen
                 ? 'bg-[var(--bg-active)] border-[var(--border-default)] text-[var(--text-primary)]'
@@ -665,6 +789,381 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
             >
               <X className="w-4 h-4" />
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Collapsible Drawer C: Shared Room Prompt List ([#0] Members + [#1..N] Announcements) */}
+      {roomPromptsOpen && (
+        <div className="px-4 py-3 bg-[var(--bg-sidebar)] border-t border-[var(--border-subtle)] text-xs max-h-[68vh] overflow-y-auto">
+          <div className="max-w-5xl mx-auto space-y-3">
+            {/* Drawer Header */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2 min-w-0">
+                <span className="font-semibold text-[var(--text-primary)] flex items-center gap-1.5">
+                  <Pin className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                  <span>房间公共 Prompt</span>
+                </span>
+                <span className="px-1.5 py-0.5 rounded bg-[var(--bg-surface)] text-[10.5px] font-mono-code text-[var(--text-secondary)]">
+                  v{promptVersion}
+                </span>
+                <span className="text-[11px] text-[var(--text-muted)]">
+                  {room.room_prompts_updated_by
+                    ? `最近由 ${room.room_prompts_updated_by} 于 ${
+                        room.room_prompts_updated_at
+                          ? new Date(room.room_prompts_updated_at).toLocaleString()
+                          : ''
+                      } 更新`
+                    : '默认为空（仅在非空时拼入全体 Agent System Prompt）'}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                {announcementPrompts.length > 0 && (
+                  <button
+                    type="button"
+                    disabled={promptBusy}
+                    onClick={() => {
+                      if (
+                        !window.confirm(
+                          `确认清空全部 ${announcementPrompts.length} 条房间公告？（[#0] 成员信息将保留）`
+                        )
+                      ) {
+                        return;
+                      }
+                      void runPromptMutation(
+                        {
+                          action: 'clear_announcements',
+                          expected_version: promptVersion,
+                        },
+                        () => {
+                          setEditingIndex(null);
+                          setAnnouncementDraft('');
+                          setEditBaseVersion(null);
+                        }
+                      );
+                    }}
+                    className="px-2 py-1 rounded-md text-[11px] font-medium text-red-600 dark:text-red-400 hover:bg-red-500/10 disabled:opacity-50 cursor-pointer transition-colors"
+                  >
+                    清空全部公告
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setRoomPromptsOpen(false)}
+                  className="p-1 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer"
+                  title="收起面板"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {promptError && (
+              <div className="px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-700 dark:text-red-300 flex items-center justify-between gap-2 text-[11.5px]">
+                <span className="break-words">{promptError}</span>
+                <button
+                  type="button"
+                  onClick={() => setPromptError(null)}
+                  className="text-[11px] underline shrink-0 cursor-pointer"
+                >
+                  关闭
+                </button>
+              </div>
+            )}
+
+            {hasRemoteVersionDrift && (
+              <div className="px-3 py-2 rounded-lg bg-amber-500/12 border border-amber-500/30 text-amber-700 dark:text-amber-300 flex items-center justify-between gap-2 text-[11.5px]">
+                <span>
+                  ⚠️ 远端版本已由 {room.room_prompts_updated_by || '其他成员'} 更新至 v
+                  {promptVersion}，继续保存将触发版本冲突保护。
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (editingMembers) {
+                      setMembersDraft(roomPrompts[0] || '');
+                    }
+                    if (editingIndex !== null) {
+                      setAnnouncementDraft(roomPrompts[editingIndex] || '');
+                    }
+                    setEditBaseVersion(promptVersion);
+                    setPromptError(null);
+                  }}
+                  className="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 font-medium flex items-center gap-1 shrink-0 cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>载入最新</span>
+                </button>
+              </div>
+            )}
+
+            {/* Slot [#0]: Fixed Member Roster & Division of Labor */}
+            <div className="p-3 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="px-1.5 py-0.5 rounded bg-blue-500/12 text-blue-600 dark:text-blue-400 font-mono-code text-[10.5px] font-semibold">
+                    #0 · 成员信息
+                  </span>
+                  <span className="text-[11px] text-[var(--text-muted)] truncate">
+                    固定首项 · 由 @Manager 人员迭代或手动维护
+                  </span>
+                </div>
+
+                {!editingMembers && (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      disabled={promptBusy}
+                      onClick={() => {
+                        setEditingMembers(true);
+                        setMembersDraft(roomPrompts[0] || '');
+                        setEditingIndex(null);
+                        setEditBaseVersion(promptVersion);
+                        setPromptError(null);
+                      }}
+                      className="px-2 py-1 rounded-md text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] flex items-center gap-1 cursor-pointer"
+                    >
+                      <Pencil className="w-3 h-3" />
+                      <span>{membersPrompt ? '编辑' : '添加'}</span>
+                    </button>
+                    {membersPrompt && (
+                      <button
+                        type="button"
+                        disabled={promptBusy}
+                        onClick={() =>
+                          void runPromptMutation({
+                            action: 'set_members',
+                            content: '',
+                            expected_version: promptVersion,
+                          })
+                        }
+                        className="px-2 py-1 rounded-md text-[11px] font-medium text-red-600 dark:text-red-400 hover:bg-red-500/10 flex items-center gap-1 cursor-pointer"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        <span>清空</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {editingMembers ? (
+                <div className="space-y-2">
+                  <textarea
+                    rows={4}
+                    value={membersDraft}
+                    onChange={(e) => setMembersDraft(e.target.value)}
+                    placeholder="填写团队成员构成、职责分工与协作边界（支持 Markdown，留空即清除）..."
+                    className="w-full px-2.5 py-2 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-default)] text-xs font-mono-code text-[var(--text-primary)] focus:outline-none focus:border-blue-500 resize-y"
+                  />
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      disabled={promptBusy}
+                      onClick={() => {
+                        setEditingMembers(false);
+                        setEditBaseVersion(null);
+                        setPromptError(null);
+                      }}
+                      className="px-2.5 py-1 rounded-md text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] cursor-pointer"
+                    >
+                      取消
+                    </button>
+                    <button
+                      type="button"
+                      disabled={promptBusy}
+                      onClick={() =>
+                        void runPromptMutation(
+                          {
+                            action: 'set_members',
+                            content: membersDraft,
+                            expected_version: editBaseVersion ?? promptVersion,
+                          },
+                          () => {
+                            setEditingMembers(false);
+                            setEditBaseVersion(null);
+                          }
+                        )
+                      }
+                      className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] flex items-center gap-1 disabled:opacity-50 cursor-pointer"
+                    >
+                      <Check className="w-3 h-3" />
+                      <span>保存 #0</span>
+                    </button>
+                  </div>
+                </div>
+              ) : membersPrompt ? (
+                <div className="text-[12px] text-[var(--text-primary)] leading-relaxed">
+                  <MarkdownRenderer
+                    content={membersPrompt}
+                    variant="compact"
+                    agents={agents}
+                    onInspectAgent={onInspectAgent}
+                  />
+                </div>
+              ) : (
+                <div className="text-[11px] text-[var(--text-muted)] italic">
+                  暂无成员信息（默认为空，不会注入额外提示词）。
+                </div>
+              )}
+            </div>
+
+            {/* Slots [#1..#N]: Individual Announcements List */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between px-0.5">
+                <span className="font-semibold text-[var(--text-primary)]">
+                  房间公告列表 ({announcementPrompts.length})
+                </span>
+                <span className="text-[11px] text-[var(--text-muted)]">
+                  由主导 Agent / @Manager / 用户按条增删改 · 每次改完下轮 Activation 生效
+                </span>
+              </div>
+
+              {announcementPrompts.length === 0 ? (
+                <div className="px-3 py-2.5 rounded-xl bg-[var(--bg-main)] border border-dashed border-[var(--border-subtle)] text-[11px] text-[var(--text-muted)]">
+                  暂无房间公告，可在下方直接追加一条新公告。
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {announcementPrompts.map((item, idx) => {
+                    const annIndex = idx + 1;
+                    const isEditing = editingIndex === annIndex;
+                    return (
+                      <div
+                        key={`${annIndex}-${item.slice(0, 24)}`}
+                        className="p-2.5 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] space-y-2"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="px-1.5 py-0.5 rounded bg-amber-500/12 text-amber-600 dark:text-amber-400 font-mono-code text-[10.5px] font-semibold">
+                            #{annIndex} · 公告
+                          </span>
+
+                          {!isEditing && (
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                disabled={promptBusy}
+                                onClick={() => {
+                                  setEditingIndex(annIndex);
+                                  setAnnouncementDraft(item);
+                                  setEditingMembers(false);
+                                  setEditBaseVersion(promptVersion);
+                                  setPromptError(null);
+                                }}
+                                className="px-2 py-0.5 rounded text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] flex items-center gap-1 cursor-pointer"
+                              >
+                                <Pencil className="w-3 h-3" />
+                                <span>编辑</span>
+                              </button>
+                              <button
+                                type="button"
+                                disabled={promptBusy}
+                                onClick={() =>
+                                  void runPromptMutation({
+                                    action: 'remove',
+                                    index: annIndex,
+                                    expected_version: promptVersion,
+                                  })
+                                }
+                                className="px-2 py-0.5 rounded text-[11px] text-red-600 dark:text-red-400 hover:bg-red-500/10 flex items-center gap-1 cursor-pointer"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                                <span>删除</span>
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        {isEditing ? (
+                          <div className="space-y-2">
+                            <textarea
+                              rows={3}
+                              value={announcementDraft}
+                              onChange={(e) => setAnnouncementDraft(e.target.value)}
+                              className="w-full px-2.5 py-2 rounded-lg bg-[var(--bg-surface)] border border-[var(--border-default)] text-xs font-mono-code text-[var(--text-primary)] focus:outline-none focus:border-amber-500 resize-y"
+                            />
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                disabled={promptBusy}
+                                onClick={() => {
+                                  setEditingIndex(null);
+                                  setEditBaseVersion(null);
+                                  setPromptError(null);
+                                }}
+                                className="px-2.5 py-1 rounded-md text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] cursor-pointer"
+                              >
+                                取消
+                              </button>
+                              <button
+                                type="button"
+                                disabled={promptBusy || !announcementDraft.trim()}
+                                onClick={() =>
+                                  void runPromptMutation(
+                                    {
+                                      action: 'update',
+                                      index: annIndex,
+                                      content: announcementDraft,
+                                      expected_version: editBaseVersion ?? promptVersion,
+                                    },
+                                    () => {
+                                      setEditingIndex(null);
+                                      setEditBaseVersion(null);
+                                    }
+                                  )
+                                }
+                                className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] flex items-center gap-1 disabled:opacity-50 cursor-pointer"
+                              >
+                                <Check className="w-3 h-3" />
+                                <span>保存 #{annIndex}</span>
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="text-[12px] text-[var(--text-primary)] leading-relaxed">
+                            <MarkdownRenderer
+                              content={item}
+                              variant="compact"
+                              agents={agents}
+                              onInspectAgent={onInspectAgent}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Add New Announcement */}
+              <div className="flex items-start gap-2 pt-1">
+                <textarea
+                  rows={2}
+                  value={newAnnouncementDraft}
+                  onChange={(e) => setNewAnnouncementDraft(e.target.value)}
+                  placeholder="输入要追加的新房间公告（支持 Markdown），保存后同步到本房间全体 Agent..."
+                  className="flex-1 px-2.5 py-2 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] text-xs font-mono-code text-[var(--text-primary)] focus:outline-none focus:border-amber-500 resize-y"
+                />
+                <button
+                  type="button"
+                  disabled={promptBusy || !newAnnouncementDraft.trim()}
+                  onClick={() =>
+                    void runPromptMutation(
+                      {
+                        action: 'add',
+                        content: newAnnouncementDraft,
+                      },
+                      () => setNewAnnouncementDraft('')
+                    )
+                  }
+                  className="h-9 px-3 rounded-xl text-xs font-medium bg-[var(--btn-primary-bg)] text-[var(--btn-primary-text)] flex items-center gap-1 shrink-0 disabled:opacity-40 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>追加公告</span>
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

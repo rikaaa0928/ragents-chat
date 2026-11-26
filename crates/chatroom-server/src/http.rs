@@ -73,6 +73,10 @@ pub fn build_chat_router(state: ChatServerState) -> Router {
                 .delete(handle_delete_room),
         )
         .route(
+            "/api/v1/rooms/{room_id}/prompts",
+            post(handle_mutate_room_prompts),
+        )
+        .route(
             "/api/v1/rooms/{room_id}/messages",
             post(handle_post_message),
         )
@@ -140,6 +144,10 @@ pub fn build_chat_router(state: ChatServerState) -> Router {
         .route(
             "/api/v1/internal/agent-schedule",
             post(handle_internal_agent_schedule),
+        )
+        .route(
+            "/api/v1/internal/room-prompt",
+            post(handle_internal_room_prompt),
         )
         .route(
             "/api/v1/internal/manager/add-agent",
@@ -678,6 +686,28 @@ async fn handle_delete_room(
         .await
         .map_err(|e| ChatApiError::Http(StatusCode::BAD_REQUEST, e.to_string()))?;
     Ok(Json(json!({ "ok": true })))
+}
+
+async fn handle_mutate_room_prompts(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Path(room_id): Path<String>,
+    Json(req): Json<RoomPromptMutationRequest>,
+) -> Result<Json<Room>, ChatApiError> {
+    let principal = verify_user_auth(&state, &headers)?;
+    verify_room_access(&state, &principal, &room_id)?;
+    let actor = format!("@{}", principal.display_name);
+    let updated = state
+        .coordinator
+        .mutate_room_prompts_by_user(&room_id, req, &actor)
+        .await
+        .map_err(|(code, err)| {
+            ChatApiError::Http(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST),
+                err,
+            )
+        })?;
+    Ok(Json(updated))
 }
 
 async fn handle_post_message(
@@ -1272,6 +1302,25 @@ async fn handle_internal_agent_schedule(
     Ok((StatusCode::OK, Json(res)))
 }
 
+async fn handle_internal_room_prompt(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Json(req): Json<InternalRoomPromptRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ChatApiError> {
+    let bearer = extract_bearer_or_cookie_token(&headers);
+    let res = state
+        .coordinator
+        .handle_internal_room_prompt(bearer.as_deref(), req)
+        .await
+        .map_err(|(code, err)| {
+            ChatApiError::Http(
+                StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST),
+                err,
+            )
+        })?;
+    Ok((StatusCode::OK, Json(res)))
+}
+
 async fn handle_list_agent_schedules(
     State(state): State<ChatServerState>,
     headers: HeaderMap,
@@ -1377,6 +1426,7 @@ impl IntoResponse for ChatApiError {
                 let status = match &err {
                     crate::store::ChatStoreError::NotFound(_) => StatusCode::NOT_FOUND,
                     crate::store::ChatStoreError::Conflict(_) => StatusCode::CONFLICT,
+                    crate::store::ChatStoreError::InvalidInput(_) => StatusCode::BAD_REQUEST,
                     _ => StatusCode::INTERNAL_SERVER_ERROR,
                 };
                 (status, Json(json!({ "error": err.to_string() }))).into_response()

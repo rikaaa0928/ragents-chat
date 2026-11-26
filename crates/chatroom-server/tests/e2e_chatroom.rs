@@ -477,6 +477,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             prompt_hint: None,
             node_id: None,
             workspace_path: None,
+            room_prompts: None,
         })
         .send()
         .await
@@ -515,7 +516,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
 
     // Wait for `@Assistant` to reply in the chatroom via `chatroom_speak`
     let mut assistant_replied = false;
-    for _ in 0..40 {
+    for _ in 0..100 {
         let detail: RoomDetailResponse = http
             .get(format!("{chat_base}/api/v1/rooms/{room_id}"))
             .bearer_auth(chat_auth_token)
@@ -1258,6 +1259,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             prompt_hint: None,
             node_id: Some("other-node".to_string()),
             workspace_path: Some("/tmp".to_string()),
+            room_prompts: None,
         })
         .send()
         .await
@@ -1281,6 +1283,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             prompt_hint: None,
             node_id: Some("node-chat-test".to_string()),
             workspace_path: Some("/tmp/allowed_tmp_ws_e2e_test".to_string()),
+            room_prompts: None,
         })
         .send()
         .await
@@ -1395,6 +1398,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
             prompt_hint: None,
             node_id: Some("node-dead-test".to_string()),
             workspace_path: None,
+            room_prompts: None,
         })
         .send()
         .await
@@ -1554,6 +1558,7 @@ async fn test_live_multi_agent_chatroom_when_env_present() {
             prompt_hint: None,
             node_id: None,
             workspace_path: None,
+            room_prompts: None,
         })
         .send()
         .await
@@ -1731,5 +1736,444 @@ async fn test_chatroom_extension_concurrency_safe_flags_and_call_prepare() {
         Some(false)
     );
 
+    // chatroom_room_prompt tool must be registered; list -> concurrency_safe: true, add -> false
+    let room_prompt_tool = prepared
+        .tools
+        .iter()
+        .find(|t| t.definition.name == "chatroom_room_prompt")
+        .expect("chatroom_room_prompt");
+    assert!(!room_prompt_tool.definition.concurrency_safe);
+    assert!(
+        !prepared.system_prompt.contains("<room_prompt>"),
+        "default empty room_prompts must not append <room_prompt>"
+    );
+
+    let rp_list_req = serde_json::json!({
+        "call_id": "c_rp_list",
+        "tool_id": "t_rp",
+        "name": "chatroom_room_prompt",
+        "arguments": { "action": "list" },
+        "concurrency_safe": false
+    });
+    let rp_list_res = manager
+        .transform_validated(ragents_core::HOOK_TOOL_CALL_PREPARE, Some(1), rp_list_req, |_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(
+        rp_list_res.payload.get("concurrency_safe").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+
+    let rp_add_req = serde_json::json!({
+        "call_id": "c_rp_add",
+        "tool_id": "t_rp",
+        "name": "chatroom_room_prompt",
+        "arguments": { "action": "add", "content": "公告1" },
+        "concurrency_safe": false
+    });
+    let rp_add_res = manager
+        .transform_validated(ragents_core::HOOK_TOOL_CALL_PREPARE, Some(1), rp_add_req, |_| Ok(()))
+        .await
+        .unwrap();
+    assert_eq!(
+        rp_add_res.payload.get("concurrency_safe").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+
     manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_chatroom_extension_room_prompt_injection() {
+    let chatroom_wasm = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../extensions/chatroom/target/wasm32-wasip2/release/ragent_chatroom_extension.wasm");
+    if !chatroom_wasm.exists() {
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plugin = ragents_core::WasmPlugin::load_from_file_with_workspace(
+        "chatroom",
+        &chatroom_wasm,
+        tmp.path(),
+        &[tmp.path().to_path_buf()],
+    )
+    .await
+    .expect("load chatroom wasm");
+
+    let mut manager = ragents_core::HookManager::empty();
+    let mut cfg = serde_json::json!({
+        "is_manager": false,
+        "room_id": "room_test",
+        "room_name": "PromptTestRoom",
+        "agent_id": "agent_test",
+        "agent_name": "Tester",
+        "agent_role": "Tester",
+        "agent_token": "tok",
+        "chatroom_callback_url": "http://127.0.0.1:18090/api/v1/internal/agent-speak",
+        "room_prompts": [
+            "- @Lead: 负责拆解任务\n- @Worker: 负责测试",
+            "公告A：提交前必须跑 cargo test",
+            "",
+            "公告B：禁止直接修改 .env"
+        ]
+    });
+    manager.add_plugin_with_config(plugin, cfg.take()).unwrap();
+    manager.initialize().await.unwrap();
+
+    let draft = ragents_core::AgentDraft {
+        system_prompt: "base".into(),
+        model: ragents_core::ModelDraft::new("gpt-4.1"),
+        tools: vec![],
+        context: None,
+    };
+    let (prepared, _, _) = manager
+        .prepare_extensions(ragents_core::HOOK_AGENT_PREPARE, None, draft)
+        .await
+        .unwrap();
+
+    assert!(prepared.system_prompt.contains("<room_prompt>"));
+    assert!(prepared.system_prompt.contains("[0 · 成员信息]\n- @Lead: 负责拆解任务"));
+    assert!(prepared.system_prompt.contains("[1 · 房间公告]\n公告A：提交前必须跑 cargo test"));
+    assert!(prepared.system_prompt.contains("[3 · 房间公告]\n公告B：禁止直接修改 .env"));
+
+    manager.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_room_prompts_lifecycle_permissions_and_session_sync() {
+    let chatroom_wasm = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../extensions/chatroom/target/wasm32-wasip2/release/ragent_chatroom_extension.wasm");
+    if !chatroom_wasm.exists() {
+        return;
+    }
+
+    let mut api_exts = ApiServerExtensions::new();
+    api_exts.add_authn(Arc::new(StaticTokenAuthnPlugin::new("api-tok")));
+    let api_store = SqliteStore::open_in_memory().unwrap();
+    let api_state = ApiServerState::new(api_store, DEFAULT_LEASE_TTL_MS).with_extensions(api_exts);
+    let api_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cancel = CancellationToken::new();
+    let api_addr = serve_tcp(api_listener, api_state, cancel.clone())
+        .await
+        .unwrap();
+    let api_base = format!("http://{api_addr}");
+
+    let chat_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let chat_addr = chat_listener.local_addr().unwrap();
+    let chat_base = format!("http://{chat_addr}");
+    let chat_token = "chat-tok";
+
+    let ragents_client = RagentsClient::new(&api_base).with_auth_token(Some("api-tok".to_string()));
+    let chat_store = ChatroomStore::open_in_memory(
+        "gpt-4.1-mini",
+        vec![ExtensionSpec {
+            name: "chatroom".to_string(),
+            path: String::new(),
+            enabled: true,
+            config: json!({}),
+            allowed_dirs: vec![],
+            filter_env: vec![],
+        }],
+    )
+    .unwrap();
+    let coordinator = RoomCoordinator::new(chat_store.clone(), ragents_client.clone(), chat_base.clone());
+    let chat_state = ChatServerState::new(coordinator.clone(), Some(chat_token.to_string()));
+    serve_chat_tcp(chat_listener, chat_state, cancel.clone())
+        .await
+        .unwrap();
+
+    let http = reqwest::Client::new();
+    // 1. Default created room has empty `[""]` and version 0
+    let created: RoomDetailResponse = http
+        .post(format!("{chat_base}/api/v1/rooms"))
+        .bearer_auth(chat_token)
+        .json(&CreateRoomRequest {
+            name: "PromptSyncRoom".to_string(),
+            description: String::new(),
+            default_agent_name: Some("Lead".to_string()),
+            default_agent_role: Some("主导者".to_string()),
+            default_agent_persona: Some("Lead persona".to_string()),
+            default_agent_model: Some("gpt-4.1-mini".to_string()),
+            reasoning_effort: None,
+            reasoning_summary: None,
+            web_search: None,
+            prompt_hint: None,
+            node_id: None,
+            workspace_path: None,
+            room_prompts: None,
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let room_id = created.room.room_id.clone();
+    assert_eq!(created.room.room_prompts, vec![String::new()]);
+    assert_eq!(created.room.room_prompts_version, 0);
+
+    // Add a second regular specialist agent (`Worker`)
+    let worker_pub: RoomAgentPublic = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/agents"))
+        .bearer_auth(chat_token)
+        .json(&CreateAgentRequest {
+            name: "Worker".to_string(),
+            role_title: "执行者".to_string(),
+            avatar: "🛠️".to_string(),
+            persona_prompt: "Worker persona".to_string(),
+            model: Some("gpt-4.1-mini".to_string()),
+            reasoning_effort: None,
+            reasoning_summary: None,
+            web_search: None,
+            prompt_hint: None,
+            node_id: None,
+            workspace_path: None,
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let mgr_internal = chat_store.get_room_manager_agent(&room_id).unwrap().unwrap();
+    let lead_internal = chat_store.get_agent(&created.agents[0].agent_id).unwrap().unwrap();
+    let worker_internal = chat_store.get_agent(&worker_pub.agent_id).unwrap().unwrap();
+
+    // 2. Worker cannot `set_members` or `add`, but can `list`
+    let worker_list = http
+        .post(format!("{chat_base}/api/v1/internal/room-prompt"))
+        .bearer_auth(&worker_internal.agent_secret_token)
+        .json(&InternalRoomPromptRequest {
+            room_id: room_id.clone(),
+            agent_id: worker_internal.agent_id.clone(),
+            action: "list".to_string(),
+            content: None,
+            index: None,
+            expected_version: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(worker_list.status().as_u16(), 200);
+
+    let worker_add = http
+        .post(format!("{chat_base}/api/v1/internal/room-prompt"))
+        .bearer_auth(&worker_internal.agent_secret_token)
+        .json(&InternalRoomPromptRequest {
+            room_id: room_id.clone(),
+            agent_id: worker_internal.agent_id.clone(),
+            action: "add".to_string(),
+            content: Some("Unauthorized".to_string()),
+            index: None,
+            expected_version: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(worker_add.status().as_u16(), 403);
+
+    // 3. Lead cannot `set_members` (Manager only), but can `add` announcements
+    let lead_set_members = http
+        .post(format!("{chat_base}/api/v1/internal/room-prompt"))
+        .bearer_auth(&lead_internal.agent_secret_token)
+        .json(&InternalRoomPromptRequest {
+            room_id: room_id.clone(),
+            agent_id: lead_internal.agent_id.clone(),
+            action: "set_members".to_string(),
+            content: Some("Unauthorized members edit".to_string()),
+            index: None,
+            expected_version: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(lead_set_members.status().as_u16(), 403);
+
+    let lead_add = http
+        .post(format!("{chat_base}/api/v1/internal/room-prompt"))
+        .bearer_auth(&lead_internal.agent_secret_token)
+        .json(&InternalRoomPromptRequest {
+            room_id: room_id.clone(),
+            agent_id: lead_internal.agent_id.clone(),
+            action: "add".to_string(),
+            content: Some("公告1：代码修改需补充测试".to_string()),
+            index: None,
+            expected_version: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(lead_add.status().as_u16(), 200);
+
+    // 4. @Manager calls `set_members` and `add`
+    let mgr_members = http
+        .post(format!("{chat_base}/api/v1/internal/room-prompt"))
+        .bearer_auth(&mgr_internal.agent_secret_token)
+        .json(&InternalRoomPromptRequest {
+            room_id: room_id.clone(),
+            agent_id: mgr_internal.agent_id.clone(),
+            action: "set_members".to_string(),
+            content: Some("@Lead 负责架构，@Worker 负责落地".to_string()),
+            index: None,
+            expected_version: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mgr_members.status().as_u16(), 200);
+
+    // 5. Human user adds another announcement, then updates & removes with expected_version
+    let room_after_add: Room = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/prompts"))
+        .bearer_auth(chat_token)
+        .json(&RoomPromptMutationRequest {
+            action: "add".to_string(),
+            content: Some("公告2：周五前完成验证".to_string()),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(room_after_add.room_prompts_version, 3);
+    assert_eq!(
+        room_after_add.room_prompts,
+        vec![
+            "@Lead 负责架构，@Worker 负责落地".to_string(),
+            "公告1：代码修改需补充测试".to_string(),
+            "公告2：周五前完成验证".to_string(),
+        ]
+    );
+
+    // Stale expected_version returns 409 Conflict
+    let conflict_resp = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/prompts"))
+        .bearer_auth(chat_token)
+        .json(&RoomPromptMutationRequest {
+            action: "remove".to_string(),
+            index: Some(1),
+            expected_version: Some(1),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(conflict_resp.status().as_u16(), 409);
+
+    // Valid update of announcement #2, then remove #1
+    let room_after_update: Room = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/prompts"))
+        .bearer_auth(chat_token)
+        .json(&RoomPromptMutationRequest {
+            action: "update".to_string(),
+            index: Some(2),
+            content: Some("公告2（修订）：今天完成验证".to_string()),
+            expected_version: Some(3),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(room_after_update.room_prompts_version, 4);
+
+    let room_after_remove: Room = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/prompts"))
+        .bearer_auth(chat_token)
+        .json(&RoomPromptMutationRequest {
+            action: "remove".to_string(),
+            index: Some(1),
+            expected_version: Some(4),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(room_after_remove.room_prompts_version, 5);
+    assert_eq!(
+        room_after_remove.room_prompts,
+        vec![
+            "@Lead 负责架构，@Worker 负责落地".to_string(),
+            "公告2（修订）：今天完成验证".to_string(),
+        ]
+    );
+
+    // Verify ALL agent sessions in ragents-apiserver (Lead, Worker, and Manager) received synced config
+    for sid in [
+        &lead_internal.active_session_id,
+        &worker_internal.active_session_id,
+        &mgr_internal.active_session_id,
+    ] {
+        let sess = ragents_client.get_session(sid).await.unwrap().unwrap();
+        let chat_ext = sess
+            .spec
+            .extensions
+            .iter()
+            .find(|e| e.name == "chatroom")
+            .expect("chatroom extension");
+        assert_eq!(
+            chat_ext.config.get("room_prompts"),
+            Some(&json!(room_after_remove.room_prompts))
+        );
+    }
+
+    // 6. Clear announcements preserves [0] member info
+    let room_cleared: Room = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/prompts"))
+        .bearer_auth(chat_token)
+        .json(&RoomPromptMutationRequest {
+            action: "clear_announcements".to_string(),
+            expected_version: Some(5),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        room_cleared.room_prompts,
+        vec!["@Lead 负责架构，@Worker 负责落地".to_string()]
+    );
+
+    // 7. When original Lead is removed, Worker becomes agents[0] and gains announcement permission!
+    let rm_resp = http
+        .delete(format!(
+            "{chat_base}/api/v1/rooms/{room_id}/agents/{}",
+            lead_internal.agent_id
+        ))
+        .bearer_auth(chat_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rm_resp.status().as_u16(), 200);
+
+    let promoted_worker_add = http
+        .post(format!("{chat_base}/api/v1/internal/room-prompt"))
+        .bearer_auth(&worker_internal.agent_secret_token)
+        .json(&InternalRoomPromptRequest {
+            room_id: room_id.clone(),
+            agent_id: worker_internal.agent_id.clone(),
+            action: "add".to_string(),
+            content: Some("晋升主导后发布的新公告".to_string()),
+            index: None,
+            expected_version: None,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(promoted_worker_add.status().as_u16(), 200);
+
+    cancel.cancel();
 }

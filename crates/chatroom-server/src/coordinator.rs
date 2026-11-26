@@ -1176,6 +1176,10 @@ impl RoomCoordinator {
                     for ext in &mut exts {
                         if ext.name == "chatroom" {
                             if let Some(obj) = ext.config.as_object_mut() {
+                                let room_prompt_url = format!(
+                                    "{}/api/v1/internal/room-prompt",
+                                    self.callback_base_url.trim_end_matches('/')
+                                );
                                 if obj.get("room_tmp_dir").and_then(|v| v.as_str())
                                     != Some(room_tmp_dir.as_str())
                                 {
@@ -1187,6 +1191,20 @@ impl RoomCoordinator {
                                         "workspace_path".to_string(),
                                         serde_json::json!(room.workspace_path),
                                     );
+                                    ext_changed = true;
+                                }
+                                if obj.get("chatroom_room_prompt_url").and_then(|v| v.as_str())
+                                    != Some(room_prompt_url.as_str())
+                                {
+                                    obj.insert(
+                                        "chatroom_room_prompt_url".to_string(),
+                                        serde_json::json!(room_prompt_url),
+                                    );
+                                    ext_changed = true;
+                                }
+                                let desired_prompts = serde_json::json!(&room.room_prompts);
+                                if obj.get("room_prompts") != Some(&desired_prompts) {
+                                    obj.insert("room_prompts".to_string(), desired_prompts);
                                     ext_changed = true;
                                 }
                             }
@@ -1795,7 +1813,11 @@ impl RoomCoordinator {
         req: CreateRoomRequest,
     ) -> anyhow::Result<RoomDetailResponse> {
         let mgr = self.store.get_manager_settings()?;
-        let room = self.store.create_room(&req.name, &req.description)?;
+        let room = self.store.create_room_with_prompts(
+            &req.name,
+            &req.description,
+            req.room_prompts,
+        )?;
 
         let default_name = req
             .default_agent_name
@@ -1876,6 +1898,7 @@ impl RoomCoordinator {
         let callback_url = format!("{base}/api/v1/internal/agent-speak");
         let add_agent_url = format!("{base}/api/v1/internal/manager/add-agent");
         let remove_agent_url = format!("{base}/api/v1/internal/manager/remove-agent");
+        let room_prompt_url = format!("{base}/api/v1/internal/room-prompt");
 
         let room_tmp_dir = Self::room_tmp_dir(&room.room_id);
         let extra_tmp_dirs = vec![PathBuf::from(&room_tmp_dir)];
@@ -1889,10 +1912,12 @@ impl RoomCoordinator {
                 "chatroom_callback_url": callback_url,
                 "chatroom_add_agent_url": add_agent_url,
                 "chatroom_remove_agent_url": remove_agent_url,
+                "chatroom_room_prompt_url": room_prompt_url,
                 "room_id": room.room_id,
                 "room_name": room.name,
                 "workspace_path": room.workspace_path,
                 "room_tmp_dir": room_tmp_dir,
+                "room_prompts": room.room_prompts,
                 "agent_id": agent_id,
                 "agent_name": "Manager",
                 "agent_role": "聊天室管家",
@@ -2135,6 +2160,10 @@ impl RoomCoordinator {
             "{}/api/v1/internal/agent-schedule",
             self.callback_base_url.trim_end_matches('/')
         );
+        let room_prompt_url = format!(
+            "{}/api/v1/internal/room-prompt",
+            self.callback_base_url.trim_end_matches('/')
+        );
         extensions.push(ExtensionSpec {
             name: "chatroom".to_string(),
             path: String::new(),
@@ -2142,10 +2171,12 @@ impl RoomCoordinator {
             config: serde_json::json!({
                 "chatroom_callback_url": callback_url,
                 "chatroom_schedule_url": schedule_url,
+                "chatroom_room_prompt_url": room_prompt_url,
                 "room_id": room.room_id,
                 "room_name": room.name,
                 "workspace_path": pinned_workspace_str,
                 "room_tmp_dir": room_tmp_dir,
+                "room_prompts": room.room_prompts,
                 "agent_id": agent_id,
                 "agent_name": clean_name,
                 "agent_role": req.role_title,
@@ -2898,6 +2929,243 @@ impl RoomCoordinator {
                 ),
             )),
         }
+    }
+
+    pub async fn sync_room_prompts_to_sessions(
+        &self,
+        room_id: &str,
+        room_prompts: &[String],
+    ) -> anyhow::Result<()> {
+        let mut session_ids = Vec::new();
+        for ag in self.store.list_room_agents(room_id)? {
+            if !session_ids.contains(&ag.active_session_id) {
+                session_ids.push(ag.active_session_id);
+            }
+        }
+        if let Ok(Some(mgr)) = self.store.get_room_manager_agent(room_id) {
+            if !session_ids.contains(&mgr.active_session_id) {
+                session_ids.push(mgr.active_session_id);
+            }
+        }
+        if session_ids.is_empty() {
+            return Ok(());
+        }
+
+        let room_prompt_url = format!(
+            "{}/api/v1/internal/room-prompt",
+            self.callback_base_url.trim_end_matches('/')
+        );
+        let prompts_val = serde_json::json!(room_prompts);
+        let futs = session_ids.into_iter().map(|sid| {
+            let client = self.ragents_client.clone();
+            let prompts_val = prompts_val.clone();
+            let room_prompt_url = room_prompt_url.clone();
+            async move {
+                let Some(sess) = client.get_session(&sid).await? else {
+                    return Ok::<(), anyhow::Error>(());
+                };
+                let mut exts = sess.spec.extensions.clone();
+                let mut changed = false;
+                for ext in &mut exts {
+                    if ext.name == "chatroom" {
+                        if let Some(obj) = ext.config.as_object_mut() {
+                            if obj.get("room_prompts") != Some(&prompts_val) {
+                                obj.insert("room_prompts".to_string(), prompts_val.clone());
+                                changed = true;
+                            }
+                            if obj.get("chatroom_room_prompt_url").and_then(|v| v.as_str())
+                                != Some(room_prompt_url.as_str())
+                            {
+                                obj.insert(
+                                    "chatroom_room_prompt_url".to_string(),
+                                    serde_json::json!(room_prompt_url.clone()),
+                                );
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                if changed {
+                    client
+                        .patch_session(
+                            &sid,
+                            PatchSessionSpecRequest {
+                                extensions: Some(exts),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
+                }
+                Ok(())
+            }
+        });
+
+        for res in futures::future::join_all(futs).await {
+            res?;
+        }
+        Ok(())
+    }
+
+    pub async fn mutate_room_prompts_by_user(
+        &self,
+        room_id: &str,
+        req: RoomPromptMutationRequest,
+        actor: &str,
+    ) -> Result<Room, (u16, String)> {
+        let action_for_log = req.action.clone();
+        let index_for_log = req.index;
+        let (updated, changed) = self
+            .store
+            .mutate_room_prompts(room_id, &req, actor)
+            .map_err(|e| match e {
+                crate::store::ChatStoreError::NotFound(m) => (404, m),
+                crate::store::ChatStoreError::Conflict(m) => (409, m),
+                crate::store::ChatStoreError::InvalidInput(m) => (400, m),
+                other => (500, other.to_string()),
+            })?;
+
+        if changed {
+            self.sync_room_prompts_to_sessions(room_id, &updated.room_prompts)
+                .await
+                .map_err(|e| (502, format!("同步房间公共 Prompt 到 Agent 会话失败: {e}")))?;
+
+            self.emit_room_event(ChatroomEvent::RoomUpdated {
+                room_id: room_id.to_string(),
+                room: updated.clone(),
+            });
+            self.emit_flow_status(
+                room_id,
+                format!(
+                    "[📌 公共 Prompt] {} {} (v{}, 公告 {} 条)",
+                    actor,
+                    describe_room_prompt_action(&action_for_log, index_for_log),
+                    updated.room_prompts_version,
+                    updated.room_prompts.len().saturating_sub(1)
+                ),
+            );
+        }
+
+        Ok(updated)
+    }
+
+    pub async fn handle_internal_room_prompt(
+        &self,
+        bearer_token: Option<&str>,
+        req: InternalRoomPromptRequest,
+    ) -> Result<serde_json::Value, (u16, String)> {
+        let agent = self
+            .store
+            .get_agent(&req.agent_id)
+            .map_err(|e| (500, e.to_string()))?
+            .ok_or_else(|| (404, format!("agent {} not found", req.agent_id)))?;
+
+        if agent.room_id != req.room_id {
+            return Err((403, "agent does not belong to target room".to_string()));
+        }
+
+        let provided = bearer_token.unwrap_or("");
+        if !constant_time_eq(provided, &agent.agent_secret_token) {
+            return Err((401, "invalid agent_secret_token".to_string()));
+        }
+
+        let action = req.action.trim().to_ascii_lowercase();
+        if action == "list" || action == "get" {
+            let room = self
+                .store
+                .get_room(&req.room_id)
+                .map_err(|e| (500, e.to_string()))?
+                .ok_or_else(|| (404, format!("room {} not found", req.room_id)))?;
+            return Ok(format_room_prompts_response(&room));
+        }
+
+        let is_manager = agent.name.eq_ignore_ascii_case("Manager");
+        let agents = self
+            .store
+            .list_room_agents(&req.room_id)
+            .map_err(|e| (500, e.to_string()))?;
+        let lead_agent = agents.first();
+        let is_lead = !is_manager
+            && lead_agent
+                .map(|a| a.agent_id == agent.agent_id)
+                .unwrap_or(false);
+
+        match action.as_str() {
+            "set_members" => {
+                if !is_manager {
+                    return Err((
+                        403,
+                        "Permission denied: only @Manager can call chatroom_room_prompt(action='set_members') to update [0] member roster info. Ask @Manager if team info needs updating.".to_string(),
+                    ));
+                }
+            }
+            "add" | "update" | "remove" | "clear_announcements" => {
+                if !is_manager && !is_lead {
+                    let lead_hint = lead_agent
+                        .map(|a| format!("@{}", a.name))
+                        .unwrap_or_else(|| "Default Room Lead".to_string());
+                    return Err((
+                        403,
+                        format!(
+                            "Permission denied: only @Manager or the Default Room Lead ({lead_hint}) can modify room announcements. Please ask them to update announcements."
+                        ),
+                    ));
+                }
+            }
+            other => {
+                return Err((
+                    400,
+                    format!(
+                        "unsupported action '{other}' (expected 'list', 'set_members', 'add', 'update', 'remove', or 'clear_announcements')"
+                    ),
+                ));
+            }
+        }
+
+        let mutation = RoomPromptMutationRequest {
+            action: action.clone(),
+            content: req.content,
+            index: req.index,
+            room_prompts: None,
+            expected_version: req.expected_version,
+        };
+        let actor = format!("@{}", agent.name);
+        let (updated, changed) = self
+            .store
+            .mutate_room_prompts(&req.room_id, &mutation, &actor)
+            .map_err(|e| match e {
+                crate::store::ChatStoreError::NotFound(m) => (404, m),
+                crate::store::ChatStoreError::Conflict(m) => (409, m),
+                crate::store::ChatStoreError::InvalidInput(m) => (400, m),
+                other => (500, other.to_string()),
+            })?;
+
+        if changed {
+            self.sync_room_prompts_to_sessions(&req.room_id, &updated.room_prompts)
+                .await
+                .map_err(|e| {
+                    (
+                        502,
+                        format!("failed to propagate updated room_prompts to agent sessions: {e}"),
+                    )
+                })?;
+
+            self.emit_room_event(ChatroomEvent::RoomUpdated {
+                room_id: req.room_id.clone(),
+                room: updated.clone(),
+            });
+            self.emit_flow_status(
+                &req.room_id,
+                format!(
+                    "[📌 公共 Prompt] {} {} (v{}, 公告 {} 条)",
+                    actor,
+                    describe_room_prompt_action(&action, req.index),
+                    updated.room_prompts_version,
+                    updated.room_prompts.len().saturating_sub(1)
+                ),
+            );
+        }
+
+        Ok(format_room_prompts_response(&updated))
     }
 
     pub fn broadcast_agent_schedules_updated(&self, room_id: &str, agent_id: &str) {
@@ -4705,4 +4973,41 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+fn format_room_prompts_response(room: &Room) -> serde_json::Value {
+    let announcements: Vec<serde_json::Value> = room
+        .room_prompts
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(idx, text)| {
+            serde_json::json!({
+                "index": idx,
+                "content": text,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "ok": true,
+        "room_id": room.room_id,
+        "version": room.room_prompts_version,
+        "members_info": room.room_prompts.first().cloned().unwrap_or_default(),
+        "announcements": announcements,
+        "room_prompts": room.room_prompts,
+        "updated_at": room.room_prompts_updated_at,
+        "updated_by": room.room_prompts_updated_by,
+    })
+}
+
+fn describe_room_prompt_action(action: &str, index: Option<usize>) -> String {
+    match action.trim().to_ascii_lowercase().as_str() {
+        "set_members" => "更新了 [0] 成员信息".to_string(),
+        "add" => "追加了一条房间公告".to_string(),
+        "update" => format!("更新了第 [{}] 条公告", index.unwrap_or(0)),
+        "remove" => format!("删除了第 [{}] 条公告", index.unwrap_or(0)),
+        "clear_announcements" => "清空了全部房间公告".to_string(),
+        "replace_all" => "更新了房间公共 Prompt 列表".to_string(),
+        other => format!("执行了 {other}"),
+    }
 }

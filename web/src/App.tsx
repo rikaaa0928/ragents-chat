@@ -3,6 +3,7 @@ import {
   Room,
   RoomListItem,
   RoomDetailResponse,
+  RoomPromptMutationPayload,
   InspectorSnapshot,
   ManagerSettings,
   ClusterNode,
@@ -1333,6 +1334,27 @@ export const App: React.FC = () => {
     setCurrentDetail((prev) => (prev ? { ...prev, room: updated } : null));
   };
 
+  const handleMutateRoomPrompts = useCallback(
+    async (payload: RoomPromptMutationPayload): Promise<Room | null> => {
+      if (!currentRoomId) return null;
+      const updated: Room = await apiFetch(
+        `/api/v1/rooms/${currentRoomId}/prompts`,
+        {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        }
+      );
+      setCurrentDetail((prev) => (prev ? { ...prev, room: updated } : null));
+      setRoomsList((list) =>
+        list.map((r) =>
+          r.room.room_id === updated.room_id ? { ...r, room: updated } : r
+        )
+      );
+      return updated;
+    },
+    [apiFetch, currentRoomId]
+  );
+
   const handleResumeRelay = async () => {
     if (!currentRoomId) return;
     const updated = await apiFetch(`/api/v1/rooms/${currentRoomId}/resume-relay`, {
@@ -1492,6 +1514,8 @@ export const App: React.FC = () => {
             setInspectorColumnOpen(!inspectorColumnOpen);
           }}
           onUpdateRoomControls={handleUpdateRoomControls}
+          onMutateRoomPrompts={handleMutateRoomPrompts}
+          onInspectAgent={handleInspectAgentOpen}
           onResumeRelay={handleResumeRelay}
           onDeleteRoom={async () => {
             if (!currentRoomId) return;

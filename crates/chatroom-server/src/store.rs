@@ -18,6 +18,47 @@ pub enum ChatStoreError {
     NotFound(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+}
+
+const ROOM_SELECT_COLS: &str =
+    "r.room_id, r.name, r.description, r.last_msg_seq, r.roster_version,
+     r.peek_enabled, r.peek_idle_secs, r.peek_msg_interval, r.interject_enabled,
+     r.mute_probability, r.max_agent_relay_depth, r.consecutive_agent_msgs,
+     r.created_at, r.updated_at, r.node_id, r.workspace_path, r.peek_idle_mode,
+     r.room_prompts_json, r.room_prompts_version, r.room_prompts_updated_at, r.room_prompts_updated_by";
+
+fn parse_room_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Room> {
+    let mode_str: String = r.get(16)?;
+    let prompts_raw: String = r.get(17)?;
+    let prompts = normalize_room_prompts(
+        serde_json::from_str::<Vec<String>>(&prompts_raw).unwrap_or_else(|_| vec![String::new()]),
+    );
+    let updated_at_opt: Option<String> = r.get(19)?;
+    Ok(Room {
+        room_id: r.get(0)?,
+        name: r.get(1)?,
+        description: r.get(2)?,
+        node_id: r.get(14)?,
+        workspace_path: r.get(15)?,
+        room_prompts: prompts,
+        room_prompts_version: r.get::<_, i64>(18)? as u64,
+        room_prompts_updated_at: updated_at_opt.as_deref().map(parse_dt),
+        room_prompts_updated_by: r.get(20)?,
+        last_msg_seq: r.get::<_, i64>(3)? as u64,
+        roster_version: r.get::<_, i64>(4)? as u64,
+        peek_enabled: r.get::<_, i64>(5)? != 0,
+        peek_idle_mode: PeekIdleMode::from_str(&mode_str),
+        peek_idle_secs: r.get::<_, i64>(6)? as u64,
+        peek_msg_interval: r.get::<_, i64>(7)? as u32,
+        interject_enabled: r.get::<_, i64>(8)? != 0,
+        mute_probability: (r.get::<_, i64>(9)?.clamp(0, 100)) as u8,
+        max_agent_relay_depth: r.get::<_, i64>(10)? as u32,
+        consecutive_agent_msgs: r.get::<_, i64>(11)? as u32,
+        created_at: parse_dt(&r.get::<_, String>(12)?),
+        updated_at: parse_dt(&r.get::<_, String>(13)?),
+    })
 }
 
 #[derive(Clone)]
@@ -82,6 +123,10 @@ impl ChatroomStore {
                  description             TEXT NOT NULL DEFAULT '',
                  node_id                 TEXT,
                  workspace_path          TEXT,
+                 room_prompts_json       TEXT NOT NULL DEFAULT '[\"\"]',
+                 room_prompts_version    INTEGER NOT NULL DEFAULT 0,
+                 room_prompts_updated_at TEXT,
+                 room_prompts_updated_by TEXT,
                  last_msg_seq            INTEGER NOT NULL DEFAULT 0,
                  roster_version          INTEGER NOT NULL DEFAULT 1,
                  peek_enabled            INTEGER NOT NULL DEFAULT 0,
@@ -376,15 +421,38 @@ You manage the room's specialist agent roster using your tools:\n\
     }
 
     pub fn create_room(&self, name: &str, description: &str) -> Result<Room, ChatStoreError> {
+        self.create_room_with_prompts(name, description, None)
+    }
+
+    pub fn create_room_with_prompts(
+        &self,
+        name: &str,
+        description: &str,
+        initial_prompts: Option<Vec<String>>,
+    ) -> Result<Room, ChatStoreError> {
         let mgr = self.get_manager_settings()?;
         let room_id = format!("room_{}", Uuid::now_v7());
         let now = Utc::now();
+        let prompts = normalize_room_prompts(initial_prompts.unwrap_or_default());
+        validate_room_prompts(&prompts).map_err(ChatStoreError::InvalidInput)?;
+        let has_initial_prompt = prompts.iter().any(|p| !p.is_empty());
+        let prompts_version = if has_initial_prompt { 1 } else { 0 };
+        let prompts_updated_at = if has_initial_prompt { Some(now) } else { None };
+        let prompts_updated_by = if has_initial_prompt {
+            Some("@Human".to_string())
+        } else {
+            None
+        };
         let room = Room {
             room_id: room_id.clone(),
             name: name.to_string(),
             description: description.to_string(),
             node_id: None,
             workspace_path: None,
+            room_prompts: prompts,
+            room_prompts_version: prompts_version,
+            room_prompts_updated_at: prompts_updated_at,
+            room_prompts_updated_by: prompts_updated_by,
             last_msg_seq: 0,
             roster_version: 1,
             peek_enabled: false,
@@ -402,15 +470,21 @@ You manage the room's specialist agent roster using your tools:\n\
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
             "INSERT INTO rooms (
-                room_id, name, description, node_id, workspace_path, last_msg_seq, roster_version,
+                room_id, name, description, node_id, workspace_path,
+                room_prompts_json, room_prompts_version, room_prompts_updated_at, room_prompts_updated_by,
+                last_msg_seq, roster_version,
                 peek_enabled, peek_idle_mode, peek_idle_secs, peek_msg_interval, interject_enabled,
                 mute_probability, max_agent_relay_depth, consecutive_agent_msgs,
                 created_at, updated_at
-             ) VALUES (?1, ?2, ?3, NULL, NULL, 0, 1, 0, 'global', 60, 20, 0, 40, ?4, 0, ?5, ?5)",
+             ) VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5, ?6, ?7, 0, 1, 0, 'global', 60, 20, 0, 40, ?8, 0, ?9, ?9)",
             params![
                 &room.room_id,
                 &room.name,
                 &room.description,
+                serde_json::to_string(&room.room_prompts)?,
+                room.room_prompts_version as i64,
+                room.room_prompts_updated_at.map(|dt| dt.to_rfc3339()),
+                &room.room_prompts_updated_by,
                 room.max_agent_relay_depth as i64,
                 now.to_rfc3339(),
             ],
@@ -438,71 +512,17 @@ You manage the room's specialist agent roster using your tools:\n\
     }
 
     fn load_room_from_conn(conn: &Connection, room_id: &str) -> Result<Option<Room>, ChatStoreError> {
-        conn.query_row(
-            "SELECT room_id, name, description, last_msg_seq, roster_version,
-                    peek_enabled, peek_idle_secs, peek_msg_interval, interject_enabled,
-                    mute_probability, max_agent_relay_depth, consecutive_agent_msgs,
-                    created_at, updated_at, node_id, workspace_path, peek_idle_mode
-             FROM rooms WHERE room_id = ?1",
-            params![room_id],
-            |r| {
-                let mode_str: String = r.get(16)?;
-                Ok(Room {
-                    room_id: r.get(0)?,
-                    name: r.get(1)?,
-                    description: r.get(2)?,
-                    node_id: r.get(14)?,
-                    workspace_path: r.get(15)?,
-                    last_msg_seq: r.get::<_, i64>(3)? as u64,
-                    roster_version: r.get::<_, i64>(4)? as u64,
-                    peek_enabled: r.get::<_, i64>(5)? != 0,
-                    peek_idle_mode: PeekIdleMode::from_str(&mode_str),
-                    peek_idle_secs: r.get::<_, i64>(6)? as u64,
-                    peek_msg_interval: r.get::<_, i64>(7)? as u32,
-                    interject_enabled: r.get::<_, i64>(8)? != 0,
-                    mute_probability: (r.get::<_, i64>(9)?.clamp(0, 100)) as u8,
-                    max_agent_relay_depth: r.get::<_, i64>(10)? as u32,
-                    consecutive_agent_msgs: r.get::<_, i64>(11)? as u32,
-                    created_at: parse_dt(&r.get::<_, String>(12)?),
-                    updated_at: parse_dt(&r.get::<_, String>(13)?),
-                })
-            },
-        )
-        .optional()
-        .map_err(Into::into)
+        let sql = format!("SELECT {ROOM_SELECT_COLS} FROM rooms r WHERE r.room_id = ?1");
+        conn.query_row(&sql, params![room_id], parse_room_row)
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn list_rooms(&self) -> Result<Vec<Room>, ChatStoreError> {
         let conn = self.conn.lock().expect("store mutex poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT room_id, name, description, last_msg_seq, roster_version,
-                    peek_enabled, peek_idle_secs, peek_msg_interval, interject_enabled,
-                    mute_probability, max_agent_relay_depth, consecutive_agent_msgs,
-                    created_at, updated_at, node_id, workspace_path, peek_idle_mode
-             FROM rooms ORDER BY updated_at DESC",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            let mode_str: String = r.get(16)?;
-            Ok(Room {
-                room_id: r.get(0)?,
-                name: r.get(1)?,
-                description: r.get(2)?,
-                node_id: r.get(14)?,
-                workspace_path: r.get(15)?,
-                last_msg_seq: r.get::<_, i64>(3)? as u64,
-                roster_version: r.get::<_, i64>(4)? as u64,
-                peek_enabled: r.get::<_, i64>(5)? != 0,
-                peek_idle_mode: PeekIdleMode::from_str(&mode_str),
-                peek_idle_secs: r.get::<_, i64>(6)? as u64,
-                peek_msg_interval: r.get::<_, i64>(7)? as u32,
-                interject_enabled: r.get::<_, i64>(8)? != 0,
-                mute_probability: (r.get::<_, i64>(9)?.clamp(0, 100)) as u8,
-                max_agent_relay_depth: r.get::<_, i64>(10)? as u32,
-                consecutive_agent_msgs: r.get::<_, i64>(11)? as u32,
-                created_at: parse_dt(&r.get::<_, String>(12)?),
-                updated_at: parse_dt(&r.get::<_, String>(13)?),
-            })
-        })?;
+        let sql = format!("SELECT {ROOM_SELECT_COLS} FROM rooms r ORDER BY r.updated_at DESC");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], parse_room_row)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -512,45 +532,149 @@ You manage the room's specialist agent roster using your tools:\n\
 
     pub fn list_rooms_bound_to_node(&self, node_id: &str) -> Result<Vec<Room>, ChatStoreError> {
         let conn = self.conn.lock().expect("store mutex poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT r.room_id, r.name, r.description, r.last_msg_seq, r.roster_version,
-                    r.peek_enabled, r.peek_idle_secs, r.peek_msg_interval, r.interject_enabled,
-                    r.mute_probability, r.max_agent_relay_depth, r.consecutive_agent_msgs,
-                    r.created_at, r.updated_at, r.node_id, r.workspace_path, r.peek_idle_mode
+        let sql = format!(
+            "SELECT DISTINCT {ROOM_SELECT_COLS}
              FROM rooms r
              LEFT JOIN room_agents a ON a.room_id = r.room_id
              WHERE r.node_id = ?1
                 OR (json_extract(a.scheduling_json, '$.mode') = 'pinned'
                     AND json_extract(a.scheduling_json, '$.node_id') = ?1)
-             ORDER BY r.updated_at DESC",
-        )?;
-        let rows = stmt.query_map(params![node_id], |r| {
-            let mode_str: String = r.get(16)?;
-            Ok(Room {
-                room_id: r.get(0)?,
-                name: r.get(1)?,
-                description: r.get(2)?,
-                node_id: r.get(14)?,
-                workspace_path: r.get(15)?,
-                last_msg_seq: r.get::<_, i64>(3)? as u64,
-                roster_version: r.get::<_, i64>(4)? as u64,
-                peek_enabled: r.get::<_, i64>(5)? != 0,
-                peek_idle_mode: PeekIdleMode::from_str(&mode_str),
-                peek_idle_secs: r.get::<_, i64>(6)? as u64,
-                peek_msg_interval: r.get::<_, i64>(7)? as u32,
-                interject_enabled: r.get::<_, i64>(8)? != 0,
-                mute_probability: (r.get::<_, i64>(9)?.clamp(0, 100)) as u8,
-                max_agent_relay_depth: r.get::<_, i64>(10)? as u32,
-                consecutive_agent_msgs: r.get::<_, i64>(11)? as u32,
-                created_at: parse_dt(&r.get::<_, String>(12)?),
-                updated_at: parse_dt(&r.get::<_, String>(13)?),
-            })
-        })?;
+             ORDER BY r.updated_at DESC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![node_id], parse_room_row)?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    pub fn mutate_room_prompts(
+        &self,
+        room_id: &str,
+        req: &RoomPromptMutationRequest,
+        actor: &str,
+    ) -> Result<(Room, bool), ChatStoreError> {
+        let mut conn = self.conn.lock().expect("store mutex poisoned");
+        let tx = conn.transaction()?;
+        let mut room = Self::load_room_from_conn(&tx, room_id)?
+            .ok_or_else(|| ChatStoreError::NotFound(format!("room {room_id}")))?;
+
+        if let Some(expected_ver) = req.expected_version {
+            if expected_ver != room.room_prompts_version {
+                return Err(ChatStoreError::Conflict(format!(
+                    "room_prompts 版本冲突：期望 v{expected_ver}，当前为 v{}。最新条目：{}",
+                    room.room_prompts_version,
+                    serde_json::to_string(&room.room_prompts).unwrap_or_default()
+                )));
+            }
+        }
+
+        let mut next = normalize_room_prompts(room.room_prompts.clone());
+        let action = req.action.trim().to_ascii_lowercase();
+        match action.as_str() {
+            "set_members" => {
+                next[0] = req.content.as_deref().unwrap_or("").trim().to_string();
+            }
+            "add" => {
+                let text = req.content.as_deref().unwrap_or("").trim().to_string();
+                if text.is_empty() {
+                    return Err(ChatStoreError::InvalidInput(
+                        "公告内容不能为空".to_string(),
+                    ));
+                }
+                next.push(text);
+            }
+            "update" => {
+                let idx = req.index.ok_or_else(|| {
+                    ChatStoreError::InvalidInput("update 需要指定公告 index (>= 1)".to_string())
+                })?;
+                if idx == 0 {
+                    return Err(ChatStoreError::InvalidInput(
+                        "第 [0] 项固定为成员信息，请使用 action='set_members' 修改".to_string(),
+                    ));
+                }
+                if idx >= next.len() {
+                    return Err(ChatStoreError::InvalidInput(format!(
+                        "公告序号 [{idx}] 不存在（当前共 {} 条公告）",
+                        next.len().saturating_sub(1)
+                    )));
+                }
+                let text = req.content.as_deref().unwrap_or("").trim().to_string();
+                if text.is_empty() {
+                    return Err(ChatStoreError::InvalidInput(
+                        "公告内容不能为空；如需删除请使用 action='remove'".to_string(),
+                    ));
+                }
+                next[idx] = text;
+            }
+            "remove" => {
+                let idx = req.index.ok_or_else(|| {
+                    ChatStoreError::InvalidInput("remove 需要指定公告 index (>= 1)".to_string())
+                })?;
+                if idx == 0 {
+                    return Err(ChatStoreError::InvalidInput(
+                        "第 [0] 项固定为成员信息，不可删除（可通过 set_members 置空）".to_string(),
+                    ));
+                }
+                if idx >= next.len() {
+                    return Err(ChatStoreError::InvalidInput(format!(
+                        "公告序号 [{idx}] 不存在（当前共 {} 条公告）",
+                        next.len().saturating_sub(1)
+                    )));
+                }
+                next.remove(idx);
+            }
+            "clear_announcements" => {
+                next.truncate(1);
+            }
+            "replace_all" => {
+                let raw = req.room_prompts.clone().ok_or_else(|| {
+                    ChatStoreError::InvalidInput("replace_all 缺少 room_prompts 列表".to_string())
+                })?;
+                next = normalize_room_prompts(raw);
+            }
+            other => {
+                return Err(ChatStoreError::InvalidInput(format!(
+                    "不支持的 room_prompts action: {other}"
+                )));
+            }
+        }
+
+        let next = normalize_room_prompts(next);
+        validate_room_prompts(&next).map_err(ChatStoreError::InvalidInput)?;
+
+        if next == room.room_prompts {
+            return Ok((room, false));
+        }
+
+        let now = Utc::now();
+        room.room_prompts = next;
+        room.room_prompts_version += 1;
+        room.room_prompts_updated_at = Some(now);
+        room.room_prompts_updated_by = Some(actor.to_string());
+        room.updated_at = now;
+
+        tx.execute(
+            "UPDATE rooms SET
+                room_prompts_json = ?1,
+                room_prompts_version = ?2,
+                room_prompts_updated_at = ?3,
+                room_prompts_updated_by = ?4,
+                updated_at = ?5
+             WHERE room_id = ?6",
+            params![
+                serde_json::to_string(&room.room_prompts)?,
+                room.room_prompts_version as i64,
+                now.to_rfc3339(),
+                actor,
+                now.to_rfc3339(),
+                room_id,
+            ],
+        )?;
+        tx.commit()?;
+        Ok((room, true))
     }
 
     pub fn patch_room(&self, room_id: &str, patch: PatchRoomRequest) -> Result<Room, ChatStoreError> {

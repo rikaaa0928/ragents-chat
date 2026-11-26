@@ -22,6 +22,8 @@ struct ChatroomPluginConfig {
     #[serde(default)]
     chatroom_remove_agent_url: String,
     #[serde(default)]
+    chatroom_room_prompt_url: String,
+    #[serde(default)]
     room_id: String,
     #[serde(default)]
     room_name: String,
@@ -29,6 +31,8 @@ struct ChatroomPluginConfig {
     workspace_path: Option<String>,
     #[serde(default)]
     room_tmp_dir: String,
+    #[serde(default)]
+    room_prompts: Vec<String>,
     #[serde(default)]
     agent_id: String,
     #[serde(default)]
@@ -54,6 +58,38 @@ impl ChatroomPluginConfig {
             return format!("{prefix}/api/v1/internal/agent-schedule");
         }
         String::new()
+    }
+
+    fn resolve_room_prompt_url(&self) -> String {
+        if !self.chatroom_room_prompt_url.trim().is_empty() {
+            return self.chatroom_room_prompt_url.trim().to_string();
+        }
+        if let Some(prefix) = self
+            .chatroom_callback_url
+            .trim()
+            .strip_suffix("/api/v1/internal/agent-speak")
+        {
+            return format!("{prefix}/api/v1/internal/room-prompt");
+        }
+        String::new()
+    }
+}
+
+fn format_room_prompt_section(room_prompts: &[String]) -> String {
+    let mut sections = Vec::new();
+    if let Some(members) = room_prompts.first().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        sections.push(format!("[0 · 成员信息]\n{members}"));
+    }
+    for (idx, item) in room_prompts.iter().enumerate().skip(1) {
+        let trimmed = item.trim();
+        if !trimmed.is_empty() {
+            sections.push(format!("[{idx} · 房间公告]\n{trimmed}"));
+        }
+    }
+    if sections.is_empty() {
+        String::new()
+    } else {
+        format!("<room_prompt>\n{}\n</room_prompt>", sections.join("\n\n"))
     }
 }
 
@@ -352,6 +388,10 @@ CRITICAL RULES FOR @MANAGER TOOL EXECUTION:\n\
    - If you only removed agents or answered a question from @Human without needing another Agent to act immediately, set `mentions: [\"Human\"]` or `[]`.\n\
 3. PRIVATE INNER LOOP vs PUBLIC SPEECH:\n\
    - Normal assistant text output is private to your internal session. You MUST call `chatroom_speak` so your final reply appears in the chatroom.\n\
+4. SHARED ROOM PROMPT (`chatroom_room_prompt`):\n\
+   - This room maintains a shared string list (`[0]` = member roster & division of labor; `[1..N]` = shared announcements) appended into EVERY agent's system prompt.\n\
+   - When you recruit/remove agents or reorganize team duties, consider calling `chatroom_room_prompt` (`action: \"list\"` then `\"set_members\"`) to keep `[0]` concise and accurate.\n\
+   - You can also manage announcements (`add`/`update`/`remove`/`clear_announcements`) when needed; pass `expected_version` from `list` when updating or removing by index.\n\
 </manager_protocol>"
                     )
                 } else {
@@ -375,8 +415,9 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
    - Even if another Agent @mentioned you, if the task is already complete or you have no new substantive information to add, DO NOT call `chatroom_speak`—simply finish your internal turn with a brief private note or summary in your own words.\n\
    - After calling `chatroom_speak`, finish your internal turn naturally with a short private summary of what you did (never repeat fixed boilerplate words).\n\
    - All chatroom messages are visible to @Human and all members. Contribute ONLY incremental domain insights; NEVER copy-paste or re-summarize a full guide that was already posted in earlier messages unless @Human explicitly asks for a new revision.\n\
-4. DEFAULT LEAD AGENT & @MANAGER RECRUITMENT:\n\
+4. DEFAULT LEAD AGENT, @MANAGER RECRUITMENT & SHARED ROOM PROMPT:\n\
    - Unless @Human designates another lead, the FIRST Agent in the room roster (marked `[Default Room Lead]`) is the lead coordinator: responsible for decomposing tasks, delegating specific subtasks to specialists via `mentions`, and doing a single concise wrap-up (with `mentions: [\"Human\"]` ONLY) once specialists finish.\n\
+   - The Default Room Lead can also use `chatroom_room_prompt` (`action: \"list\" | \"add\" | \"update\" | \"remove\" | \"clear_announcements\"`) to maintain persistent room-wide announcements (`[1..N]`) that are injected into every agent's system prompt (pass `expected_version` when updating or removing by index). Regular specialists have read-only access.\n\
    - If a task requires adding or removing a specialist Agent in the room, call `chatroom_speak` with `mentions: [\"Manager\"]` and describe the needed role, model, and skills.\n\
 5. PRIVATE WHISPERS & VISIBILITY ISOLATION (`visible_to`):\n\
    - By default (`visible_to` omitted or empty `[]`), your `chatroom_speak` message is public to everyone in the room.\n\
@@ -391,6 +432,13 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
    - When a scheduled task triggers (`<scheduled_task_trigger ...>`), you will be woken up in your private session with the `task_prompt` you configured. Execute the required tools/checks first, and call `chatroom_speak` if you need to report findings to @Human.\n\
 </chatroom_protocol>"
                     )
+                };
+
+                let room_prompt_section = format_room_prompt_section(&cfg.room_prompts);
+                let append_system_prompt = if room_prompt_section.is_empty() {
+                    protocol_prompt
+                } else {
+                    format!("{protocol_prompt}\n\n{room_prompt_section}")
                 };
 
                 let mut tools = Vec::new();
@@ -518,6 +566,36 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                 tools.push(json!({
                     "enabled": true,
                     "concurrency_safe": false,
+                    "name": "chatroom_room_prompt",
+                    "description": "Read or manage the room's shared public prompt list injected into EVERY agent's system prompt (`[0]` = member roster & division of labor; `[1..N]` = shared room announcements). `list` is readable by all agents; `set_members` is for @Manager only; `add`/`update`/`remove`/`clear_announcements` are for @Manager or the Default Room Lead.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["list", "set_members", "add", "update", "remove", "clear_announcements"],
+                                "description": "Operation to perform: 'list' (inspect current version, [0] members info, and [1..N] announcements), 'set_members' (@Manager sets [0] member roster summary; empty string clears), 'add' (append a new announcement), 'update' (edit announcement at `index >= 1`), 'remove' (delete announcement at `index >= 1`), 'clear_announcements' (clear all announcements while keeping [0])."
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Content for 'set_members', 'add', or 'update'."
+                            },
+                            "index": {
+                                "type": "integer",
+                                "description": "1-based announcement index (`>= 1`) required for 'update' and 'remove'."
+                            },
+                            "expected_version": {
+                                "type": "integer",
+                                "description": "Optional current `version` from 'list' for optimistic concurrency control (recommended on 'update' and 'remove' to prevent index-shift mistakes)."
+                            }
+                        },
+                        "required": ["action"]
+                    }
+                }));
+
+                tools.push(json!({
+                    "enabled": true,
+                    "concurrency_safe": false,
                     "name": "chatroom_speak",
                     "description": "Post a public message to the chatroom. Call this ONLY when you have substantive content to share. Do NOT call this for polite sign-offs ('收到', '已签收', '待命').",
                     "parameters": {
@@ -549,7 +627,7 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                 Ok(json!({
                     "action": "continue",
                     "payload": {
-                        "append_system_prompt": protocol_prompt,
+                        "append_system_prompt": append_system_prompt,
                         "tools": tools
                     }
                 })
@@ -569,6 +647,17 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                         == Some("list");
                     if let Some(obj) = payload.as_object_mut() {
                         obj.insert("concurrency_safe".to_string(), json!(is_list));
+                    }
+                    Ok(json!({ "action": "continue", "payload": payload }).to_string())
+                } else if tool_name == "chatroom_room_prompt" {
+                    let action_str = payload
+                        .get("arguments")
+                        .and_then(|a| a.get("action"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let is_read = action_str == "list" || action_str == "get";
+                    if let Some(obj) = payload.as_object_mut() {
+                        obj.insert("concurrency_safe".to_string(), json!(is_read));
                     }
                     Ok(json!({ "action": "continue", "payload": payload }).to_string())
                 } else {
@@ -771,6 +860,51 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                                 success: false,
                                 output: format!(
                                     "Schedule operation failed (HTTP {status}): {resp_body}"
+                                ),
+                                error: Some(format!("HTTP {status}: {resp_body}")),
+                            },
+                            Err(err) => ToolResult {
+                                success: false,
+                                output: format!("Failed to reach chatroom server: {err}"),
+                                error: Some(err),
+                            },
+                        };
+                        Ok(json!({ "action": "continue", "payload": result }).to_string())
+                    }
+                    "chatroom_room_prompt" => {
+                        let mut payload = if call.arguments.is_object() {
+                            call.arguments
+                        } else {
+                            json!({})
+                        };
+                        if let Some(obj) = payload.as_object_mut() {
+                            obj.insert("room_id".to_string(), json!(cfg.room_id));
+                            obj.insert("agent_id".to_string(), json!(cfg.agent_id));
+                        }
+                        let room_prompt_url = cfg.resolve_room_prompt_url();
+                        if room_prompt_url.is_empty() {
+                            let res = ToolResult {
+                                success: false,
+                                output: "chatroom_room_prompt_url is not configured".to_string(),
+                                error: Some("missing_room_prompt_url".to_string()),
+                            };
+                            return Ok(json!({ "action": "continue", "payload": res }).to_string());
+                        }
+                        let body_bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
+                        let result = match post_json_via_wasi_http(
+                            &room_prompt_url,
+                            &cfg.agent_token,
+                            &body_bytes,
+                        ) {
+                            Ok((status, resp_body)) if (200..300).contains(&status) => ToolResult {
+                                success: true,
+                                output: resp_body,
+                                error: None,
+                            },
+                            Ok((status, resp_body)) => ToolResult {
+                                success: false,
+                                output: format!(
+                                    "Room prompt operation failed (HTTP {status}): {resp_body}"
                                 ),
                                 error: Some(format!("HTTP {status}: {resp_body}")),
                             },

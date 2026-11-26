@@ -1817,6 +1817,14 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(
                         ...extEntries.map(([, v]) => v?.trim() || '').filter(Boolean),
                       ].filter(Boolean);
                       const assembledFull = assembledSections.join('\n\n');
+                      const roomPrompts = room?.room_prompts || [''];
+                      const roomMembersSet = Boolean((roomPrompts[0] || '').trim());
+                      const roomAnnCount = roomPrompts
+                        .slice(1)
+                        .filter((s) => s.trim().length > 0).length;
+                      const hasRoomPrompts = roomMembersSet || roomAnnCount > 0;
+                      const chatroomExtPrompt = parts?.extension_prompts?.chatroom || '';
+                      const hasRoomPromptInPrepared = chatroomExtPrompt.includes('<room_prompt>');
 
                       return (
                         <div className="pt-2 border-t border-[var(--border-subtle)] space-y-1.5 text-[11px]">
@@ -1828,6 +1836,45 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(
                               共 {assembledFull.length.toLocaleString()} 字符
                             </span>
                           </div>
+
+                          {hasRoomPrompts && (
+                            <details className="rounded-lg bg-amber-500/8 border border-amber-500/25 p-2">
+                              <summary className="cursor-pointer font-medium text-amber-700 dark:text-amber-300 flex items-center justify-between gap-2">
+                                <span>
+                                  📌 房间公共 Prompt (v{room?.room_prompts_version || 0} ·{' '}
+                                  {roomMembersSet ? '含成员信息' : '无成员信息'} · 公告{' '}
+                                  {roomAnnCount} 条)
+                                </span>
+                                <span className="text-[10px] font-mono-code opacity-80">
+                                  {hasRoomPromptInPrepared
+                                    ? '已拼入 extension_prompts.chatroom'
+                                    : '下轮 Activation 生效'}
+                                </span>
+                              </summary>
+                              <div className="mt-1.5 space-y-1.5 text-[10.5px] font-mono-code text-[var(--text-secondary)]">
+                                {roomMembersSet && (
+                                  <div className="whitespace-pre-wrap break-words">
+                                    <span className="text-blue-600 dark:text-blue-400 font-semibold">
+                                      [#0 成员信息]
+                                    </span>
+                                    {'\n'}
+                                    {roomPrompts[0]}
+                                  </div>
+                                )}
+                                {roomPrompts.slice(1).map((ann, idx) =>
+                                  ann.trim() ? (
+                                    <div key={idx} className="whitespace-pre-wrap break-words">
+                                      <span className="text-amber-600 dark:text-amber-400 font-semibold">
+                                        [#{idx + 1} 公告]
+                                      </span>
+                                      {'\n'}
+                                      {ann}
+                                    </div>
+                                  ) : null
+                                )}
+                              </div>
+                            </details>
+                          )}
 
                           {/* 1. system_prompt */}
                           <details className="rounded-lg bg-[var(--bg-surface)] border border-[var(--border-subtle)] p-2">

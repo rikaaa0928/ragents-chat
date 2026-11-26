@@ -117,6 +117,51 @@ impl PeekIdleMode {
     }
 }
 
+pub const MAX_ROOM_PROMPTS_COUNT: usize = 20;
+pub const MAX_ROOM_PROMPT_ITEM_CHARS: usize = 8_000;
+pub const MAX_ROOM_PROMPTS_TOTAL_CHARS: usize = 32_000;
+
+pub fn normalize_room_prompts(mut prompts: Vec<String>) -> Vec<String> {
+    if prompts.is_empty() {
+        return vec![String::new()];
+    }
+    let members = prompts.remove(0).trim().to_string();
+    let mut normalized = Vec::with_capacity(prompts.len() + 1);
+    normalized.push(members);
+    for item in prompts {
+        let trimmed = item.trim();
+        if !trimmed.is_empty() {
+            normalized.push(trimmed.to_string());
+        }
+    }
+    normalized
+}
+
+pub fn validate_room_prompts(prompts: &[String]) -> Result<(), String> {
+    if prompts.len() > MAX_ROOM_PROMPTS_COUNT {
+        return Err(format!(
+            "房间公共 Prompt 条目数超出上限 ({} > {MAX_ROOM_PROMPTS_COUNT})",
+            prompts.len()
+        ));
+    }
+    let mut total_chars = 0usize;
+    for (idx, item) in prompts.iter().enumerate() {
+        let chars = item.chars().count();
+        if chars > MAX_ROOM_PROMPT_ITEM_CHARS {
+            return Err(format!(
+                "房间公共 Prompt 第 [{idx}] 条长度超出上限 ({chars} > {MAX_ROOM_PROMPT_ITEM_CHARS} 字符)"
+            ));
+        }
+        total_chars += chars;
+    }
+    if total_chars > MAX_ROOM_PROMPTS_TOTAL_CHARS {
+        return Err(format!(
+            "房间公共 Prompt 总长度超出上限 ({total_chars} > {MAX_ROOM_PROMPTS_TOTAL_CHARS} 字符)"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Room {
     pub room_id: String,
@@ -126,6 +171,12 @@ pub struct Room {
     pub node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
+    pub room_prompts: Vec<String>,
+    pub room_prompts_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_prompts_updated_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_prompts_updated_by: Option<String>,
     pub last_msg_seq: u64,
     pub roster_version: u64,
     pub peek_enabled: bool,
@@ -190,6 +241,21 @@ pub struct CreateRoomRequest {
     pub node_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_prompts: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RoomPromptMutationRequest {
+    pub action: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub index: Option<usize>,
+    #[serde(default)]
+    pub room_prompts: Option<Vec<String>>,
+    #[serde(default)]
+    pub expected_version: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -533,6 +599,19 @@ pub struct InternalManagerRemoveAgentRequest {
     pub room_id: String,
     pub agent_id: String,
     pub target_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InternalRoomPromptRequest {
+    pub room_id: String,
+    pub agent_id: String,
+    pub action: String,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub index: Option<usize>,
+    #[serde(default)]
+    pub expected_version: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
