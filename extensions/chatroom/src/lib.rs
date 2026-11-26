@@ -427,9 +427,12 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
    - Chime in (`chatroom_speak`) ONLY if you spot an error, a critical blind spot, or high-value domain expertise that nobody else has covered.\n\
    - Otherwise (or if `chatroom_speak` is disabled in Muted Observation Mode), DO NOT call `chatroom_speak` and finish with a brief private note or takeaway summary of the discussion.\n\
 {directory_layout_section}\
-8. SELF-MANAGED SCHEDULED TASKS (`chatroom_schedule`):\n\
-   - When @Human asks you to perform a recurring, daily, or delayed check/task (e.g., \"每天早上 9 点帮我检查某条消息/某个仓库\", \"每小时巡检一次\", \"30 分钟后提醒我\"), call `chatroom_schedule` (`action: \"create\" | \"list\" | \"update\" | \"pause\" | \"resume\" | \"delete\"`) to manage your own scheduled tasks.\n\
-   - When a scheduled task triggers (`<scheduled_task_trigger ...>`), you will be woken up in your private session with the `task_prompt` you configured. Execute the required tools/checks first, and call `chatroom_speak` if you need to report findings to @Human.\n\
+8. SELF-MANAGED SCHEDULED TASKS (`chatroom_schedule`) vs ASYNC BACKGROUND COMMANDS (`shell`):\n\
+   - When waiting for a long-running command/training/build/download that YOU launch, use `shell` with `wait: false, lifecycle: \"session\"` (keep the command running in the foreground inside `shell`; do NOT detach via `nohup ... &` or `podman/docker run -d`). When it exits naturally, the host automatically pushes `[System Notification: Background Process Exited]` and wakes up your session if idle—do NOT use `chatroom_schedule` or sleep loops to guess/poll completion time.\n\
+   - Use `chatroom_schedule` (`action: \"create\" | \"list\" | \"update\" | \"pause\" | \"resume\" | \"delete\"`) ONLY for clock/calendar-based recurring tasks (e.g., \"每天早上 9 点检查某事\", \"每小时巡检一次\"), delayed reminders (\"30 分钟后提醒我\"), or monitoring external events outside your process manager.\n\
+   - When a scheduled task triggers (`<scheduled_task_trigger ...>`), you will be woken up in your private session with your `task_prompt`. Execute the required checks first, and call `chatroom_speak` if you need to report findings to @Human.\n\
+9. BACKGROUND PROCESS COMPLETION WAKEUPS (`[System Notification: Background Process Exited]`):\n\
+   - When woken up automatically after a `lifecycle: \"session\"` background process finishes, inspect the exit status/logs (`process_logs`) and artifacts first, then call `chatroom_speak` if you need to report completion or failures to @Human or the room.\n\
 </chatroom_protocol>"
                     )
                 };
@@ -498,7 +501,7 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                         "enabled": true,
                         "concurrency_safe": false,
                         "name": "chatroom_schedule",
-                        "description": "Create, list, update, pause, resume, or delete your own scheduled/recurring tasks in this chatroom (e.g. daily fixed-time checks, interval polling, one-shot delayed reminders, or cron jobs). When the scheduled time arrives, you will be automatically woken up with your `task_prompt`.",
+                        "description": "Create, list, update, pause, resume, or delete your own clock/calendar scheduled tasks in this chatroom (e.g. daily fixed-time checks, interval polling, one-shot delayed reminders, or cron jobs). Do NOT use this to wait for or poll background jobs launched via shell(wait=false, lifecycle='session')—those automatically notify and wake you on exit.",
                         "parameters": {
                             "type": "object",
                             "properties": {
@@ -556,6 +559,11 @@ CRITICAL RULES FOR CHATROOM INTERACTION:\n\
                                 "max_runs": {
                                     "type": "integer",
                                     "description": "Optional maximum number of executions before auto-disabling."
+                                },
+                                "delivery_mode": {
+                                    "type": "string",
+                                    "enum": ["pending", "realtime"],
+                                    "description": "Queue delivery mode when triggered: 'pending' (default, blocking queue: waits for any active turn to finish and runs as its own turn) or 'realtime' (interrupts/injects immediately into an active turn if busy)."
                                 }
                             },
                             "required": ["action"]

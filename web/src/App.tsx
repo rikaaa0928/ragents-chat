@@ -4,6 +4,9 @@ import {
   RoomListItem,
   RoomDetailResponse,
   RoomPromptMutationPayload,
+  RoomPendingPoolResponse,
+  AgentMessageQueueSnapshot,
+  ScheduleDeliveryMode,
   InspectorSnapshot,
   ManagerSettings,
   ClusterNode,
@@ -179,6 +182,7 @@ export const App: React.FC = () => {
   const [inspectedAgentId, setInspectedAgentId] = useState<string | null>(null);
   const [inspectedSessionId, setInspectedSessionId] = useState<string | null>(null);
   const [inspectorSnap, setInspectorSnap] = useState<InspectorSnapshot | null>(null);
+  const pendingPoolRefreshTimerRef = useRef<number | null>(null);
   const [agentActivities, setAgentActivities] = useState<Record<string, string>>({});
   const [peekStatusBanner, setPeekStatusBanner] = useState('');
   const liveStreamStoreRef = useRef<LiveStreamBufferStore | null>(null);
@@ -457,7 +461,7 @@ export const App: React.FC = () => {
         events: snap.events || [],
         message_queues: snap.message_queues || {
           realtime_messages: [],
-          normal_messages: [],
+          pending_messages: [],
         },
         permission_summary: snap.permission_summary || {
           defaults: {},
@@ -475,6 +479,61 @@ export const App: React.FC = () => {
       }
     },
     [apiFetch, liveStreamStore]
+  );
+
+  const refreshInspectorQueues = useCallback(
+    async (agentId: string) => {
+      if (!inspectorColumnOpenRef.current) return;
+      if (inspectedAgentIdRef.current !== agentId) return;
+      try {
+        const queues: AgentMessageQueueSnapshot = await apiFetch(
+          `/api/v1/agents/${encodeURIComponent(agentId)}/queues`
+        );
+        setInspectorSnap((prev) =>
+          prev && prev.agent.agent_id === agentId
+            ? { ...prev, message_queues: queues }
+            : prev
+        );
+      } catch {
+        // Ignore transient fetch errors during SSE refresh
+      }
+    },
+    [apiFetch]
+  );
+
+  const refreshPendingPool = useCallback(
+    async (roomIdOverride?: string) => {
+      const targetRoomId = roomIdOverride || currentRoomIdRef.current;
+      if (!targetRoomId) return;
+      try {
+        const pool: RoomPendingPoolResponse = await apiFetch(
+          `/api/v1/rooms/${encodeURIComponent(targetRoomId)}/pending-pool`
+        );
+        if (currentRoomIdRef.current !== targetRoomId) return;
+        setCurrentDetail((prev) =>
+          prev && prev.room.room_id === targetRoomId
+            ? { ...prev, pending_pool: pool }
+            : prev
+        );
+      } catch {
+        // Ignore transient pending-pool fetch errors
+      }
+    },
+    [apiFetch]
+  );
+
+  const schedulePendingPoolRefresh = useCallback(
+    (roomId: string, delayMs = 120) => {
+      if (pendingPoolRefreshTimerRef.current !== null) {
+        window.clearTimeout(pendingPoolRefreshTimerRef.current);
+      }
+      pendingPoolRefreshTimerRef.current = window.setTimeout(() => {
+        pendingPoolRefreshTimerRef.current = null;
+        if (currentRoomIdRef.current !== roomId) return;
+        void refreshPendingPool(roomId);
+      }, delayMs);
+    },
+    [refreshPendingPool]
   );
 
   const scheduleInspectorRefresh = useCallback(
@@ -551,10 +610,14 @@ export const App: React.FC = () => {
             }
           } else if (
             evType === 'activation_started' ||
-            evType === 'realtime_messages_drained'
+            evType === 'realtime_messages_drained' ||
+            evType === 'session_queue_updated'
           ) {
             if (inspectorColumnOpenRef.current) {
-              scheduleInspectorRefresh(agentId, sessionId, 160);
+              void refreshInspectorQueues(agentId);
+              if (evType !== 'session_queue_updated') {
+                scheduleInspectorRefresh(agentId, sessionId, 160);
+              }
             }
           } else if (evType === 'turn_started') {
             liveStreamStore.reset();
@@ -590,7 +653,12 @@ export const App: React.FC = () => {
         }
       };
     },
-    [liveStreamStore, refreshInspectorSnapshot, scheduleInspectorRefresh]
+    [
+      liveStreamStore,
+      refreshInspectorQueues,
+      refreshInspectorSnapshot,
+      scheduleInspectorRefresh,
+    ]
   );
 
   // Manage Inspector snapshot & SSE stream lazily based on whether the Inspector column is open
@@ -656,6 +724,7 @@ export const App: React.FC = () => {
                 200
               );
             }
+            schedulePendingPoolRefresh(roomId, 120);
           } else if (ev.type === 'message_withdrawn') {
             setCurrentDetail((prev) => {
               if (!prev || prev.room.room_id !== roomId) return prev;
@@ -670,6 +739,32 @@ export const App: React.FC = () => {
                 inspectedSessionIdRef.current,
                 200
               );
+            }
+            schedulePendingPoolRefresh(roomId, 120);
+          } else if (ev.type === 'agent_queue_updated') {
+            setCurrentDetail((prev) => {
+              if (!prev || prev.room.room_id !== roomId) return prev;
+              const patchAgent = (a: typeof prev.agents[number]) =>
+                a.agent_id === ev.agent_id
+                  ? {
+                      ...a,
+                      realtime_queue_count: ev.realtime_count,
+                      pending_queue_count: ev.pending_count,
+                    }
+                  : a;
+              return {
+                ...prev,
+                manager_agent: prev.manager_agent
+                  ? patchAgent(prev.manager_agent)
+                  : prev.manager_agent,
+                agents: prev.agents.map(patchAgent),
+              };
+            });
+            if (
+              inspectorColumnOpenRef.current &&
+              inspectedAgentIdRef.current === ev.agent_id
+            ) {
+              void refreshInspectorQueues(ev.agent_id);
             }
           } else if (ev.type === 'agent_updated') {
             if (ev.agent && String(ev.agent.name).toLowerCase() === 'manager') {
@@ -713,6 +808,7 @@ export const App: React.FC = () => {
                 prev ? { ...prev, agent: ev.agent } : prev
               );
             }
+            schedulePendingPoolRefresh(roomId, 120);
           } else if (ev.type === 'agent_removed') {
             const prevAgents = currentDetailRef.current?.agents || [];
             const removedAgent = prevAgents.find(
@@ -803,7 +899,12 @@ export const App: React.FC = () => {
         }
       };
     },
-    [refreshInspectorSnapshot, scheduleInspectorRefresh]
+    [
+      refreshInspectorQueues,
+      refreshInspectorSnapshot,
+      scheduleInspectorRefresh,
+      schedulePendingPoolRefresh,
+    ]
   );
 
   const handleSelectRoom = useCallback(
@@ -1245,6 +1346,33 @@ export const App: React.FC = () => {
     [apiFetch]
   );
 
+  const handleUpdateScheduleDeliveryMode = useCallback(
+    async (
+      agentId: string,
+      scheduleId: string,
+      deliveryMode: ScheduleDeliveryMode
+    ) => {
+      const updated = await apiFetch(
+        `/api/v1/agents/${encodeURIComponent(agentId)}/schedules/${encodeURIComponent(scheduleId)}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ delivery_mode: deliveryMode }),
+        }
+      );
+      setInspectorSnap((prev) =>
+        prev && prev.agent.agent_id === agentId
+          ? {
+              ...prev,
+              schedules: (prev.schedules || []).map((s) =>
+                s.schedule_id === scheduleId ? updated : s
+              ),
+            }
+          : prev
+      );
+    },
+    [apiFetch]
+  );
+
   const handleRunScheduleNow = useCallback(
     async (agentId: string, scheduleId: string) => {
       const updated = await apiFetch(
@@ -1292,9 +1420,9 @@ export const App: React.FC = () => {
   );
 
   const handleWithdrawQueuedMessage = useCallback(
-    async (agentId: string, msgSeq: number) => {
+    async (agentId: string, queueId: number) => {
       const res = await apiFetch(
-        `/api/v1/agents/${agentId}/queue/${msgSeq}/withdraw`,
+        `/api/v1/agents/${encodeURIComponent(agentId)}/queue/${queueId}/withdraw`,
         { method: 'POST' }
       );
       if (res?.message_queues) {
@@ -1304,11 +1432,43 @@ export const App: React.FC = () => {
             : prev
         );
       }
+      const removedSeq = res?.withdrawn_message?.msg_seq;
+      if (typeof removedSeq === 'number') {
+        setCurrentDetail((prev) =>
+          prev
+            ? {
+                ...prev,
+                messages: prev.messages.filter((m) => m.msg_seq !== removedSeq),
+              }
+            : prev
+        );
+      }
+      if (
+        res?.withdrawn_message?.sender_kind === 'human' &&
+        res?.withdrawn_message?.content
+      ) {
+        setRestoredDraft({
+          text: String(res.withdrawn_message.content),
+          seq: Date.now(),
+        });
+      }
+    },
+    [apiFetch]
+  );
+
+  const handleWithdrawPendingPoolMessage = useCallback(
+    async (msgSeq: number) => {
+      if (!currentRoomId) return;
+      const res = await apiFetch(
+        `/api/v1/rooms/${encodeURIComponent(currentRoomId)}/pending-pool/${msgSeq}/withdraw`,
+        { method: 'POST' }
+      );
       setCurrentDetail((prev) =>
-        prev
+        prev && prev.room.room_id === currentRoomId
           ? {
               ...prev,
               messages: prev.messages.filter((m) => m.msg_seq !== msgSeq),
+              pending_pool: res?.pending_pool || prev.pending_pool,
             }
           : prev
       );
@@ -1322,7 +1482,7 @@ export const App: React.FC = () => {
         });
       }
     },
-    [apiFetch]
+    [apiFetch, currentRoomId]
   );
 
   const handleUpdateRoomControls = async (patch: Partial<Room>) => {
@@ -1515,6 +1675,9 @@ export const App: React.FC = () => {
           }}
           onUpdateRoomControls={handleUpdateRoomControls}
           onMutateRoomPrompts={handleMutateRoomPrompts}
+          pendingPool={currentDetail?.pending_pool || null}
+          onRefreshPendingPool={() => refreshPendingPool()}
+          onWithdrawPendingPoolMessage={handleWithdrawPendingPoolMessage}
           onInspectAgent={handleInspectAgentOpen}
           onResumeRelay={handleResumeRelay}
           onDeleteRoom={async () => {
@@ -1661,6 +1824,7 @@ export const App: React.FC = () => {
         onRetryAgent={handleRetryAgent}
         onRevokePermissionRule={handleRevokePermissionRule}
         onToggleSchedule={handleToggleSchedule}
+        onUpdateScheduleDeliveryMode={handleUpdateScheduleDeliveryMode}
         onRunScheduleNow={handleRunScheduleNow}
         onDeleteSchedule={handleDeleteSchedule}
         onWithdrawQueuedMessage={handleWithdrawQueuedMessage}

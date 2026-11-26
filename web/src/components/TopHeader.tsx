@@ -24,6 +24,8 @@ import {
   Plus,
   Check,
   RotateCcw,
+  Inbox,
+  RefreshCw,
 } from 'lucide-react';
 import {
   Room,
@@ -31,6 +33,7 @@ import {
   ClusterNode,
   UiContribution,
   RoomPromptMutationPayload,
+  RoomPendingPoolResponse,
 } from '../types';
 import { MarkdownRenderer } from './MarkdownRenderer';
 
@@ -55,6 +58,9 @@ interface TopHeaderProps {
   onToggleInspectorColumn: () => void;
   onUpdateRoomControls: (patch: Partial<Room>) => void;
   onMutateRoomPrompts: (payload: RoomPromptMutationPayload) => Promise<Room | null>;
+  pendingPool?: RoomPendingPoolResponse | null;
+  onRefreshPendingPool?: () => Promise<void> | void;
+  onWithdrawPendingPoolMessage?: (msgSeq: number) => Promise<void> | void;
   onInspectAgent?: (agentId: string) => void;
   onResumeRelay: () => void;
   onDeleteRoom: () => void;
@@ -81,6 +87,9 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   onToggleInspectorColumn,
   onUpdateRoomControls,
   onMutateRoomPrompts,
+  pendingPool = null,
+  onRefreshPendingPool,
+  onWithdrawPendingPoolMessage,
   onInspectAgent,
   onResumeRelay,
   onDeleteRoom,
@@ -89,6 +98,9 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   const [roomInfoOpen, setRoomInfoOpen] = useState(false);
   const [peekConfigOpen, setPeekConfigOpen] = useState(false);
   const [roomPromptsOpen, setRoomPromptsOpen] = useState(false);
+  const [pendingPoolOpen, setPendingPoolOpen] = useState(false);
+  const [withdrawingPoolSeq, setWithdrawingPoolSeq] = useState<number | null>(null);
+  const [poolError, setPoolError] = useState<string | null>(null);
 
   // Room Prompts editor states
   const [editingMembers, setEditingMembers] = useState(false);
@@ -108,6 +120,8 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
     setNewAnnouncementDraft('');
     setEditBaseVersion(null);
     setPromptError(null);
+    setPendingPoolOpen(false);
+    setPoolError(null);
   }, [room?.room_id]);
 
   if (!room) {
@@ -222,6 +236,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
               if (next) {
                 setPeekConfigOpen(false);
                 setRoomPromptsOpen(false);
+                setPendingPoolOpen(false);
               }
             }}
             className={`px-2 py-1.5 rounded-lg flex items-center gap-1.5 text-[13.5px] font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer min-w-0 max-w-full overflow-hidden ${
@@ -305,6 +320,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
               if (next) {
                 setPeekConfigOpen(false);
                 setRoomPromptsOpen(false);
+                setPendingPoolOpen(false);
               }
             }}
             className={`hidden sm:flex h-8 px-2 rounded-lg text-xs font-medium items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
@@ -318,6 +334,49 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
             <span className="hidden lg:inline">房间信息</span>
           </button>
 
+          {/* 0a. Toggle Room Pending Pool Drawer (未投递暂存池) */}
+          {(() => {
+            const waitingCount = pendingPool?.total_undelivered_messages || 0;
+            return (
+              <button
+                onClick={() => {
+                  const next = !pendingPoolOpen;
+                  setPendingPoolOpen(next);
+                  if (next) {
+                    setRoomInfoOpen(false);
+                    setPeekConfigOpen(false);
+                    setRoomPromptsOpen(false);
+                    void onRefreshPendingPool?.();
+                  }
+                }}
+                className={`h-8 px-1.5 sm:px-2 rounded-lg text-xs font-medium flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                  pendingPoolOpen
+                    ? 'bg-[var(--bg-active)] border-[var(--border-default)] text-[var(--text-primary)]'
+                    : waitingCount > 0
+                    ? 'bg-amber-500/10 border-amber-500/35 text-amber-700 dark:text-amber-300 hover:bg-amber-500/15'
+                    : 'bg-transparent border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'
+                }`}
+                title="查看聊天室暂存且尚未投递给部分/全部 Agent 的未读消息池"
+              >
+                <Inbox
+                  className={`w-3.5 h-3.5 shrink-0 ${
+                    waitingCount > 0 ? 'text-amber-500' : 'text-[var(--text-muted)]'
+                  }`}
+                />
+                <span className="hidden lg:inline">暂存池</span>
+                <span
+                  className={`px-1 sm:px-1.5 py-0.2 rounded-full text-[10px] font-mono-code font-semibold ${
+                    waitingCount > 0
+                      ? 'bg-amber-500 text-black'
+                      : 'bg-[var(--bg-surface)] text-[var(--text-secondary)]'
+                  }`}
+                >
+                  {waitingCount}
+                </span>
+              </button>
+            );
+          })()}
+
           {/* 0b. Toggle Shared Room Prompt & Announcements Drawer */}
           <button
             onClick={() => {
@@ -326,6 +385,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
               if (next) {
                 setRoomInfoOpen(false);
                 setPeekConfigOpen(false);
+                setPendingPoolOpen(false);
               }
             }}
             className={`h-8 px-1.5 sm:px-2 rounded-lg text-xs font-medium flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
@@ -361,6 +421,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
               if (next) {
                 setRoomInfoOpen(false);
                 setRoomPromptsOpen(false);
+                setPendingPoolOpen(false);
               }
             }}
             className={`h-8 px-1.5 sm:px-2 rounded-lg text-xs font-medium flex items-center gap-1 border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
@@ -1164,6 +1225,188 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Collapsible Drawer D: Room Pending Pool (未投递至 ragent-base 的暂存消息池) */}
+      {pendingPoolOpen && (
+        <div className="px-4 py-3 bg-[var(--bg-sidebar)] border-t border-[var(--border-subtle)] text-xs max-h-[64vh] overflow-y-auto">
+          <div className="max-w-5xl mx-auto space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2 min-w-0">
+                <span className="font-semibold text-[var(--text-primary)] flex items-center gap-1.5">
+                  <Inbox className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                  <span>聊天室未投递暂存池 (Chat SSOT)</span>
+                </span>
+                <span className="px-1.5 py-0.5 rounded bg-[var(--bg-surface)] text-[10.5px] font-mono-code text-[var(--text-secondary)]">
+                  待投递消息: {pendingPool?.total_undelivered_messages || 0} 条 · 最新序号 #{pendingPool?.room_last_seq ?? room.last_msg_seq}
+                </span>
+                <span className="text-[11px] text-[var(--text-muted)]">
+                  尚未推入各 Agent 底层 `ragent-base` 队列的广播/未点名消息；全员均未投递前可直接撤回
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1.5 shrink-0">
+                {onRefreshPendingPool && (
+                  <button
+                    type="button"
+                    onClick={() => void onRefreshPendingPool()}
+                    className="px-2 py-1 rounded-md text-[11px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] flex items-center gap-1 cursor-pointer"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>刷新</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setPendingPoolOpen(false)}
+                  className="p-1 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer"
+                  title="收起面板"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {poolError && (
+              <div className="px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-700 dark:text-red-300 flex items-center justify-between gap-2 text-[11.5px]">
+                <span className="break-words">{poolError}</span>
+                <button
+                  type="button"
+                  onClick={() => setPoolError(null)}
+                  className="text-[11px] underline shrink-0 cursor-pointer"
+                >
+                  关闭
+                </button>
+              </div>
+            )}
+
+            {/* Per-Agent Delivery Progress */}
+            {pendingPool && pendingPool.per_agent.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {pendingPool.per_agent.map((ag) => (
+                  <button
+                    key={ag.agent_id}
+                    type="button"
+                    onClick={() => onInspectAgent?.(ag.agent_id)}
+                    className="px-2 py-1 rounded-lg bg-[var(--bg-main)] border border-[var(--border-subtle)] hover:border-[var(--border-default)] text-[11px] flex items-center gap-1.5 cursor-pointer"
+                    title="点击打开该 Agent 透视面板"
+                  >
+                    <span>{ag.avatar}</span>
+                    <span className="font-medium text-[var(--text-primary)]">@{ag.agent_name}</span>
+                    <span className="font-mono-code text-[10px] text-[var(--text-muted)]">
+                      #{ag.last_delivered_seq}/#{pendingPool.room_last_seq}
+                    </span>
+                    {ag.unread_count > 0 ? (
+                      <span className="px-1.5 py-0 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-300 font-mono-code text-[10px] font-semibold">
+                        未读 {ag.unread_count}
+                        {ag.countable_unread_count !== ag.unread_count
+                          ? ` (窥屏 ${ag.countable_unread_count})`
+                          : ''}
+                      </span>
+                    ) : (
+                      <span className="px-1.5 py-0 rounded-full bg-emerald-500/12 text-emerald-600 dark:text-emerald-400 text-[10px]">
+                        已同步
+                      </span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Waiting Messages List */}
+            {!pendingPool || pendingPool.waiting_messages.length === 0 ? (
+              <div className="py-5 px-3 text-center rounded-xl bg-[var(--bg-main)] border border-dashed border-[var(--border-subtle)] text-[11.5px] text-[var(--text-muted)]">
+                当前聊天室所有消息均已投递至相关 Agent 的底层会话队列，暂存池为空。
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {pendingPool.waiting_messages.map((m) => (
+                  <div
+                    key={m.msg_seq}
+                    className="p-2.5 rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] space-y-1.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                        <span className="px-1.5 py-0.5 rounded bg-[var(--bg-surface)] font-mono-code text-[10.5px] font-semibold text-[var(--text-primary)]">
+                          #{m.msg_seq}
+                        </span>
+                        <span className="font-semibold text-[var(--text-primary)]">
+                          {m.sender_name}
+                        </span>
+                        {m.is_realtime && (
+                          <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[10px] font-medium">
+                            ⚡ 实时标记
+                          </span>
+                        )}
+                        {m.mentions.length > 0 && (
+                          <span className="text-[10.5px] text-blue-600 dark:text-blue-400 font-mono-code">
+                            -&gt; {m.mentions.map((x) => `@${x}`).join(' ')}
+                          </span>
+                        )}
+                        <span className="text-[10px] font-mono-code text-[var(--text-muted)]">
+                          {new Date(m.created_at).toLocaleTimeString()}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {m.can_withdraw && onWithdrawPendingPoolMessage ? (
+                          <button
+                            type="button"
+                            disabled={withdrawingPoolSeq === m.msg_seq}
+                            onClick={async () => {
+                              setWithdrawingPoolSeq(m.msg_seq);
+                              setPoolError(null);
+                              try {
+                                await onWithdrawPendingPoolMessage(m.msg_seq);
+                              } catch (err: unknown) {
+                                setPoolError(
+                                  err instanceof Error ? err.message : String(err)
+                                );
+                              } finally {
+                                setWithdrawingPoolSeq(null);
+                              }
+                            }}
+                            className="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-red-600/90 hover:bg-red-500 text-white disabled:opacity-50 cursor-pointer transition-colors"
+                          >
+                            {withdrawingPoolSeq === m.msg_seq ? '撤回中...' : '撤回'}
+                          </button>
+                        ) : (
+                          <span
+                            className="px-2 py-0.5 rounded-md bg-[var(--bg-surface)] text-[10px] text-[var(--text-muted)]"
+                            title="部分 Agent 已收到此消息的底层排队副本，请前往对应 Agent 透视队列撤回"
+                          >
+                            部分已投递
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="text-[11.5px] text-[var(--text-primary)] whitespace-pre-wrap break-words line-clamp-3">
+                      {m.content}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 text-[10.5px] text-[var(--text-muted)]">
+                      <span>
+                        待投递:{' '}
+                        <strong className="text-amber-600 dark:text-amber-400 font-medium">
+                          {m.waiting_agent_names.map((n) => `@${n}`).join(', ')}
+                        </strong>
+                      </span>
+                      {m.delivered_agent_names.length > 0 && (
+                        <span>
+                          · 已投递:{' '}
+                          <span className="text-emerald-600 dark:text-emerald-400">
+                            {m.delivered_agent_names.map((n) => `@${n}`).join(', ')}
+                          </span>
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}

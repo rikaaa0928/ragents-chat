@@ -52,8 +52,9 @@ import {
   ContextItem,
   FlowLogEntry,
   AgentTokenUsage,
-  QueuedMessageEntry,
+  BaseQueuedMessageEntry,
   PermissionRuleEntry,
+  ScheduleDeliveryMode,
 } from '../types';
 
 function formatCompactTokens(n?: number | null): string {
@@ -614,9 +615,14 @@ interface RightInspectorPaneProps {
     scheduleId: string,
     enabled: boolean
   ) => void;
+  onUpdateScheduleDeliveryMode?: (
+    agentId: string,
+    scheduleId: string,
+    deliveryMode: ScheduleDeliveryMode
+  ) => void;
   onRunScheduleNow?: (agentId: string, scheduleId: string) => void;
   onDeleteSchedule?: (agentId: string, scheduleId: string) => void;
-  onWithdrawQueuedMessage: (agentId: string, msgSeq: number) => void;
+  onWithdrawQueuedMessage: (agentId: string, queueId: number) => void;
 }
 
 export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(({
@@ -647,6 +653,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(
   onRetryAgent,
   onRevokePermissionRule,
   onToggleSchedule,
+  onUpdateScheduleDeliveryMode,
   onRunScheduleNow,
   onDeleteSchedule,
   onWithdrawQueuedMessage,
@@ -664,9 +671,9 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(
   const [customPathOpen, setCustomPathOpen] = useState<Record<string, boolean>>({});
   const [permPaths, setPermPaths] = useState<Record<string, string>>({});
 
-  // Message Queue Panel State (实时消息列表 & 非实时消息列表)
+  // Message Queue Panel State (ragent-base 实时队列 & 阻塞队列)
   const [queuePanelOpen, setQueuePanelOpen] = useState(true);
-  const [queueTab, setQueueTab] = useState<'all' | 'realtime' | 'normal'>('all');
+  const [queueTab, setQueueTab] = useState<'all' | 'realtime' | 'pending'>('all');
 
   // 3-State Collapsible Session Log Blocks: 'default' (>10 lines collapsed, <=10 expanded) | 'collapsed' | 'expanded'
   const [collapseMode, setCollapseMode] = useState<'default' | 'collapsed' | 'expanded'>('default');
@@ -710,12 +717,12 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(
   const items = inspector?.context?.effective_items || [];
   const serverTimestamps = inspector?.item_timestamps || [];
   const localBatches = inspector?.context?.local_batches || [];
-  const realtimeQueue: QueuedMessageEntry[] =
+  const realtimeQueue: BaseQueuedMessageEntry[] =
     inspector?.message_queues?.realtime_messages || [];
-  const normalQueue: QueuedMessageEntry[] =
-    inspector?.message_queues?.normal_messages || [];
+  const pendingQueue: BaseQueuedMessageEntry[] =
+    inspector?.message_queues?.pending_messages || [];
   const rtQueuedCount = realtimeQueue.length;
-  const normQueuedCount = normalQueue.length;
+  const pdQueuedCount = pendingQueue.length;
 
   const inspectorResetKey = `${inspectedAgent?.agent_id || ''}:${inspector?.selected_session_id || ''}`;
   const {
@@ -1015,10 +1022,10 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(
   }, [items.length, inspectorColumnOpen, logPinnedToBottomRef, scrollLogToBottom]);
 
   useEffect(() => {
-    if (rtQueuedCount + normQueuedCount > 0) {
+    if (rtQueuedCount + pdQueuedCount > 0) {
       setQueuePanelOpen(true);
     }
-  }, [rtQueuedCount, normQueuedCount]);
+  }, [rtQueuedCount, pdQueuedCount]);
 
   useEffect(() => {
     const justOpened = flowColumnOpen && !prevFlowOpenRef.current;
@@ -2236,6 +2243,37 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(
 
                             <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] font-mono-code text-[var(--text-muted)]">
                               <span>规则: {sched.schedule_summary}</span>
+                              {onUpdateScheduleDeliveryMode ? (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    onUpdateScheduleDeliveryMode(
+                                      inspectedAgent.agent_id,
+                                      sched.schedule_id,
+                                      sched.delivery_mode === 'realtime'
+                                        ? 'pending'
+                                        : 'realtime'
+                                    )
+                                  }
+                                  title="点击切换触发时的队列投递策略：阻塞排队 (pending，不打断当前工作) / 实时插队 (realtime，直接注入当前回合)"
+                                  className={`px-1.5 py-0 rounded border text-[9.5px] font-sans cursor-pointer transition-colors ${
+                                    sched.delivery_mode === 'realtime'
+                                      ? 'bg-amber-500/15 text-amber-600 dark:text-amber-300 border-amber-500/35 hover:bg-amber-500/25'
+                                      : 'bg-blue-500/12 text-blue-600 dark:text-blue-300 border-blue-500/30 hover:bg-blue-500/20'
+                                  }`}
+                                >
+                                  {sched.delivery_mode === 'realtime'
+                                    ? '⚡ 实时插队'
+                                    : '⏳ 阻塞排队'}
+                                </button>
+                              ) : (
+                                <span>
+                                  投递:{' '}
+                                  {sched.delivery_mode === 'realtime'
+                                    ? '⚡ 实时插队'
+                                    : '⏳ 阻塞排队'}
+                                </span>
+                              )}
                               <span>已执行: {sched.run_count}次</span>
                               {sched.next_run_at && sched.enabled && (
                                 <span className="text-cyan-600 dark:text-cyan-400">
@@ -2504,10 +2542,10 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(
               const filteredQueueEntries =
                 queueTab === 'realtime'
                   ? realtimeQueue
-                  : queueTab === 'normal'
-                  ? normalQueue
-                  : [...realtimeQueue, ...normalQueue].sort(
-                      (a, b) => a.msg_seq - b.msg_seq
+                  : queueTab === 'pending'
+                  ? pendingQueue
+                  : [...realtimeQueue, ...pendingQueue].sort(
+                      (a, b) => a.id - b.id
                     );
 
               return (
@@ -2558,7 +2596,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(
                     </div>
                   </div>
 
-                  {/* Realtime & Non-Realtime Message Queue Status Section */}
+                  {/* Realtime & Pending ragent-base Queue Status Section */}
                   <div className="rounded-xl bg-[var(--bg-main)] border border-[var(--border-subtle)] overflow-hidden">
                     <div
                       onClick={() => setQueuePanelOpen(!queuePanelOpen)}
@@ -2566,7 +2604,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(
                     >
                       <div className="flex items-center gap-1.5 flex-wrap min-w-0">
                         <span className="font-semibold text-[var(--text-primary)] text-[11px]">
-                          消息队列状态
+                          底层会话队列 (ragent-base)
                         </span>
                         <span
                           onClick={(e) => {
@@ -2581,6 +2619,7 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(
                               ? 'bg-[var(--bg-active)] text-[var(--text-primary)] border-[var(--border-default)]'
                               : 'bg-[var(--bg-surface)] text-[var(--text-secondary)] border-[var(--border-subtle)]'
                           }`}
+                          title="Realtime 队列：当前激活 Turn 间隙全量批量注入上下文"
                         >
                           <Zap className="w-2.5 h-2.5 text-amber-500" />
                           <span>实时排队: {rtQueuedCount}</span>
@@ -2588,19 +2627,20 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(
                         <span
                           onClick={(e) => {
                             e.stopPropagation();
-                            setQueueTab('normal');
+                            setQueueTab('pending');
                             setQueuePanelOpen(true);
                           }}
                           className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[10px] font-medium cursor-pointer border ${
-                            normQueuedCount > 0
+                            pdQueuedCount > 0
                               ? 'bg-blue-500/15 text-blue-600 dark:text-blue-400 border-blue-500/40 animate-pulse'
-                              : queueTab === 'normal'
+                              : queueTab === 'pending'
                               ? 'bg-[var(--bg-active)] text-[var(--text-primary)] border-[var(--border-default)]'
                               : 'bg-[var(--bg-surface)] text-[var(--text-secondary)] border-[var(--border-subtle)]'
                           }`}
+                          title="Pending 阻塞队列：每次 Activation 仅弹出队首 1 条独立执行"
                         >
                           <Clock className="w-2.5 h-2.5 text-blue-500" />
-                          <span>非实时排队: {normQueuedCount}</span>
+                          <span>阻塞排队: {pdQueuedCount}</span>
                         </span>
                       </div>
 
@@ -2630,65 +2670,111 @@ export const RightInspectorPane: React.FC<RightInspectorPaneProps> = React.memo(
                     </div>
 
                     {queuePanelOpen && (
-                      <div className="px-2.5 pb-2 pt-1 border-t border-[var(--border-subtle)] max-h-[150px] overflow-y-auto space-y-1">
+                      <div className="px-2.5 pb-2 pt-1 border-t border-[var(--border-subtle)] max-h-[160px] overflow-y-auto space-y-1">
                         {filteredQueueEntries.length === 0 ? (
                           <div className="py-2 text-center text-[10.5px] text-[var(--text-muted)]">
-                            当前无{queueTab === 'realtime' ? '实时' : queueTab === 'normal' ? '非实时' : ''}排队消息
+                            当前底层{queueTab === 'realtime' ? '实时' : queueTab === 'pending' ? '阻塞' : ''}队列为空
                           </div>
                         ) : (
-                          filteredQueueEntries.map((entry) => (
-                            <div
-                              key={`${entry.is_realtime ? 'rt' : 'norm'}-${entry.msg_seq}`}
-                              className="p-1.5 rounded-lg border text-[10.5px] space-y-0.5 bg-amber-500/10 border-amber-500/40"
-                            >
-                              <div className="flex items-center justify-between gap-1.5">
-                                <div className="flex items-center gap-1 min-w-0">
-                                  <span className="font-mono-code font-semibold text-[var(--text-primary)]">
-                                    #{entry.msg_seq}
-                                  </span>
-                                  <span className="font-medium text-[var(--text-secondary)] truncate">
-                                    @{entry.sender_name}
-                                  </span>
-                                  {entry.is_realtime ? (
-                                    <span className="inline-flex items-center gap-0.5 px-1 py-0.1 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[9.5px] font-medium">
-                                      <Zap className="w-2.5 h-2.5" />
-                                      实时
+                          filteredQueueEntries.map((entry) => {
+                            const disabledSpeak = entry.tool_policy?.disabled_tools?.includes(
+                              'chatroom_speak'
+                            );
+                            const enabledSpeak = entry.tool_policy?.enabled_tools?.includes(
+                              'chatroom_speak'
+                            );
+                            const tsShort = entry.created_at
+                              ? new Date(entry.created_at).toLocaleTimeString([], {
+                                  hour12: false,
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit',
+                                })
+                              : '';
+                            return (
+                              <div
+                                key={`${entry.queue_kind}-${entry.id}`}
+                                className={`p-1.5 rounded-lg border text-[10.5px] space-y-0.5 ${
+                                  entry.queue_kind === 'realtime'
+                                    ? 'bg-amber-500/10 border-amber-500/40'
+                                    : 'bg-blue-500/8 border-blue-500/35'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-1.5">
+                                  <div className="flex items-center gap-1 min-w-0 flex-wrap">
+                                    <span className="font-mono-code font-semibold text-[var(--text-muted)] text-[9.5px]">
+                                      Q#{entry.id}
                                     </span>
-                                  ) : (
-                                    <span className="inline-flex items-center gap-0.5 px-1 py-0.1 rounded bg-[var(--bg-main)] text-[var(--text-muted)] text-[9.5px] font-medium">
-                                      <Clock className="w-2.5 h-2.5" />
-                                      非实时
+                                    {entry.msg_seqs.length > 0 && (
+                                      <span className="font-mono-code font-semibold text-[var(--text-primary)]">
+                                        {entry.msg_seqs.map((s) => `#${s}`).join(',')}
+                                      </span>
+                                    )}
+                                    <span className="font-medium text-[var(--text-secondary)] truncate">
+                                      {entry.sender_label}
                                     </span>
-                                  )}
+                                    {entry.queue_kind === 'realtime' ? (
+                                      <span className="inline-flex items-center gap-0.5 px-1 py-0.1 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[9.5px] font-medium">
+                                        <Zap className="w-2.5 h-2.5" />
+                                        实时
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center gap-0.5 px-1 py-0.1 rounded bg-blue-500/15 text-blue-600 dark:text-blue-300 text-[9.5px] font-medium">
+                                        <Clock className="w-2.5 h-2.5" />
+                                        阻塞
+                                      </span>
+                                    )}
+                                    {disabledSpeak && (
+                                      <span className="px-1 py-0 rounded bg-zinc-500/15 text-zinc-600 dark:text-zinc-300 text-[9.5px]">
+                                        🔇 禁言只读
+                                      </span>
+                                    )}
+                                    {enabledSpeak && !disabledSpeak && (
+                                      <span className="px-1 py-0 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 text-[9.5px]">
+                                        🔊 允许发言
+                                      </span>
+                                    )}
+                                    {tsShort && (
+                                      <span className="font-mono-code text-[9.5px] text-[var(--text-muted)]">
+                                        {tsShort}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <span
+                                      className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[9.5px] font-semibold ${
+                                        entry.queue_kind === 'realtime'
+                                          ? 'bg-amber-500 text-black'
+                                          : 'bg-blue-600 text-white'
+                                      }`}
+                                    >
+                                      <span className="w-1.5 h-1.5 rounded-full bg-current animate-ping" />
+                                      <span>{entry.status_label}</span>
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        onWithdrawQueuedMessage(
+                                          inspectedAgent.agent_id,
+                                          entry.id
+                                        );
+                                      }}
+                                      title="从底层会话队列中撤回此未消费条目"
+                                      className="px-1.5 py-0.2 rounded text-[9.5px] font-semibold bg-red-600/90 hover:bg-red-500 text-white cursor-pointer transition-colors"
+                                    >
+                                      撤回
+                                    </button>
+                                  </div>
                                 </div>
 
-                                <div className="flex items-center gap-1 shrink-0">
-                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-full text-[9.5px] font-semibold bg-amber-500 text-black">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-black animate-ping" />
-                                    <span>{entry.status_label}</span>
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      onWithdrawQueuedMessage(
-                                        inspectedAgent.agent_id,
-                                        entry.msg_seq
-                                      );
-                                    }}
-                                    title="从排队队列中撤回此未读消息"
-                                    className="px-1.5 py-0.2 rounded text-[9.5px] font-semibold bg-red-600/90 hover:bg-red-500 text-white cursor-pointer transition-colors"
-                                  >
-                                    撤回
-                                  </button>
+                                <div className="text-[11px] text-[var(--text-primary)] break-words line-clamp-2 font-sans">
+                                  {entry.preview}
                                 </div>
                               </div>
-
-                              <div className="text-[11px] text-[var(--text-primary)] break-words line-clamp-2 font-sans">
-                                {entry.content}
-                              </div>
-                            </div>
-                          ))
+                            );
+                          })
                         )}
                       </div>
                     )}

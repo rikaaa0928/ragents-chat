@@ -159,7 +159,6 @@ impl ChatroomStore {
                  session_chain_json      TEXT NOT NULL,
                  last_delivered_seq      INTEGER NOT NULL DEFAULT 0,
                  last_roster_version     INTEGER NOT NULL DEFAULT 0,
-                 allow_speak_in_turn     INTEGER NOT NULL DEFAULT 1,
                  runtime_state           TEXT NOT NULL DEFAULT 'idle',
                  active_activation_id    TEXT,
                  agent_secret_token      TEXT NOT NULL,
@@ -208,6 +207,7 @@ impl ChatroomStore {
                  title                   TEXT NOT NULL,
                  task_prompt             TEXT NOT NULL,
                  schedule_spec_json      TEXT NOT NULL,
+                 delivery_mode           TEXT NOT NULL DEFAULT 'pending',
                  enabled                 INTEGER NOT NULL DEFAULT 1,
                  max_runs                INTEGER,
                  run_count               INTEGER NOT NULL DEFAULT 0,
@@ -792,9 +792,9 @@ You manage the room's specialist agent roster using your tools:\n\
                 model, reasoning_effort, reasoning_summary, web_search, prompt_hint, scheduling_json,
                 root_session_id, active_session_id,
                 session_chain_json, last_delivered_seq, last_roster_version,
-                allow_speak_in_turn, runtime_state, active_activation_id,
+                runtime_state, active_activation_id,
                 agent_secret_token, created_by, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 &agent.agent_id,
                 &agent.room_id,
@@ -813,7 +813,6 @@ You manage the room's specialist agent roster using your tools:\n\
                 serde_json::to_string(&agent.session_chain)?,
                 agent.last_delivered_seq as i64,
                 agent.last_roster_version as i64,
-                i64::from(agent.allow_speak_in_turn),
                 agent.runtime_state.as_str(),
                 agent.active_activation_id.as_ref().map(|a| a.as_str()),
                 &agent.agent_secret_token,
@@ -829,9 +828,9 @@ You manage the room's specialist agent roster using your tools:\n\
     fn row_to_agent(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoomAgent> {
         let scheduling_str: String = r.get(11)?;
         let chain_str: String = r.get(14)?;
-        let state_str: String = r.get(18)?;
-        let act_opt: Option<String> = r.get(19)?;
-        let created_str: String = r.get(22)?;
+        let state_str: String = r.get(17)?;
+        let act_opt: Option<String> = r.get(18)?;
+        let created_str: String = r.get(21)?;
         Ok(RoomAgent {
             agent_id: r.get(0)?,
             room_id: r.get(1)?,
@@ -852,11 +851,10 @@ You manage the room's specialist agent roster using your tools:\n\
             session_chain: serde_json::from_str(&chain_str).unwrap_or_default(),
             last_delivered_seq: r.get::<_, i64>(15)? as u64,
             last_roster_version: r.get::<_, i64>(16)? as u64,
-            allow_speak_in_turn: r.get::<_, i64>(17)? != 0,
             runtime_state: AgentRuntimeState::from_str(&state_str),
             active_activation_id: act_opt.map(ActivationId::new),
-            agent_secret_token: r.get(20)?,
-            created_by: r.get(21)?,
+            agent_secret_token: r.get(19)?,
+            created_by: r.get(20)?,
             created_at: parse_dt(&created_str),
         })
     }
@@ -868,7 +866,7 @@ You manage the room's specialist agent roster using your tools:\n\
                     model, reasoning_effort, reasoning_summary, web_search, prompt_hint, scheduling_json,
                     root_session_id, active_session_id,
                     session_chain_json, last_delivered_seq, last_roster_version,
-                    allow_speak_in_turn, runtime_state, active_activation_id,
+                    runtime_state, active_activation_id,
                     agent_secret_token, created_by, created_at
              FROM room_agents WHERE room_id = ?1 AND lower(name) != 'manager' ORDER BY created_at ASC",
         )?;
@@ -890,7 +888,7 @@ You manage the room's specialist agent roster using your tools:\n\
                     model, reasoning_effort, reasoning_summary, web_search, prompt_hint, scheduling_json,
                     root_session_id, active_session_id,
                     session_chain_json, last_delivered_seq, last_roster_version,
-                    allow_speak_in_turn, runtime_state, active_activation_id,
+                    runtime_state, active_activation_id,
                     agent_secret_token, created_by, created_at
              FROM room_agents WHERE room_id = ?1 AND lower(name) = 'manager' LIMIT 1",
             params![room_id],
@@ -907,7 +905,7 @@ You manage the room's specialist agent roster using your tools:\n\
                     model, reasoning_effort, reasoning_summary, web_search, prompt_hint, scheduling_json,
                     root_session_id, active_session_id,
                     session_chain_json, last_delivered_seq, last_roster_version,
-                    allow_speak_in_turn, runtime_state, active_activation_id,
+                    runtime_state, active_activation_id,
                     agent_secret_token, created_by, created_at
              FROM room_agents WHERE agent_id = ?1",
             params![agent_id],
@@ -927,7 +925,7 @@ You manage the room's specialist agent roster using your tools:\n\
                     model, reasoning_effort, reasoning_summary, web_search, prompt_hint, scheduling_json,
                     root_session_id, active_session_id,
                     session_chain_json, last_delivered_seq, last_roster_version,
-                    allow_speak_in_turn, runtime_state, active_activation_id,
+                    runtime_state, active_activation_id,
                     agent_secret_token, created_by, created_at
              FROM room_agents WHERE active_session_id = ?1",
             params![session_id.as_str()],
@@ -1065,26 +1063,19 @@ You manage the room's specialist agent roster using your tools:\n\
         Ok(agent)
     }
 
-    pub fn prepare_agent_delivery(
+    pub fn advance_agent_delivery_cursor(
         &self,
         agent_id: &str,
         delivered_seq: u64,
         roster_version: u64,
-        allow_speak: bool,
     ) -> Result<RoomAgent, ChatStoreError> {
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.execute(
             "UPDATE room_agents SET
                 last_delivered_seq = MAX(last_delivered_seq, ?1),
-                last_roster_version = MAX(last_roster_version, ?2),
-                allow_speak_in_turn = ?3
-             WHERE agent_id = ?4",
-            params![
-                delivered_seq as i64,
-                roster_version as i64,
-                i64::from(allow_speak),
-                agent_id,
-            ],
+                last_roster_version = MAX(last_roster_version, ?2)
+             WHERE agent_id = ?3",
+            params![delivered_seq as i64, roster_version as i64, agent_id],
         )?;
         drop(conn);
         self.get_agent(agent_id)?
@@ -1340,9 +1331,9 @@ You manage the room's specialist agent roster using your tools:\n\
         conn.execute(
             "INSERT INTO agent_schedules (
                 schedule_id, room_id, agent_id, title, task_prompt, schedule_spec_json,
-                enabled, max_runs, run_count, last_run_at_ms, next_run_at_ms, last_status,
+                delivery_mode, enabled, max_runs, run_count, last_run_at_ms, next_run_at_ms, last_status,
                 created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 schedule.schedule_id,
                 schedule.room_id,
@@ -1350,6 +1341,7 @@ You manage the room's specialist agent roster using your tools:\n\
                 schedule.title,
                 schedule.task_prompt,
                 spec_json,
+                schedule.delivery_mode.as_str(),
                 if schedule.enabled { 1i64 } else { 0i64 },
                 schedule.max_runs.map(|v| v as i64),
                 schedule.run_count as i64,
@@ -1370,7 +1362,7 @@ You manage the room's specialist agent roster using your tools:\n\
         let conn = self.conn.lock().expect("store mutex poisoned");
         conn.query_row(
             "SELECT schedule_id, room_id, agent_id, title, task_prompt, schedule_spec_json,
-                    enabled, max_runs, run_count, last_run_at_ms, next_run_at_ms, last_status,
+                    delivery_mode, enabled, max_runs, run_count, last_run_at_ms, next_run_at_ms, last_status,
                     created_at, updated_at
              FROM agent_schedules WHERE schedule_id = ?1",
             params![schedule_id],
@@ -1387,7 +1379,7 @@ You manage the room's specialist agent roster using your tools:\n\
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT schedule_id, room_id, agent_id, title, task_prompt, schedule_spec_json,
-                    enabled, max_runs, run_count, last_run_at_ms, next_run_at_ms, last_status,
+                    delivery_mode, enabled, max_runs, run_count, last_run_at_ms, next_run_at_ms, last_status,
                     created_at, updated_at
              FROM agent_schedules WHERE agent_id = ?1 ORDER BY created_at ASC",
         )?;
@@ -1416,7 +1408,7 @@ You manage the room's specialist agent roster using your tools:\n\
         let conn = self.conn.lock().expect("store mutex poisoned");
         let mut stmt = conn.prepare(
             "SELECT schedule_id, room_id, agent_id, title, task_prompt, schedule_spec_json,
-                    enabled, max_runs, run_count, last_run_at_ms, next_run_at_ms, last_status,
+                    delivery_mode, enabled, max_runs, run_count, last_run_at_ms, next_run_at_ms, last_status,
                     created_at, updated_at
              FROM agent_schedules
              WHERE enabled = 1 AND next_run_at_ms IS NOT NULL AND next_run_at_ms <= ?1
@@ -1441,13 +1433,14 @@ You manage the room's specialist agent roster using your tools:\n\
         let changed = conn.execute(
             "UPDATE agent_schedules
              SET title = ?1, task_prompt = ?2, schedule_spec_json = ?3,
-                 enabled = ?4, max_runs = ?5, run_count = ?6,
-                 last_run_at_ms = ?7, next_run_at_ms = ?8, last_status = ?9, updated_at = ?10
-             WHERE schedule_id = ?11",
+                 delivery_mode = ?4, enabled = ?5, max_runs = ?6, run_count = ?7,
+                 last_run_at_ms = ?8, next_run_at_ms = ?9, last_status = ?10, updated_at = ?11
+             WHERE schedule_id = ?12",
             params![
                 schedule.title,
                 schedule.task_prompt,
                 spec_json,
+                schedule.delivery_mode.as_str(),
                 if schedule.enabled { 1i64 } else { 0i64 },
                 schedule.max_runs.map(|v| v as i64),
                 schedule.run_count as i64,
@@ -1496,8 +1489,10 @@ fn map_schedule_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentSchedule> {
         },
     );
     let summary = format_schedule_summary(&spec);
-    let last_ms: Option<i64> = r.get(9)?;
-    let next_ms: Option<i64> = r.get(10)?;
+    let delivery_str: String = r.get(6)?;
+    let delivery_mode = ScheduleDeliveryMode::parse(&delivery_str);
+    let last_ms: Option<i64> = r.get(10)?;
+    let next_ms: Option<i64> = r.get(11)?;
     Ok(AgentSchedule {
         schedule_id: r.get(0)?,
         room_id: r.get(1)?,
@@ -1506,14 +1501,15 @@ fn map_schedule_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentSchedule> {
         task_prompt: r.get(4)?,
         spec,
         schedule_summary: summary,
-        enabled: r.get::<_, i64>(6)? != 0,
-        max_runs: r.get::<_, Option<i64>>(7)?.map(|v| v as u64),
-        run_count: r.get::<_, i64>(8).unwrap_or(0) as u64,
+        delivery_mode,
+        enabled: r.get::<_, i64>(7)? != 0,
+        max_runs: r.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+        run_count: r.get::<_, i64>(9).unwrap_or(0) as u64,
         last_run_at: last_ms.and_then(DateTime::from_timestamp_millis),
         next_run_at: next_ms.and_then(DateTime::from_timestamp_millis),
-        last_status: r.get(11)?,
-        created_at: parse_dt(&r.get::<_, String>(12)?),
-        updated_at: parse_dt(&r.get::<_, String>(13)?),
+        last_status: r.get(12)?,
+        created_at: parse_dt(&r.get::<_, String>(13)?),
+        updated_at: parse_dt(&r.get::<_, String>(14)?),
     })
 }
 

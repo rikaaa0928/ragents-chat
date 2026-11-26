@@ -3,7 +3,7 @@ use crate::store::ChatroomStore;
 use crate::types::*;
 use chrono::Utc;
 use futures::StreamExt;
-use openresponses_rust::{Item, MessageContent};
+use openresponses_rust::MessageContent;
 use ragents_client::RagentsClient;
 use ragents_protocol::*;
 use rand::Rng;
@@ -52,9 +52,6 @@ pub struct RoomCoordinator {
     agent_token_usage: Arc<Mutex<HashMap<String, AgentTokenUsage>>>,
     seen_usage_rvs: Arc<Mutex<HashSet<u64>>>,
     hydrated_usage_agents: Arc<Mutex<HashSet<String>>>,
-    pending_realtime_seqs: Arc<Mutex<HashMap<String, Vec<(Vec<i64>, Vec<u64>)>>>>,
-    pending_normal_activations: Arc<Mutex<HashMap<String, Vec<(ActivationId, Vec<u64>)>>>>,
-    started_activation_ids: Arc<Mutex<HashSet<ActivationId>>>,
     last_agent_activity: Arc<Mutex<HashMap<String, String>>>,
 }
 
@@ -79,9 +76,6 @@ impl RoomCoordinator {
             agent_token_usage: Arc::new(Mutex::new(HashMap::new())),
             seen_usage_rvs: Arc::new(Mutex::new(HashSet::new())),
             hydrated_usage_agents: Arc::new(Mutex::new(HashSet::new())),
-            pending_realtime_seqs: Arc::new(Mutex::new(HashMap::new())),
-            pending_normal_activations: Arc::new(Mutex::new(HashMap::new())),
-            started_activation_ids: Arc::new(Mutex::new(HashSet::new())),
             last_agent_activity: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -211,274 +205,350 @@ impl RoomCoordinator {
         guard.insert(agent.agent_id.clone());
     }
 
-    pub fn build_agent_message_queues(
+    pub async fn build_agent_message_queues(
         &self,
         agent: &RoomAgent,
-        events: &[SessionEventEnvelope],
     ) -> AgentMessageQueueSnapshot {
-        let all_msgs = self
-            .store
-            .list_room_messages(&agent.room_id, 0)
-            .unwrap_or_default();
-        let is_manager = agent.name.eq_ignore_ascii_case("Manager");
+        let Ok(resp) = self
+            .ragents_client
+            .list_session_queues(&agent.active_session_id)
+            .await
+        else {
+            return AgentMessageQueueSnapshot::default();
+        };
+
         let is_agent_idle = agent.runtime_state == AgentRuntimeState::Idle
             && agent.active_activation_id.is_none();
 
-        let started_acts_in_events: HashSet<&ActivationId> = events
+        let map_entry = |msg: SessionQueueMessage, idx: usize, total: usize| -> BaseQueuedMessageEntry {
+            let msg_seqs: Vec<u64> = msg
+                .metadata
+                .get("msg_seqs")
+                .map(|raw| {
+                    raw.split(',')
+                        .filter_map(|s| s.trim().parse::<u64>().ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let primary_msg_seq = msg
+                .metadata
+                .get("primary_msg_seq")
+                .and_then(|s| s.trim().parse::<u64>().ok());
+
+            let raw_text = msg
+                .content
+                .iter()
+                .filter_map(|c| match c {
+                    MessageContent::InputText { text }
+                    | MessageContent::OutputText { text, .. }
+                    | MessageContent::PlainText { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let sender_label = msg
+                .metadata
+                .get("sender_name")
+                .cloned()
+                .unwrap_or_else(|| {
+                    if raw_text.contains("Background Process Exited") {
+                        "⚙️ 后台进程通知".to_string()
+                    } else if raw_text.contains("<scheduled_task_trigger") {
+                        "⏰ 定时任务".to_string()
+                    } else if raw_text.contains("[System Reminder") {
+                        "🔔 系统提醒".to_string()
+                    } else {
+                        "System".to_string()
+                    }
+                });
+
+            let preview = msg
+                .metadata
+                .get("preview")
+                .cloned()
+                .unwrap_or_else(|| {
+                    let trimmed = raw_text.trim();
+                    let mut out = String::new();
+                    for ch in trimmed.chars().take(180) {
+                        out.push(ch);
+                    }
+                    if trimmed.chars().count() > 180 {
+                        out.push_str("...");
+                    }
+                    out
+                });
+
+            let status_label = match msg.queue_kind {
+                QueueKind::Realtime => {
+                    if is_agent_idle {
+                        "实时队列 · 待调度执行".to_string()
+                    } else {
+                        "实时队列 · 等待当前步骤间隙全量注入".to_string()
+                    }
+                }
+                QueueKind::Pending => {
+                    if idx == 0 {
+                        if is_agent_idle {
+                            "阻塞队首 · 待调度执行".to_string()
+                        } else {
+                            "阻塞队首 · 等待当前回合结束 (1-by-1)".to_string()
+                        }
+                    } else {
+                        format!("阻塞队列 #{}/{} · 顺位独立执行", idx + 1, total)
+                    }
+                }
+            };
+
+            BaseQueuedMessageEntry {
+                id: msg.id,
+                queue_kind: msg.queue_kind,
+                sender_label,
+                preview,
+                tool_policy: msg.tool_policy,
+                metadata: msg.metadata,
+                msg_seqs,
+                primary_msg_seq,
+                status_label,
+                created_at: msg.created_at,
+            }
+        };
+
+        let rt_total = resp.realtime.len();
+        let pd_total = resp.pending.len();
+        AgentMessageQueueSnapshot {
+            realtime_messages: resp
+                .realtime
+                .into_iter()
+                .enumerate()
+                .map(|(i, m)| map_entry(m, i, rt_total))
+                .collect(),
+            pending_messages: resp
+                .pending
+                .into_iter()
+                .enumerate()
+                .map(|(i, m)| map_entry(m, i, pd_total))
+                .collect(),
+        }
+    }
+
+    pub fn build_room_pending_pool(&self, room_id: &str) -> RoomPendingPoolResponse {
+        let Ok(Some(room)) = self.store.get_room(room_id) else {
+            return RoomPendingPoolResponse {
+                room_id: room_id.to_string(),
+                ..Default::default()
+            };
+        };
+        let agents = self.store.list_room_agents(room_id).unwrap_or_default();
+        let manager = self.store.get_room_manager_agent(room_id).ok().flatten();
+        let messages = self.store.list_room_messages(room_id, 0).unwrap_or_default();
+
+        let min_cursor = agents
             .iter()
-            .filter_map(|env| match env.event {
-                SessionEvent::ActivationStarted { .. }
-                | SessionEvent::TurnStarted
-                | SessionEvent::ActivationCompleted { .. } => env.activation_id.as_ref(),
-                _ => None,
-            })
-            .collect();
+            .map(|a| a.last_delivered_seq)
+            .min()
+            .unwrap_or(room.last_msg_seq);
 
-        let pending_rt: HashSet<u64> = self
-            .pending_realtime_seqs
-            .lock()
-            .expect("pending_realtime_seqs mutex poisoned")
-            .get(&agent.agent_id)
-            .map(|list| {
-                list.iter()
-                    .flat_map(|(_, seqs)| seqs.iter().copied())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut waiting_messages = Vec::new();
+        let mut per_agent_unread: HashMap<String, (u64, u64)> = HashMap::new();
+        for ag in &agents {
+            per_agent_unread.insert(ag.agent_id.clone(), (0, 0));
+        }
 
-        let started_global = self
-            .started_activation_ids
-            .lock()
-            .expect("started_activation_ids mutex poisoned")
-            .clone();
-
-        let pending_norm: HashSet<u64> = self
-            .pending_normal_activations
-            .lock()
-            .expect("pending_normal_activations mutex poisoned")
-            .get(&agent.agent_id)
-            .map(|list| {
-                list.iter()
-                    .filter(|(act_id, _)| {
-                        !started_acts_in_events.contains(act_id)
-                            && !started_global.contains(act_id)
-                    })
-                    .flat_map(|(_, seqs)| seqs.iter().copied())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let mut realtime_messages = Vec::new();
-        let mut normal_messages = Vec::new();
-
-        for msg in all_msgs {
-            if msg.sender_kind == SenderKind::System || msg.sender_id == agent.agent_id {
+        for m in messages {
+            if m.sender_kind == SenderKind::System {
                 continue;
             }
-            if is_manager {
-                if !msg
-                    .mentions
-                    .iter()
-                    .any(|m| m.eq_ignore_ascii_case("Manager"))
+            if m.msg_seq <= min_cursor {
+                continue;
+            }
+            let mut waiting_names = Vec::new();
+            let mut delivered_names = Vec::new();
+
+            if let Some(ref mgr) = manager {
+                if m.sender_id != mgr.agent_id
+                    && m.mentions.iter().any(|x| x.eq_ignore_ascii_case("Manager"))
+                    && mgr.last_delivered_seq >= m.msg_seq
                 {
+                    delivered_names.push("Manager".to_string());
+                }
+            }
+
+            for ag in &agents {
+                if m.sender_id == ag.agent_id {
                     continue;
                 }
-            } else {
-                let is_visible = msg.visible_to.is_empty()
-                    || msg
-                        .visible_to
+                let is_visible = m.visible_to.is_empty()
+                    || m.sender_name.eq_ignore_ascii_case(&ag.name)
+                    || m.visible_to
                         .iter()
-                        .any(|v| v.eq_ignore_ascii_case(&agent.name))
-                    || msg.sender_name.eq_ignore_ascii_case(&agent.name);
+                        .any(|v| v.eq_ignore_ascii_case(&ag.name));
                 if !is_visible {
                     continue;
                 }
-                let mentions_mgr_only = msg
+                let mentions_mgr_only = m
                     .mentions
                     .iter()
-                    .any(|m| m.eq_ignore_ascii_case("Manager"))
-                    && !msg
+                    .any(|x| x.eq_ignore_ascii_case("Manager"))
+                    && !m
                         .mentions
                         .iter()
-                        .any(|m| m.eq_ignore_ascii_case(&agent.name));
+                        .any(|x| x.eq_ignore_ascii_case(&ag.name));
                 if mentions_mgr_only {
                     continue;
                 }
+                if m.msg_seq > ag.last_delivered_seq {
+                    waiting_names.push(ag.name.clone());
+                    if let Some((total, countable)) = per_agent_unread.get_mut(&ag.agent_id) {
+                        *total += 1;
+                        if is_peek_countable_message(&m) {
+                            *countable += 1;
+                        }
+                    }
+                } else {
+                    delivered_names.push(ag.name.clone());
+                }
             }
 
-            let is_mentioned = msg
-                .mentions
-                .iter()
-                .any(|m| m.eq_ignore_ascii_case(&agent.name));
-            let is_pending_rt_injected =
-                msg.msg_seq <= agent.last_delivered_seq && pending_rt.contains(&msg.msg_seq);
-            let effective_realtime = msg.is_realtime && (is_mentioned || is_pending_rt_injected);
-
-            let status_label = if msg.msg_seq > agent.last_delivered_seq {
-                if effective_realtime {
-                    "排队中 · 待投递".to_string()
-                } else {
-                    "排队中 · 待唤醒/窥屏投递".to_string()
-                }
-            } else if effective_realtime {
-                if !is_agent_idle && pending_rt.contains(&msg.msg_seq) {
-                    "排队中 · 等待步骤间隙注入".to_string()
-                } else {
-                    continue;
-                }
-            } else if !is_agent_idle && pending_norm.contains(&msg.msg_seq) {
-                "排队中 · 等待当前回合结束".to_string()
-            } else {
-                continue;
-            };
-
-            let entry = QueuedMessageEntry {
-                msg_seq: msg.msg_seq,
-                sender_name: msg.sender_name,
-                content: msg.content,
-                is_realtime: effective_realtime,
-                status_label,
-                created_at: msg.created_at,
-            };
-
-            if effective_realtime {
-                realtime_messages.push(entry);
-            } else {
-                normal_messages.push(entry);
+            if !waiting_names.is_empty() {
+                waiting_messages.push(RoomPendingPoolMessageEntry {
+                    msg_seq: m.msg_seq,
+                    sender_name: m.sender_name,
+                    sender_kind: m.sender_kind,
+                    content: m.content,
+                    mentions: m.mentions,
+                    is_realtime: m.is_realtime,
+                    can_withdraw: delivered_names.is_empty(),
+                    waiting_agent_names: waiting_names,
+                    delivered_agent_names: delivered_names,
+                    created_at: m.created_at,
+                });
             }
         }
 
-        AgentMessageQueueSnapshot {
-            realtime_messages,
-            normal_messages,
+        let per_agent = agents
+            .into_iter()
+            .map(|ag| {
+                let (unread_count, countable_unread_count) =
+                    per_agent_unread.get(&ag.agent_id).copied().unwrap_or((0, 0));
+                RoomPendingPoolAgentStatus {
+                    agent_id: ag.agent_id,
+                    agent_name: ag.name,
+                    avatar: ag.avatar,
+                    last_delivered_seq: ag.last_delivered_seq,
+                    unread_count,
+                    countable_unread_count,
+                }
+            })
+            .collect();
+
+        RoomPendingPoolResponse {
+            room_id: room_id.to_string(),
+            room_last_seq: room.last_msg_seq,
+            total_undelivered_messages: waiting_messages.len(),
+            waiting_messages,
+            per_agent,
         }
+    }
+
+    pub async fn withdraw_room_pending_message(
+        &self,
+        room_id: &str,
+        msg_seq: u64,
+    ) -> anyhow::Result<(RoomMessage, RoomPendingPoolResponse)> {
+        let msg = self
+            .store
+            .get_room_message(room_id, msg_seq)?
+            .ok_or_else(|| anyhow::anyhow!("消息 #{msg_seq} 不存在或已被撤回"))?;
+        if msg.sender_kind == SenderKind::System {
+            anyhow::bail!("系统通知消息不支持从暂存池撤回");
+        }
+        let mut all = self.store.list_room_agents(room_id)?;
+        if let Ok(Some(mgr)) = self.store.get_room_manager_agent(room_id) {
+            all.push(mgr);
+        }
+        if all
+            .iter()
+            .any(|a| a.agent_id != msg.sender_id && a.last_delivered_seq >= msg_seq)
+        {
+            anyhow::bail!(
+                "消息 #{msg_seq} 已被投递给至少一位 Agent 的底层会话队列，请前往对应 Agent 的透视队列中撤回"
+            );
+        }
+
+        let _ = self.store.delete_room_message(room_id, msg_seq)?;
+        self.emit_room_event(ChatroomEvent::MessageWithdrawn {
+            room_id: room_id.to_string(),
+            msg_seq,
+            withdrawn_message: msg.clone(),
+        });
+        if let Ok(Some(room)) = self.store.get_room(room_id) {
+            self.emit_room_event(ChatroomEvent::RoomUpdated {
+                room_id: room_id.to_string(),
+                room,
+            });
+        }
+        self.emit_flow_status(
+            room_id,
+            format!("[↩️ 暂存撤回] 已从聊天室未投递暂存池撤回消息 #{msg_seq}"),
+        );
+        let pool = self.build_room_pending_pool(room_id);
+        Ok((msg, pool))
     }
 
     pub async fn withdraw_agent_queued_message(
         &self,
         agent_id: &str,
-        msg_seq: u64,
+        queue_msg_id: i64,
     ) -> anyhow::Result<WithdrawQueuedMessageResponse> {
         let agent = self
             .store
             .get_agent(agent_id)?
             .ok_or_else(|| anyhow::anyhow!("Agent {agent_id} 不存在"))?;
-        let msg = self
-            .store
-            .get_room_message(&agent.room_id, msg_seq)?
-            .ok_or_else(|| anyhow::anyhow!("消息 #{msg_seq} 不存在或已被撤回"))?;
 
-        let normal_match = self
-            .pending_normal_activations
-            .lock()
-            .expect("pending_normal_activations mutex poisoned")
-            .get(&agent.agent_id)
-            .and_then(|list| {
-                list.iter()
-                    .find(|(_, seqs)| seqs.contains(&msg_seq))
-                    .cloned()
-            });
+        let removed = self
+            .ragents_client
+            .withdraw_session_queue_message(&agent.active_session_id, queue_msg_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("该排队消息已被 Agent 读取或不存在，无法撤回: {e}"))?;
 
-        let realtime_match = self
-            .pending_realtime_seqs
-            .lock()
-            .expect("pending_realtime_seqs mutex poisoned")
-            .get(&agent.agent_id)
-            .and_then(|list| {
-                list.iter()
-                    .find(|(_, seqs)| seqs.contains(&msg_seq))
-                    .cloned()
-            });
+        let meta = &removed.removed_message.metadata;
+        let msg_seqs: Vec<u64> = meta
+            .get("msg_seqs")
+            .map(|raw| {
+                raw.split(',')
+                    .filter_map(|s| s.trim().parse::<u64>().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let primary_msg_seq = meta
+            .get("primary_msg_seq")
+            .and_then(|s| s.trim().parse::<u64>().ok());
 
-        if let Some((act_id, seqs)) = normal_match {
-            if self
-                .ragents_client
-                .withdraw_queued_activation(&act_id)
-                .await
-                .is_err()
-            {
-                if let Some(list) = self
-                    .pending_normal_activations
-                    .lock()
-                    .expect("pending_normal_activations mutex poisoned")
-                    .get_mut(&agent.agent_id)
-                {
-                    list.retain(|(id, _)| id != &act_id);
-                }
-                anyhow::bail!("该排队消息已进入执行阶段，无法撤回");
-            }
-            if let Some(list) = self
-                .pending_normal_activations
-                .lock()
-                .expect("pending_normal_activations mutex poisoned")
-                .get_mut(&agent.agent_id)
-            {
-                list.retain(|(id, _)| id != &act_id);
-            }
-            if seqs.iter().any(|&s| s < msg_seq) {
-                let rollback_seq = seqs.iter().copied().min().unwrap_or(msg_seq).saturating_sub(1);
+        if let Some(min_seq) = msg_seqs.iter().copied().min() {
+            if agent.last_delivered_seq >= min_seq {
                 let _ = self
                     .store
-                    .set_agent_last_delivered_seq(&agent.agent_id, rollback_seq);
-            } else if agent.last_delivered_seq == msg_seq {
-                let _ = self
-                    .store
-                    .set_agent_last_delivered_seq(&agent.agent_id, msg_seq.saturating_sub(1));
+                    .set_agent_last_delivered_seq(&agent.agent_id, min_seq.saturating_sub(1));
             }
-        } else if let Some((rt_ids, seqs)) = realtime_match {
-            let withdraw_res = self
-                .ragents_client
-                .withdraw_realtime_messages(
-                    &agent.active_session_id,
-                    WithdrawRealtimeMessageRequest {
-                        message_ids: rt_ids.clone(),
-                    },
-                )
-                .await;
-            let removed = withdraw_res.map(|r| r.removed_count).unwrap_or(0);
-            if let Some(list) = self
-                .pending_realtime_seqs
-                .lock()
-                .expect("pending_realtime_seqs mutex poisoned")
-                .get_mut(&agent.agent_id)
-            {
-                list.retain(|(_, s)| !s.contains(&msg_seq));
-            }
-            if removed == 0 {
-                anyhow::bail!("该实时排队消息已被 Agent 读取，无法撤回");
-            }
-            if seqs.iter().any(|&s| s < msg_seq) {
-                let rollback_seq = seqs.iter().copied().min().unwrap_or(msg_seq).saturating_sub(1);
-                let _ = self
-                    .store
-                    .set_agent_last_delivered_seq(&agent.agent_id, rollback_seq);
-            } else if agent.last_delivered_seq == msg_seq {
-                let _ = self
-                    .store
-                    .set_agent_last_delivered_seq(&agent.agent_id, msg_seq.saturating_sub(1));
-            }
-        } else if msg_seq <= agent.last_delivered_seq {
-            anyhow::bail!("该消息已被 Agent 读取或不在排队队列中，无法撤回");
         }
 
-        let _ = self.store.delete_room_message(&agent.room_id, msg_seq)?;
-        let updated_agent = self.store.get_agent(agent_id)?.unwrap_or(agent);
-        let events = self
-            .ragents_client
-            .read_events_with_mode(
-                Some(&updated_agent.active_session_id),
-                0,
-                ContentFetchMode::View,
-            )
-            .await
-            .unwrap_or_default();
-        let message_queues = self.build_agent_message_queues(&updated_agent, &events);
+        let mut withdrawn_room_msg: Option<RoomMessage> = None;
+        if let Some(pseq) = primary_msg_seq {
+            if let Ok(Some(existing)) = self.store.get_room_message(&agent.room_id, pseq) {
+                let _ = self.store.delete_room_message(&agent.room_id, pseq)?;
+                self.emit_room_event(ChatroomEvent::MessageWithdrawn {
+                    room_id: agent.room_id.clone(),
+                    msg_seq: pseq,
+                    withdrawn_message: existing.clone(),
+                });
+                withdrawn_room_msg = Some(existing);
+            }
+        }
 
-        self.emit_room_event(ChatroomEvent::MessageWithdrawn {
-            room_id: updated_agent.room_id.clone(),
-            msg_seq,
-            withdrawn_message: msg.clone(),
-        });
+        let updated_agent = self.store.get_agent(agent_id)?.unwrap_or(agent);
+        let message_queues = self.build_agent_message_queues(&updated_agent).await;
+
         self.emit_room_event(ChatroomEvent::AgentUpdated {
             room_id: updated_agent.room_id.clone(),
             agent: self.to_agent_public(updated_agent.clone()),
@@ -486,13 +556,14 @@ impl RoomCoordinator {
         self.emit_flow_status(
             &updated_agent.room_id,
             format!(
-                "[↩️ 消息撤回] 已从 @{} 的未读排队队列撤回消息 #{}",
-                updated_agent.name, msg_seq
+                "[↩️ 队列撤回] 已从 @{} 的底层 {:?} 队列撤回条目 #{}",
+                updated_agent.name, removed.removed_message.queue_kind, queue_msg_id
             ),
         );
 
         Ok(WithdrawQueuedMessageResponse {
-            withdrawn_message: msg,
+            withdrawn_message: withdrawn_room_msg,
+            removed_queue_id: queue_msg_id,
             message_queues,
         })
     }
@@ -535,39 +606,13 @@ impl RoomCoordinator {
             &agent.name,
         )?;
 
-        let (updated_agent, submission_kind, input_items) = if !unread.is_empty() {
-            let max_seq = room.last_msg_seq;
-            let formatted = format_delivery_payload(
-                &room,
-                &all_agents,
-                &agent,
-                &unread,
-                DeliveryMode::DirectMention,
-            );
-            let upd = self.store.prepare_agent_delivery(
-                &agent.agent_id,
-                max_seq,
-                room.roster_version,
-                true,
-            )?;
-            (upd, SubmissionKind::Normal, vec![Item::user_message(formatted)])
-        } else {
-            let upd = self.store.prepare_agent_delivery(
-                &agent.agent_id,
-                agent.last_delivered_seq,
-                room.roster_version,
-                true,
-            )?;
-            (upd, SubmissionKind::Continuation, Vec::new())
-        };
-
         {
             let mut dm_guard = self
                 .direct_mentions
                 .lock()
                 .expect("direct_mentions mutex poisoned");
             dm_guard.insert(
-                updated_agent.agent_id.clone(),
+                agent.agent_id.clone(),
                 DirectMentionState {
                     from_human: true,
                     spoke: false,
@@ -576,22 +621,67 @@ impl RoomCoordinator {
             );
         }
 
-        let act = self
-            .ragents_client
-            .create_activation(CreateActivationRequest {
-                activation_id: None,
-                labels: BTreeMap::new(),
-                spec: ActivationSpec {
-                    session_id: updated_agent.active_session_id.clone(),
-                    submission_kind,
-                    input: input_items,
-                    model_override: None,
-                    disabled_tools: vec![],
-                    desired_phase: DesiredActivationPhase::Running,
-                    interaction_responses: BTreeMap::new(),
-                },
-            })
-            .await?;
+        let (updated_agent, act) = if !unread.is_empty() {
+            let max_seq = room.last_msg_seq;
+            let formatted = format_delivery_payload(
+                &room,
+                &all_agents,
+                &agent,
+                &unread,
+                DeliveryMode::DirectMention,
+            );
+            let metadata = build_chatroom_queue_metadata(&unread, "chatroom_retry", true);
+            let upd = self.store.advance_agent_delivery_cursor(
+                &agent.agent_id,
+                max_seq,
+                room.roster_version,
+            )?;
+            let resp = self
+                .ragents_client
+                .enqueue_session_message(
+                    &upd.active_session_id,
+                    QueueKind::Pending,
+                    EnqueueSessionMessageRequest {
+                        content: vec![MessageContent::InputText { text: formatted }],
+                        tool_policy: QueueToolPolicy::with_enabled(["chatroom_speak".to_string()]),
+                        metadata,
+                        model_override: None,
+                    },
+                )
+                .await?;
+            let act = if let Some(act_id) = resp.spawned_activation_id {
+                self.ragents_client
+                    .get_activation(&act_id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("spawned activation {act_id} missing"))?
+            } else {
+                let sess = self
+                    .ragents_client
+                    .get_session(&upd.active_session_id)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("session missing"))?;
+                if let Some(active_id) = sess.status.active_activation_id {
+                    self.ragents_client
+                        .get_activation(&active_id)
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("active activation missing"))?
+                } else {
+                    anyhow::bail!("重试消息已加入阻塞队列，等待当前绑定节点就绪后执行")
+                }
+            };
+            (upd, act)
+        } else {
+            let upd = self.store.advance_agent_delivery_cursor(
+                &agent.agent_id,
+                agent.last_delivered_seq,
+                room.roster_version,
+            )?;
+            let resumed = self
+                .ragents_client
+                .resume_session(&upd.active_session_id)
+                .await?;
+            (upd, resumed.activation)
+        };
 
         let act_id = ActivationId::new(act.metadata.id.clone());
         let mut final_agent = updated_agent.clone();
@@ -1305,19 +1395,10 @@ impl RoomCoordinator {
     async fn handle_ragents_event(&self, env: SessionEventEnvelope) {
         match env.event {
             SessionEvent::ActivationScheduled { .. } | SessionEvent::ActivationStarted { .. } => {
-                let is_started = matches!(env.event, SessionEvent::ActivationStarted { .. });
                 let scheduled_node_id = match &env.event {
                     SessionEvent::ActivationScheduled { node_id, .. } => Some(node_id.clone()),
                     _ => None,
                 };
-                if is_started {
-                    if let Some(ref act_id) = env.activation_id {
-                        self.started_activation_ids
-                            .lock()
-                            .expect("started_activation_ids mutex poisoned")
-                            .insert(act_id.clone());
-                    }
-                }
                 if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
                     if let Some(ref sched_nid) = scheduled_node_id {
                         if let Ok(Some(room)) = self.store.get_room(&agent.room_id) {
@@ -1334,18 +1415,6 @@ impl RoomCoordinator {
                                         )),
                                     )
                                     .await;
-                            }
-                        }
-                    }
-                    if is_started {
-                        if let Some(ref act_id) = env.activation_id {
-                            if let Some(list) = self
-                                .pending_normal_activations
-                                .lock()
-                                .expect("pending_normal_activations mutex poisoned")
-                                .get_mut(&agent.agent_id)
-                            {
-                                list.retain(|(id, _)| id != act_id);
                             }
                         }
                     }
@@ -1368,23 +1437,7 @@ impl RoomCoordinator {
                 }
             }
             SessionEvent::TurnStarted => {
-                if let Some(ref act_id) = env.activation_id {
-                    self.started_activation_ids
-                        .lock()
-                        .expect("started_activation_ids mutex poisoned")
-                        .insert(act_id.clone());
-                }
                 if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
-                    if let Some(ref act_id) = env.activation_id {
-                        if let Some(list) = self
-                            .pending_normal_activations
-                            .lock()
-                            .expect("pending_normal_activations mutex poisoned")
-                            .get_mut(&agent.agent_id)
-                        {
-                            list.retain(|(id, _)| id != act_id);
-                        }
-                    }
                     self.emit_room_event(ChatroomEvent::AgentUpdated {
                         room_id: agent.room_id.clone(),
                         agent: self.to_agent_public(agent.clone()),
@@ -1396,16 +1449,25 @@ impl RoomCoordinator {
                     });
                 }
             }
+            SessionEvent::SessionQueueUpdated {
+                realtime_count,
+                pending_count,
+            } => {
+                if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    self.emit_room_event(ChatroomEvent::AgentQueueUpdated {
+                        room_id: agent.room_id.clone(),
+                        agent_id: agent.agent_id.clone(),
+                        realtime_count,
+                        pending_count,
+                    });
+                    self.emit_room_event(ChatroomEvent::AgentUpdated {
+                        room_id: agent.room_id.clone(),
+                        agent: self.to_agent_public(agent),
+                    });
+                }
+            }
             SessionEvent::RealtimeMessagesDrained { count, .. } => {
                 if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
-                    if let Some(set) = self
-                        .pending_realtime_seqs
-                        .lock()
-                        .expect("pending_realtime_seqs mutex poisoned")
-                        .get_mut(&agent.agent_id)
-                    {
-                        set.clear();
-                    }
                     self.emit_room_event(ChatroomEvent::AgentUpdated {
                         room_id: agent.room_id.clone(),
                         agent: self.to_agent_public(agent.clone()),
@@ -1574,16 +1636,40 @@ impl RoomCoordinator {
                     });
                 }
             }
+            SessionEvent::BackgroundProcessStarted { process } => {
+                if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    let pid_str = process
+                        .pid
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    self.emit_flow_status(
+                        &agent.room_id,
+                        format!(
+                            "[⚙️ 后台任务启动] @{} 启动异步命令 (id={}, pid={}, lifecycle={:?})",
+                            agent.name, process.process_id, pid_str, process.lifecycle
+                        ),
+                    );
+                }
+            }
+            SessionEvent::BackgroundProcessExited { process } => {
+                if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
+                    self.emit_flow_status(
+                        &agent.room_id,
+                        format!(
+                            "[✅ 后台任务结束] @{} 异步命令退出 (id={}, phase={:?}, exit_code={:?}, {}ms)",
+                            agent.name,
+                            process.process_id,
+                            process.phase,
+                            process.exit_code,
+                            process.duration_ms
+                        ),
+                    );
+                }
+            }
             SessionEvent::ActivationCompleted { .. }
             | SessionEvent::ActivationFailed { .. }
             | SessionEvent::ActivationCancelled
             | SessionEvent::ActivationInterrupted { .. } => {
-                if let Some(ref act_id) = env.activation_id {
-                    self.started_activation_ids
-                        .lock()
-                        .expect("started_activation_ids mutex poisoned")
-                        .insert(act_id.clone());
-                }
                 let is_completed_ok = matches!(env.event, SessionEvent::ActivationCompleted { .. });
                 let fail_err = match &env.event {
                     SessionEvent::ActivationFailed { error } => Some(error.clone()),
@@ -1594,33 +1680,6 @@ impl RoomCoordinator {
                     _ => None,
                 };
                 if let Ok(Some(agent)) = self.store.get_agent_by_session(&env.session_id) {
-                    if let Some(ref act_id) = env.activation_id {
-                        if let Some(list) = self
-                            .pending_normal_activations
-                            .lock()
-                            .expect("pending_normal_activations mutex poisoned")
-                            .get_mut(&agent.agent_id)
-                        {
-                            list.retain(|(id, _)| id != act_id);
-                        }
-                    }
-                    let has_more_normal = self
-                        .pending_normal_activations
-                        .lock()
-                        .expect("pending_normal_activations mutex poisoned")
-                        .get(&agent.agent_id)
-                        .map(|l| !l.is_empty())
-                        .unwrap_or(false);
-                    if !has_more_normal {
-                        if let Some(set) = self
-                            .pending_realtime_seqs
-                            .lock()
-                            .expect("pending_realtime_seqs mutex poisoned")
-                            .get_mut(&agent.agent_id)
-                        {
-                            set.clear();
-                        }
-                    }
                     if let Ok(updated) = self.store.update_agent_runtime_state(
                         &agent.agent_id,
                         AgentRuntimeState::Idle,
@@ -1749,17 +1808,21 @@ impl RoomCoordinator {
                  Please call `chatroom_speak` now to post your reply or status update to the chatroom.",
                 agent.name
             );
-            let _ = self.store.prepare_agent_delivery(
-                &agent.agent_id,
-                agent.last_delivered_seq,
-                agent.last_roster_version,
-                true,
-            );
+            let mut metadata = BTreeMap::new();
+            metadata.insert("source".to_string(), "auto_nudge".to_string());
+            metadata.insert("sender_name".to_string(), "🔔 系统漏调提醒".to_string());
+            metadata.insert("preview".to_string(), "被人类点名后未调用 chatroom_speak 提醒".to_string());
             let _ = self
                 .ragents_client
-                .push_realtime_message(
+                .enqueue_session_message(
                     &agent.active_session_id,
-                    PushRealtimeMessageRequest::from_text(nudge_text),
+                    QueueKind::Realtime,
+                    EnqueueSessionMessageRequest {
+                        content: vec![MessageContent::InputText { text: nudge_text }],
+                        tool_policy: QueueToolPolicy::with_enabled(["chatroom_speak".to_string()]),
+                        metadata,
+                        model_override: None,
+                    },
                 )
                 .await;
             return;
@@ -1854,12 +1917,14 @@ impl RoomCoordinator {
             .await?;
 
         let updated_room = self.store.get_room(&room.room_id)?.unwrap_or(room);
+        let pending_pool = self.build_room_pending_pool(&updated_room.room_id);
         Ok(RoomDetailResponse {
             room: updated_room,
             manager_agent: Some(manager_agent.into()),
             agents: vec![agent.into()],
             messages: vec![],
             flow_logs: vec![],
+            pending_pool,
         })
     }
 
@@ -1966,7 +2031,7 @@ impl RoomCoordinator {
                     permissions,
                     extra_tmp_dirs,
                 },
-                initial_activation: None,
+                initial_message: None,
             })
             .await?;
 
@@ -1996,7 +2061,6 @@ impl RoomCoordinator {
             }],
             last_delivered_seq: room.last_msg_seq,
             last_roster_version: room.roster_version,
-            allow_speak_in_turn: true,
             runtime_state: AgentRuntimeState::Idle,
             active_activation_id: None,
             agent_secret_token,
@@ -2220,7 +2284,7 @@ impl RoomCoordinator {
                     permissions,
                     extra_tmp_dirs,
                 },
-                initial_activation: None,
+                initial_message: None,
             })
             .await?;
 
@@ -2254,7 +2318,6 @@ impl RoomCoordinator {
             }],
             last_delivered_seq: room.last_msg_seq,
             last_roster_version: 0,
-            allow_speak_in_turn: true,
             runtime_state: AgentRuntimeState::Idle,
             active_activation_id: None,
             agent_secret_token,
@@ -2598,14 +2661,6 @@ impl RoomCoordinator {
             return Err((401, "invalid agent_secret_token".to_string()));
         }
 
-        if !agent.allow_speak_in_turn {
-            return Err((
-                403,
-                "Permission denied: You are muted for this peek turn (read-only observation)."
-                    .to_string(),
-            ));
-        }
-
         let is_manager = agent.name.eq_ignore_ascii_case("Manager");
         let sender_kind = if is_manager {
             SenderKind::Manager
@@ -2774,6 +2829,7 @@ impl RoomCoordinator {
                 let next_ms = compute_next_run_at_ms(&spec, now_ms, 0, max_runs)
                     .map_err(|e| (400, e))?;
                 let summary = format_schedule_summary(&spec);
+                let delivery_mode = req.delivery_mode.unwrap_or_default();
                 let schedule = AgentSchedule {
                     schedule_id: format!("sched_{}", Uuid::now_v7().simple()),
                     room_id: agent.room_id.clone(),
@@ -2782,6 +2838,7 @@ impl RoomCoordinator {
                     task_prompt,
                     spec,
                     schedule_summary: summary.clone(),
+                    delivery_mode,
                     enabled: true,
                     max_runs,
                     run_count: 0,
@@ -2799,8 +2856,15 @@ impl RoomCoordinator {
                 self.emit_flow_status(
                     &agent.room_id,
                     format!(
-                        "[⏰ 定时任务创建] @{} 创建了定时任务「{}」({})",
-                        agent.name, title, summary
+                        "[⏰ 定时任务创建] @{} 创建了定时任务「{}」({}, 投递方式: {})",
+                        agent.name,
+                        title,
+                        summary,
+                        if delivery_mode == ScheduleDeliveryMode::Realtime {
+                            "实时插队"
+                        } else {
+                            "阻塞排队"
+                        }
                     ),
                 );
                 Ok(serde_json::json!({
@@ -2839,6 +2903,9 @@ impl RoomCoordinator {
                         if !p.trim().is_empty() {
                             sched.task_prompt = p.trim().to_string();
                         }
+                    }
+                    if let Some(dm) = req.delivery_mode {
+                        sched.delivery_mode = dm;
                     }
                     if req.kind.is_some() {
                         let (new_spec, new_max) =
@@ -3219,6 +3286,9 @@ impl RoomCoordinator {
                 sched.task_prompt = p.trim().to_string();
             }
         }
+        if let Some(dm) = patch.delivery_mode {
+            sched.delivery_mode = dm;
+        }
         if sched.enabled {
             let next_ms =
                 compute_next_run_at_ms(&sched.spec, now_ms, sched.run_count, sched.max_runs)
@@ -3284,35 +3354,40 @@ impl RoomCoordinator {
         let is_busy =
             agent.runtime_state != AgentRuntimeState::Idle || agent.active_activation_id.is_some();
 
-        if is_busy && !manual {
-            // Automatic timer fired while agent is busy: avoid piling up duplicate scheduled activations
-            if matches!(sched.spec, AgentScheduleSpec::Once { .. }) {
-                // Defer one-shot schedule by 15s until agent finishes current turn
-                sched.next_run_at = chrono::DateTime::from_timestamp_millis(now_ms + 15_000);
-                sched.last_status = Some("deferred_busy".to_string());
-            } else {
-                let next_ms = compute_next_run_at_ms(
-                    &sched.spec,
-                    now_ms,
-                    sched.run_count,
-                    sched.max_runs,
-                )
-                .ok()
-                .flatten();
-                sched.next_run_at = next_ms.and_then(chrono::DateTime::from_timestamp_millis);
-                sched.last_status = Some("skipped_busy".to_string());
-                self.emit_flow_status(
-                    &room.room_id,
-                    format!(
-                        "[⏰ 定时任务跳过] @{} 当前正在执行其他任务，本轮跳过「{}」",
-                        agent.name, sched.title
-                    ),
-                );
+        if is_busy && !manual && sched.delivery_mode == ScheduleDeliveryMode::Pending {
+            if let Ok(queues) = self
+                .ragents_client
+                .list_session_queues(&agent.active_session_id)
+                .await
+            {
+                let already_queued = queues.pending.iter().any(|m| {
+                    m.metadata.get("schedule_id").map(String::as_str)
+                        == Some(sched.schedule_id.as_str())
+                });
+                if already_queued {
+                    let next_ms = compute_next_run_at_ms(
+                        &sched.spec,
+                        now_ms,
+                        sched.run_count,
+                        sched.max_runs,
+                    )
+                    .ok()
+                    .flatten();
+                    sched.next_run_at = next_ms.and_then(chrono::DateTime::from_timestamp_millis);
+                    sched.last_status = Some("skipped_already_queued".to_string());
+                    sched.updated_at = now;
+                    let updated = self.store.update_agent_schedule(&sched)?;
+                    self.broadcast_agent_schedules_updated(&room.room_id, &agent.agent_id);
+                    self.emit_flow_status(
+                        &room.room_id,
+                        format!(
+                            "[⏰ 定时任务跳过] @{} 阻塞队列中已存在「{}」的待执行副本，本轮跳过重复入队",
+                            agent.name, sched.title
+                        ),
+                    );
+                    return Ok(updated);
+                }
             }
-            sched.updated_at = now;
-            let updated = self.store.update_agent_schedule(&sched)?;
-            self.broadcast_agent_schedules_updated(&room.room_id, &agent.agent_id);
-            return Ok(updated);
         }
 
         sched.run_count += 1;
@@ -3331,10 +3406,20 @@ impl RoomCoordinator {
         let updated_sched = self.store.update_agent_schedule(&sched)?;
         self.broadcast_agent_schedules_updated(&room.room_id, &agent.agent_id);
 
+        let queue_kind = match updated_sched.delivery_mode {
+            ScheduleDeliveryMode::Realtime => QueueKind::Realtime,
+            ScheduleDeliveryMode::Pending => QueueKind::Pending,
+        };
+        let queue_tag = if queue_kind == QueueKind::Realtime {
+            "实时插队"
+        } else {
+            "阻塞排队"
+        };
+
         self.emit_flow_status(
             &room.room_id,
             format!(
-                "[⏰ 定时任务触发 #{}] 唤醒 @{} 执行「{}」({})",
+                "[⏰ 定时任务触发 #{}] 投递给 @{} ({queue_tag}) 执行「{}」({})",
                 updated_sched.run_count,
                 agent.name,
                 updated_sched.title,
@@ -3348,7 +3433,6 @@ impl RoomCoordinator {
             .list_room_messages_for_agent(&room.room_id, agent.last_delivered_seq, &agent.name)
             .unwrap_or_default();
         let max_seq = room.last_msg_seq;
-        let unread_seqs: Vec<u64> = unread.iter().map(|m| m.msg_seq).collect();
 
         let mut payload_text = if !unread.is_empty() {
             let mut s = format_delivery_payload(
@@ -3386,64 +3470,47 @@ Task Instructions:\n\
             updated_sched.task_prompt
         ));
 
-        let updated_agent = self.store.prepare_agent_delivery(
+        let mut metadata = build_chatroom_queue_metadata(&unread, "schedule", false);
+        metadata.insert(
+            "schedule_id".to_string(),
+            updated_sched.schedule_id.clone(),
+        );
+        metadata.insert(
+            "sender_name".to_string(),
+            format!("⏰ 定时任务: {}", updated_sched.title),
+        );
+        metadata.insert(
+            "preview".to_string(),
+            format!(
+                "[#{}] {}",
+                updated_sched.run_count,
+                updated_sched.task_prompt.chars().take(160).collect::<String>()
+            ),
+        );
+
+        let updated_agent = self.store.advance_agent_delivery_cursor(
             &agent.agent_id,
             max_seq,
             room.roster_version,
-            true,
         )?;
 
-        if is_busy {
-            // Manual trigger while busy -> push into RealtimeQueue
-            let _ = self
-                .ragents_client
-                .push_realtime_message(
-                    &updated_agent.active_session_id,
-                    PushRealtimeMessageRequest {
-                        content: vec![MessageContent::InputText { text: payload_text }],
-                        disabled_tools: vec![],
-                    },
-                )
-                .await?;
-        } else {
-            let act = self
-                .ragents_client
-                .create_activation(CreateActivationRequest {
-                    activation_id: None,
-                    labels: BTreeMap::new(),
-                    spec: ActivationSpec {
-                        session_id: updated_agent.active_session_id.clone(),
-                        submission_kind: SubmissionKind::Normal,
-                        input: vec![Item::user_message(payload_text)],
-                        model_override: None,
-                        disabled_tools: vec![],
-                        desired_phase: DesiredActivationPhase::Running,
-                        interaction_responses: BTreeMap::new(),
-                    },
-                })
-                .await?;
+        let resp = self
+            .ragents_client
+            .enqueue_session_message(
+                &updated_agent.active_session_id,
+                queue_kind,
+                EnqueueSessionMessageRequest {
+                    content: vec![MessageContent::InputText { text: payload_text }],
+                    tool_policy: QueueToolPolicy::with_enabled(["chatroom_speak".to_string()]),
+                    metadata,
+                    model_override: None,
+                },
+            )
+            .await?;
 
-            let act_id = ActivationId::new(act.metadata.id);
-            if !unread_seqs.is_empty() {
-                let already_started = self
-                    .started_activation_ids
-                    .lock()
-                    .expect("started_activation_ids mutex poisoned")
-                    .contains(&act_id);
-                if !already_started {
-                    self.pending_normal_activations
-                        .lock()
-                        .expect("pending_normal_activations mutex poisoned")
-                        .entry(agent.agent_id.clone())
-                        .or_default()
-                        .push((act_id.clone(), unread_seqs));
-                }
-            }
-
-            let mut final_agent = updated_agent.clone();
-            if act.status.phase.is_active()
-                && updated_agent.runtime_state == AgentRuntimeState::Idle
-            {
+        let mut final_agent = updated_agent.clone();
+        if let Some(act_id) = resp.spawned_activation_id {
+            if updated_agent.runtime_state == AgentRuntimeState::Idle {
                 if let Ok(thinking_agent) = self.store.update_agent_runtime_state(
                     &agent.agent_id,
                     AgentRuntimeState::Thinking,
@@ -3452,11 +3519,11 @@ Task Instructions:\n\
                     final_agent = thinking_agent;
                 }
             }
-            self.emit_room_event(ChatroomEvent::AgentUpdated {
-                room_id: room.room_id.clone(),
-                agent: self.to_agent_public(final_agent),
-            });
         }
+        self.emit_room_event(ChatroomEvent::AgentUpdated {
+            room_id: room.room_id.clone(),
+            agent: self.to_agent_public(final_agent),
+        });
 
         Ok(updated_sched)
     }
@@ -3655,12 +3722,12 @@ Task Instructions:\n\
             &unread,
             DeliveryMode::DirectMention,
         );
+        let metadata = build_chatroom_queue_metadata(&unread, "chatroom_mention", true);
 
-        let updated_agent = self.store.prepare_agent_delivery(
+        let updated_agent = self.store.advance_agent_delivery_cursor(
             &target_agent.agent_id,
             max_seq,
             room.roster_version,
-            true,
         )?;
         self.cancel_agent_per_agent_timer(&room.room_id, &target_agent.agent_id);
 
@@ -3679,65 +3746,28 @@ Task Instructions:\n\
             );
         }
 
-        let unread_seqs: Vec<u64> = unread.iter().map(|m| m.msg_seq).collect();
+        let queue_kind = if is_realtime {
+            QueueKind::Realtime
+        } else {
+            QueueKind::Pending
+        };
+        let resp = self
+            .ragents_client
+            .enqueue_session_message(
+                &updated_agent.active_session_id,
+                queue_kind,
+                EnqueueSessionMessageRequest {
+                    content: vec![MessageContent::InputText { text: formatted }],
+                    tool_policy: QueueToolPolicy::with_enabled(["chatroom_speak".to_string()]),
+                    metadata,
+                    model_override: None,
+                },
+            )
+            .await?;
 
-        if is_realtime {
-            {
-                let mut rt_guard = self
-                    .pending_realtime_seqs
-                    .lock()
-                    .expect("pending_realtime_seqs mutex poisoned");
-                rt_guard
-                    .entry(target_agent.agent_id.clone())
-                    .or_default()
-                    .push((Vec::new(), unread_seqs.clone()));
-            }
-
-            let resp = match self
-                .ragents_client
-                .push_realtime_message(
-                    &updated_agent.active_session_id,
-                    PushRealtimeMessageRequest {
-                        content: vec![MessageContent::InputText { text: formatted }],
-                        disabled_tools: vec![],
-                    },
-                )
-                .await
-            {
-                Ok(r) => {
-                    if let Some(list) = self
-                        .pending_realtime_seqs
-                        .lock()
-                        .expect("pending_realtime_seqs mutex poisoned")
-                        .get_mut(&target_agent.agent_id)
-                    {
-                        if let Some(entry) = list
-                            .iter_mut()
-                            .rev()
-                            .find(|(ids, seqs)| ids.is_empty() && *seqs == unread_seqs)
-                        {
-                            entry.0 = r.inserted_ids.clone();
-                        }
-                    }
-                    r
-                }
-                Err(e) => {
-                    if let Some(list) = self
-                        .pending_realtime_seqs
-                        .lock()
-                        .expect("pending_realtime_seqs mutex poisoned")
-                        .get_mut(&target_agent.agent_id)
-                    {
-                        if let Some(pos) = list.iter().rposition(|(_, seqs)| *seqs == unread_seqs) {
-                            list.remove(pos);
-                        }
-                    }
-                    return Err(e.into());
-                }
-            };
-
-            let mut final_agent = updated_agent;
-            if let Some(spawned_act_id) = resp.spawned_activation_id {
+        let mut final_agent = updated_agent;
+        if let Some(spawned_act_id) = resp.spawned_activation_id {
+            if final_agent.runtime_state == AgentRuntimeState::Idle {
                 if let Ok(thinking_agent) = self.store.update_agent_runtime_state(
                     &target_agent.agent_id,
                     AgentRuntimeState::Thinking,
@@ -3746,60 +3776,11 @@ Task Instructions:\n\
                     final_agent = thinking_agent;
                 }
             }
-            self.emit_room_event(ChatroomEvent::AgentUpdated {
-                room_id: room.room_id.clone(),
-                agent: self.to_agent_public(final_agent),
-            });
-        } else {
-            let act = self
-                .ragents_client
-                .create_activation(CreateActivationRequest {
-                    activation_id: None,
-                    labels: BTreeMap::new(),
-                    spec: ActivationSpec {
-                        session_id: updated_agent.active_session_id.clone(),
-                        submission_kind: SubmissionKind::Normal,
-                        input: vec![Item::user_message(formatted)],
-                        model_override: None,
-                        disabled_tools: vec![],
-                        desired_phase: DesiredActivationPhase::Running,
-                        interaction_responses: BTreeMap::new(),
-                    },
-                })
-                .await?;
-
-            let act_id = ActivationId::new(act.metadata.id);
-            let already_started = self
-                .started_activation_ids
-                .lock()
-                .expect("started_activation_ids mutex poisoned")
-                .contains(&act_id);
-            if !already_started {
-                self.pending_normal_activations
-                    .lock()
-                    .expect("pending_normal_activations mutex poisoned")
-                    .entry(target_agent.agent_id.clone())
-                    .or_default()
-                    .push((act_id.clone(), unread_seqs));
-            }
-
-            let mut final_agent = updated_agent.clone();
-            if act.status.phase.is_active()
-                && updated_agent.runtime_state == AgentRuntimeState::Idle
-            {
-                if let Ok(thinking_agent) = self.store.update_agent_runtime_state(
-                    &target_agent.agent_id,
-                    AgentRuntimeState::Thinking,
-                    Some(act_id),
-                ) {
-                    final_agent = thinking_agent;
-                }
-            }
-            self.emit_room_event(ChatroomEvent::AgentUpdated {
-                room_id: room.room_id.clone(),
-                agent: self.to_agent_public(final_agent),
-            });
         }
+        self.emit_room_event(ChatroomEvent::AgentUpdated {
+            room_id: room.room_id.clone(),
+            agent: self.to_agent_public(final_agent),
+        });
         Ok(())
     }
 
@@ -3873,11 +3854,11 @@ Task Instructions:\n\
         ));
 
         let max_seq = room.last_msg_seq;
-        let updated_mgr = self.store.prepare_agent_delivery(
+        let metadata = build_chatroom_queue_metadata(&unread, "chatroom_mention", true);
+        let updated_mgr = self.store.advance_agent_delivery_cursor(
             &mgr_agent.agent_id,
             max_seq,
             room.roster_version,
-            true,
         )?;
 
         {
@@ -3895,65 +3876,28 @@ Task Instructions:\n\
             );
         }
 
-        let unread_seqs: Vec<u64> = unread.iter().map(|m| m.msg_seq).collect();
+        let queue_kind = if trigger_msg.is_realtime {
+            QueueKind::Realtime
+        } else {
+            QueueKind::Pending
+        };
+        let resp = self
+            .ragents_client
+            .enqueue_session_message(
+                &updated_mgr.active_session_id,
+                queue_kind,
+                EnqueueSessionMessageRequest {
+                    content: vec![MessageContent::InputText { text: formatted }],
+                    tool_policy: QueueToolPolicy::with_enabled(["chatroom_speak".to_string()]),
+                    metadata,
+                    model_override: None,
+                },
+            )
+            .await?;
 
-        if trigger_msg.is_realtime {
-            {
-                let mut rt_guard = self
-                    .pending_realtime_seqs
-                    .lock()
-                    .expect("pending_realtime_seqs mutex poisoned");
-                rt_guard
-                    .entry(mgr_agent.agent_id.clone())
-                    .or_default()
-                    .push((Vec::new(), unread_seqs.clone()));
-            }
-
-            let resp = match self
-                .ragents_client
-                .push_realtime_message(
-                    &updated_mgr.active_session_id,
-                    PushRealtimeMessageRequest {
-                        content: vec![MessageContent::InputText { text: formatted }],
-                        disabled_tools: vec![],
-                    },
-                )
-                .await
-            {
-                Ok(r) => {
-                    if let Some(list) = self
-                        .pending_realtime_seqs
-                        .lock()
-                        .expect("pending_realtime_seqs mutex poisoned")
-                        .get_mut(&mgr_agent.agent_id)
-                    {
-                        if let Some(entry) = list
-                            .iter_mut()
-                            .rev()
-                            .find(|(ids, seqs)| ids.is_empty() && *seqs == unread_seqs)
-                        {
-                            entry.0 = r.inserted_ids.clone();
-                        }
-                    }
-                    r
-                }
-                Err(e) => {
-                    if let Some(list) = self
-                        .pending_realtime_seqs
-                        .lock()
-                        .expect("pending_realtime_seqs mutex poisoned")
-                        .get_mut(&mgr_agent.agent_id)
-                    {
-                        if let Some(pos) = list.iter().rposition(|(_, seqs)| *seqs == unread_seqs) {
-                            list.remove(pos);
-                        }
-                    }
-                    return Err(e.into());
-                }
-            };
-
-            let mut final_mgr = updated_mgr;
-            if let Some(spawned_act_id) = resp.spawned_activation_id {
+        let mut final_mgr = updated_mgr;
+        if let Some(spawned_act_id) = resp.spawned_activation_id {
+            if final_mgr.runtime_state == AgentRuntimeState::Idle {
                 if let Ok(thinking_mgr) = self.store.update_agent_runtime_state(
                     &mgr_agent.agent_id,
                     AgentRuntimeState::Thinking,
@@ -3962,60 +3906,11 @@ Task Instructions:\n\
                     final_mgr = thinking_mgr;
                 }
             }
-            self.emit_room_event(ChatroomEvent::AgentUpdated {
-                room_id: room.room_id.clone(),
-                agent: self.to_agent_public(final_mgr),
-            });
-        } else {
-            let act = self
-                .ragents_client
-                .create_activation(CreateActivationRequest {
-                    activation_id: None,
-                    labels: BTreeMap::new(),
-                    spec: ActivationSpec {
-                        session_id: updated_mgr.active_session_id.clone(),
-                        submission_kind: SubmissionKind::Normal,
-                        input: vec![Item::user_message(formatted)],
-                        model_override: None,
-                        disabled_tools: vec![],
-                        desired_phase: DesiredActivationPhase::Running,
-                        interaction_responses: BTreeMap::new(),
-                    },
-                })
-                .await?;
-
-            let act_id = ActivationId::new(act.metadata.id);
-            let already_started = self
-                .started_activation_ids
-                .lock()
-                .expect("started_activation_ids mutex poisoned")
-                .contains(&act_id);
-            if !already_started {
-                self.pending_normal_activations
-                    .lock()
-                    .expect("pending_normal_activations mutex poisoned")
-                    .entry(mgr_agent.agent_id.clone())
-                    .or_default()
-                    .push((act_id.clone(), unread_seqs));
-            }
-
-            let mut final_mgr = updated_mgr.clone();
-            if act.status.phase.is_active()
-                && updated_mgr.runtime_state == AgentRuntimeState::Idle
-            {
-                if let Ok(thinking_mgr) = self.store.update_agent_runtime_state(
-                    &mgr_agent.agent_id,
-                    AgentRuntimeState::Thinking,
-                    Some(act_id),
-                ) {
-                    final_mgr = thinking_mgr;
-                }
-            }
-            self.emit_room_event(ChatroomEvent::AgentUpdated {
-                room_id: room.room_id.clone(),
-                agent: self.to_agent_public(final_mgr),
-            });
         }
+        self.emit_room_event(ChatroomEvent::AgentUpdated {
+            room_id: room.room_id.clone(),
+            agent: self.to_agent_public(final_mgr),
+        });
         Ok(())
     }
 
@@ -4358,23 +4253,54 @@ Task Instructions:\n\
         roll: u8,
         allow_speak: bool,
     ) -> bool {
+        let Ok(Some(fresh_agent)) = self.store.get_agent(&target_agent.agent_id) else {
+            return false;
+        };
+        if fresh_agent.runtime_state != AgentRuntimeState::Idle
+            || fresh_agent.active_activation_id.is_some()
+        {
+            return false;
+        }
+        if let Ok(queues) = self
+            .ragents_client
+            .list_session_queues(&fresh_agent.active_session_id)
+            .await
+        {
+            if !queues.realtime.is_empty() || !queues.pending.is_empty() {
+                return false;
+            }
+        }
+
         let max_seq = room.last_msg_seq;
         let mode = if allow_speak {
             DeliveryMode::PeekAllowed { roll }
         } else {
             DeliveryMode::PeekMuted { roll }
         };
-        let formatted = format_delivery_payload(room, all_agents, target_agent, unread, mode);
+        let formatted = format_delivery_payload(room, all_agents, &fresh_agent, unread, mode);
+        let source = if allow_speak {
+            "chatroom_peek_allowed"
+        } else {
+            "chatroom_peek_muted"
+        };
+        let mut metadata = build_chatroom_queue_metadata(unread, source, false);
+        metadata.insert(
+            "sender_name".to_string(),
+            if allow_speak {
+                format!("👀 空闲窥屏 (roll={roll}, 可插话)")
+            } else {
+                format!("🤫 空闲窥屏 (roll={roll}, 禁言只读)")
+            },
+        );
 
-        let Ok(updated_agent) = self.store.prepare_agent_delivery(
-            &target_agent.agent_id,
+        let Ok(updated_agent) = self.store.advance_agent_delivery_cursor(
+            &fresh_agent.agent_id,
             max_seq,
             room.roster_version,
-            allow_speak,
         ) else {
             return false;
         };
-        self.cancel_agent_per_agent_timer(&room.room_id, &target_agent.agent_id);
+        self.cancel_agent_per_agent_timer(&room.room_id, &fresh_agent.agent_id);
 
         self.emit_flow_status(
             &room.room_id,
@@ -4391,38 +4317,40 @@ Task Instructions:\n\
             ),
         );
 
+        let tool_policy = if allow_speak {
+            QueueToolPolicy::with_enabled(["chatroom_speak".to_string()])
+        } else {
+            QueueToolPolicy::with_disabled(["chatroom_speak".to_string()])
+        };
+
         match self
             .ragents_client
-            .push_realtime_message(
+            .enqueue_session_message(
                 &updated_agent.active_session_id,
-                PushRealtimeMessageRequest {
+                QueueKind::Pending,
+                EnqueueSessionMessageRequest {
                     content: vec![MessageContent::InputText { text: formatted }],
-                    disabled_tools: if allow_speak {
-                        vec![]
-                    } else {
-                        vec!["chatroom_speak".to_string()]
-                    },
+                    tool_policy,
+                    metadata,
+                    model_override: None,
                 },
             )
             .await
         {
             Ok(resp) => {
-                if let Some(spawned_act_id) = resp.spawned_activation_id {
+                if let Some(act_id) = resp.spawned_activation_id {
                     if let Ok(thinking_agent) = self.store.update_agent_runtime_state(
-                        &target_agent.agent_id,
+                        &fresh_agent.agent_id,
                         AgentRuntimeState::Thinking,
-                        Some(spawned_act_id),
+                        Some(act_id),
                     ) {
                         self.emit_room_event(ChatroomEvent::AgentUpdated {
                             room_id: room.room_id.clone(),
                             agent: self.to_agent_public(thinking_agent),
                         });
                     }
-                    true
-                } else {
-                    // Message appended to an already-running activation; release slot if held
-                    false
                 }
+                true
             }
             Err(_) => false,
         }
@@ -4634,11 +4562,10 @@ Task Instructions:\n\
                         room.last_msg_seq
                     ),
                 );
-                let _ = self.store.prepare_agent_delivery(
+                let _ = self.store.advance_agent_delivery_cursor(
                     &target_agent.agent_id,
                     room.last_msg_seq,
                     target_agent.last_roster_version,
-                    true,
                 );
                 {
                     let mut guard = self
@@ -4973,6 +4900,41 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+fn build_chatroom_queue_metadata(
+    unread: &[RoomMessage],
+    source: &str,
+    include_primary_msg_seq: bool,
+) -> BTreeMap<String, String> {
+    let mut meta = BTreeMap::new();
+    meta.insert("source".to_string(), source.to_string());
+    if !unread.is_empty() {
+        let seqs = unread
+            .iter()
+            .map(|m| m.msg_seq.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        meta.insert("msg_seqs".to_string(), seqs);
+        if let Some(last) = unread.last() {
+            meta.insert("sender_name".to_string(), last.sender_name.clone());
+            if include_primary_msg_seq {
+                meta.insert("primary_msg_seq".to_string(), last.msg_seq.to_string());
+            }
+            let preview_raw = if unread.len() == 1 {
+                last.content.clone()
+            } else {
+                format!("({} 条未读) {}", unread.len(), last.content)
+            };
+            let trimmed = preview_raw.trim();
+            let mut preview: String = trimmed.chars().take(180).collect();
+            if trimmed.chars().count() > 180 {
+                preview.push_str("...");
+            }
+            meta.insert("preview".to_string(), preview);
+        }
+    }
+    meta
 }
 
 fn format_room_prompts_response(room: &Room) -> serde_json::Value {

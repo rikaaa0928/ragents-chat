@@ -214,6 +214,41 @@ pub struct RoomDetailResponse {
     pub messages: Vec<RoomMessage>,
     #[serde(default)]
     pub flow_logs: Vec<RoomFlowLogEntry>,
+    #[serde(default)]
+    pub pending_pool: RoomPendingPoolResponse,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RoomPendingPoolAgentStatus {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub avatar: String,
+    pub last_delivered_seq: u64,
+    pub unread_count: u64,
+    pub countable_unread_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomPendingPoolMessageEntry {
+    pub msg_seq: u64,
+    pub sender_name: String,
+    pub sender_kind: SenderKind,
+    pub content: String,
+    pub mentions: Vec<String>,
+    pub is_realtime: bool,
+    pub waiting_agent_names: Vec<String>,
+    pub delivered_agent_names: Vec<String>,
+    pub can_withdraw: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RoomPendingPoolResponse {
+    pub room_id: String,
+    pub room_last_seq: u64,
+    pub total_undelivered_messages: usize,
+    pub waiting_messages: Vec<RoomPendingPoolMessageEntry>,
+    pub per_agent: Vec<RoomPendingPoolAgentStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,7 +377,6 @@ pub struct RoomAgent {
     pub session_chain: Vec<SessionChainEntry>,
     pub last_delivered_seq: u64,
     pub last_roster_version: u64,
-    pub allow_speak_in_turn: bool,
     pub runtime_state: AgentRuntimeState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_activation_id: Option<ActivationId>,
@@ -370,19 +404,26 @@ pub struct AgentTokenUsage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueuedMessageEntry {
-    pub msg_seq: u64,
-    pub sender_name: String,
-    pub content: String,
-    pub is_realtime: bool,
+pub struct BaseQueuedMessageEntry {
+    pub id: i64,
+    pub queue_kind: QueueKind,
+    pub sender_label: String,
+    pub preview: String,
+    pub tool_policy: QueueToolPolicy,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    pub msg_seqs: Vec<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_msg_seq: Option<u64>,
     pub status_label: String,
     pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentMessageQueueSnapshot {
-    pub realtime_messages: Vec<QueuedMessageEntry>,
-    pub normal_messages: Vec<QueuedMessageEntry>,
+    pub realtime_messages: Vec<BaseQueuedMessageEntry>,
+    pub pending_messages: Vec<BaseQueuedMessageEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,7 +448,6 @@ pub struct RoomAgentPublic {
     pub active_session_id: SessionId,
     pub session_chain: Vec<SessionChainEntry>,
     pub last_delivered_seq: u64,
-    pub allow_speak_in_turn: bool,
     pub runtime_state: AgentRuntimeState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_activation_id: Option<ActivationId>,
@@ -438,7 +478,6 @@ impl From<RoomAgent> for RoomAgentPublic {
             active_session_id: a.active_session_id,
             session_chain: a.session_chain,
             last_delivered_seq: a.last_delivered_seq,
-            allow_speak_in_turn: a.allow_speak_in_turn,
             runtime_state: a.runtime_state,
             active_activation_id: a.active_activation_id,
             token_usage: AgentTokenUsage::default(),
@@ -659,6 +698,12 @@ pub enum ChatroomEvent {
         agent_id: String,
         schedules: Vec<AgentSchedule>,
     },
+    AgentQueueUpdated {
+        room_id: String,
+        agent_id: String,
+        realtime_count: usize,
+        pending_count: usize,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -725,6 +770,8 @@ pub struct ApproveAgentPermissionRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WithdrawQueuedMessageResponse {
-    pub withdrawn_message: RoomMessage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawn_message: Option<RoomMessage>,
+    pub removed_queue_id: i64,
     pub message_queues: AgentMessageQueueSnapshot,
 }

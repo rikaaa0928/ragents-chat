@@ -894,19 +894,37 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         unmentioned_insp
             .message_queues
             .realtime_messages
-            .iter()
-            .all(|q| q.msg_seq != rt_msg.msg_seq),
-        "Realtime message must NOT appear in realtime_messages for unmentioned @Assistant"
+            .is_empty(),
+        "Realtime message must NOT appear in ragent-base realtime_messages for unmentioned @Assistant"
     );
-    let queued_for_assistant = unmentioned_insp
-        .message_queues
-        .normal_messages
-        .iter()
-        .find(|q| q.msg_seq == rt_msg.msg_seq)
-        .expect("Unmentioned @Assistant must see the message in normal_messages");
     assert!(
-        !queued_for_assistant.is_realtime,
-        "Unmentioned @Assistant must treat realtime message as non-realtime"
+        unmentioned_insp
+            .message_queues
+            .pending_messages
+            .is_empty(),
+        "Unpushed room message must stay in Room Pending Pool rather than ragent-base pending_messages until peek triggers"
+    );
+
+    let pending_pool: RoomPendingPoolResponse = http
+        .get(format!("{chat_base}/api/v1/rooms/{room_id}/pending-pool"))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pool_entry = pending_pool
+        .waiting_messages
+        .iter()
+        .find(|w| w.msg_seq == rt_msg.msg_seq)
+        .expect("Room pending pool must contain unpushed message waiting for @Assistant");
+    assert!(
+        pool_entry
+            .waiting_agent_names
+            .iter()
+            .any(|n| n == "Assistant"),
+        "Room pending pool must list @Assistant as waiting"
     );
 
     let mut assistant_peeked_while_sec_busy = false;
@@ -1069,6 +1087,7 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         .unwrap();
     assert_eq!(schedules.len(), 1);
     assert_eq!(schedules[0].title, "每日09:00查看第1条消息");
+    assert_eq!(schedules[0].delivery_mode, ScheduleDeliveryMode::Pending);
     assert!(schedules[0].enabled);
 
     // Wait until Assistant is Idle, then trigger the schedule via `/run`
@@ -1104,6 +1123,24 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         .await
         .unwrap();
     assert_eq!(triggered_sched.run_count, 1);
+
+    let patched_sched: AgentSchedule = http
+        .patch(format!(
+            "{chat_base}/api/v1/agents/{assistant_id}/schedules/{}",
+            schedules[0].schedule_id
+        ))
+        .bearer_auth(chat_auth_token)
+        .json(&PatchAgentScheduleRequest {
+            delivery_mode: Some(ScheduleDeliveryMode::Realtime),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(patched_sched.delivery_mode, ScheduleDeliveryMode::Realtime);
 
     let mut schedule_fired_msg = false;
     for _ in 0..50 {
@@ -1201,6 +1238,81 @@ async fn test_end_to_end_chatroom_single_and_group_chat_peek_interject_and_inspe
         .await
         .unwrap();
     assert_eq!(ok_ws_resp.status().as_u16(), 201);
+
+    // Disable peek briefly and post an unmentioned broadcast message in the 2-agent group room,
+    // verify it lands in Room Pending Pool (`can_withdraw: true`) and can be withdrawn cleanly.
+    let _: Room = http
+        .patch(format!("{chat_base}/api/v1/rooms/{room_id}"))
+        .bearer_auth(chat_auth_token)
+        .json(&PatchRoomRequest {
+            peek_enabled: Some(false),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pool_msg: RoomMessage = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/messages"))
+        .bearer_auth(chat_auth_token)
+        .json(&PostMessageRequest {
+            sender_name: "Alice".to_string(),
+            content: "DRAFT_IN_PENDING_POOL_TO_WITHDRAW".to_string(),
+            mentions: vec![],
+            visible_to: vec![],
+            reply_to_seq: None,
+            is_realtime: false,
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pool_before: RoomPendingPoolResponse = http
+        .get(format!("{chat_base}/api/v1/rooms/{room_id}/pending-pool"))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(pool_before
+        .waiting_messages
+        .iter()
+        .any(|m| m.msg_seq == pool_msg.msg_seq && m.can_withdraw));
+    let pool_withdraw_resp: serde_json::Value = http
+        .post(format!(
+            "{chat_base}/api/v1/rooms/{room_id}/pending-pool/{}/withdraw",
+            pool_msg.msg_seq
+        ))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        pool_withdraw_resp["withdrawn_message"]["msg_seq"].as_u64(),
+        Some(pool_msg.msg_seq)
+    );
+    let pool_after: RoomPendingPoolResponse = http
+        .get(format!("{chat_base}/api/v1/rooms/{room_id}/pending-pool"))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(pool_after
+        .waiting_messages
+        .iter()
+        .all(|m| m.msg_seq != pool_msg.msg_seq));
 
     // 14. Test `token_acl` extension: Admin issues a restricted user token (`alice`),
     //     verify sub-user identity (`@Alice`), node/workspace ACL, and non-admin restrictions.
@@ -2177,3 +2289,483 @@ async fn test_room_prompts_lifecycle_permissions_and_session_sync() {
 
     cancel.cancel();
 }
+
+struct PeekIsolationModelBackend {
+    seen_turns: Arc<Mutex<Vec<(String, Vec<String>)>>>,
+    peek_entered: Arc<tokio::sync::Notify>,
+    peek_release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl ModelBackend for PeekIsolationModelBackend {
+    async fn create_response(
+        &self,
+        _endpoint: &ModelEndpointConfig,
+        request: CreateResponseBody,
+    ) -> Result<ResponseResource, CoreError> {
+        let mut all_user_texts = Vec::new();
+        let mut last_item_is_tool_output = false;
+
+        if let Some(Input::Items(ref items)) = request.input {
+            for item in items {
+                match item {
+                    Item::Message { role, content, .. } if *role == MessageRole::User => {
+                        let mut txt = String::new();
+                        for part in content {
+                            match part {
+                                MessageContent::InputText { text }
+                                | MessageContent::OutputText { text, .. }
+                                | MessageContent::PlainText { text } => txt.push_str(text),
+                                _ => {}
+                            }
+                        }
+                        all_user_texts.push(txt);
+                        last_item_is_tool_output = false;
+                    }
+                    Item::FunctionCallOutput { .. } => {
+                        last_item_is_tool_output = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let latest_user = all_user_texts.last().cloned().unwrap_or_default();
+        let tool_names: Vec<String> = serde_json::to_value(&request.tools)
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .map(|arr| {
+                arr.into_iter()
+                    .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        self.seen_turns
+            .lock()
+            .unwrap()
+            .push((latest_user.clone(), tool_names.clone()));
+
+        if latest_user.contains("[Chatroom Direct Mention (@Peer)]") {
+            return Ok(make_openresponses_resource(
+                "resp_peer_obs",
+                "gpt-4.1-mini",
+                vec![Item::assistant_message("Peer observed.")],
+                None,
+            ));
+        }
+
+        if latest_user.contains("[Chatroom Unread Peek") && latest_user.contains("(Muted") {
+            self.peek_entered.notify_waiters();
+            self.peek_release.notified().await;
+            return Ok(make_openresponses_resource(
+                "resp_peek_muted",
+                "gpt-4.1-mini",
+                vec![Item::assistant_message("Observed quietly during muted peek.")],
+                None,
+            ));
+        }
+
+        if last_item_is_tool_output {
+            return Ok(make_openresponses_resource(
+                "resp_done",
+                "gpt-4.1-mini",
+                vec![Item::assistant_message("Speak completed.")],
+                None,
+            ));
+        }
+
+        let reply = if latest_user.contains("Background Process Exited") {
+            "后台进程已完成并汇报！".to_string()
+        } else {
+            "收到禁言期间排队的实时消息，现已正常发言回复！".to_string()
+        };
+
+        Ok(make_openresponses_resource(
+            "resp_speak_ok",
+            "gpt-4.1-mini",
+            vec![Item::FunctionCall {
+                id: Some("fc_speak_ok".into()),
+                call_id: format!("call_speak_{}", uuid::Uuid::now_v7()),
+                name: "chatroom_speak".into(),
+                arguments: json!({
+                    "content": reply,
+                    "mentions": []
+                })
+                .to_string(),
+                status: Some(FunctionCallStatus::Completed),
+            }],
+            None,
+        ))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_muted_peek_isolation_and_post_peek_continuation_speak() {
+    let cancel = CancellationToken::new();
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let ragents_token = "ragents-peek-iso-token";
+    let mut exts = ApiServerExtensions::new();
+    exts.add_authn(Arc::new(StaticTokenAuthnPlugin::new(ragents_token)));
+
+    let api_store = SqliteStore::open_in_memory().unwrap();
+    let apiserver_state =
+        ApiServerState::new(api_store, DEFAULT_LEASE_TTL_MS).with_extensions(exts);
+    let api_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_addr = serve_tcp(api_listener, apiserver_state, cancel.clone())
+        .await
+        .unwrap();
+    let ragents_url = format!("http://{api_addr}");
+
+    let seen_turns = Arc::new(Mutex::new(Vec::new()));
+    let peek_entered = Arc::new(tokio::sync::Notify::new());
+    let peek_release = Arc::new(tokio::sync::Notify::new());
+    let model_backend = Arc::new(PeekIsolationModelBackend {
+        seen_turns: seen_turns.clone(),
+        peek_entered: peek_entered.clone(),
+        peek_release: peek_release.clone(),
+    });
+
+    let mut models = BTreeMap::new();
+    models.insert(
+        "gpt-4.1-mini".to_string(),
+        LocalModelConfig {
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: Some("sk-test".to_string()),
+            api_key_env: None,
+            extra_headers: BTreeMap::new(),
+            default_temperature: Some(0.0),
+            default_max_output_tokens: Some(1024),
+        },
+    );
+
+    let daemon_cfg = DaemonConfig {
+        node_id: NodeId::new("node-peek-iso"),
+        server_url: ragents_url.clone(),
+        auth_token: Some(ragents_token.to_string()),
+        executor_mode: ExecutorMode::InProcess,
+        max_concurrent_runners: 4,
+        max_turns: None,
+        default_system_prompt: "You are a helpful agent.".to_string(),
+        default_model: Some("gpt-4.1-mini".to_string()),
+        temp_root_dir: tmp.path().join("daemon_tmp"),
+        extensions_dir: chatroom_wasm_path().parent().unwrap().to_path_buf(),
+        allowed_workspace_dirs: default_allowed_workspace_dirs(),
+        labels: BTreeMap::new(),
+        auto_discover_models: false,
+        use_cluster_models: true,
+        models,
+        extensions: vec![],
+        interceptors: vec![],
+        default_permissions: PermissionPolicyLayer::default(),
+    };
+    let daemon = AgentDaemon::new(daemon_cfg).with_model_backend(model_backend);
+    daemon.start(cancel.clone()).await.unwrap();
+
+    let chat_auth_token = "chat-peek-iso-secret";
+    let chat_store = ChatroomStore::open_in_memory("gpt-4.1-mini", vec![]).unwrap();
+    let chat_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let chat_local_addr = chat_listener.local_addr().unwrap();
+    let callback_base_url = format!("http://{chat_local_addr}");
+
+    let ragents_client =
+        RagentsClient::new(ragents_url).with_auth_token(Some(ragents_token.to_string()));
+    let coordinator =
+        RoomCoordinator::new(chat_store.clone(), ragents_client.clone(), callback_base_url);
+    let chat_state = ChatServerState::new(coordinator.clone(), Some(chat_auth_token.to_string()));
+    let chat_addr = serve_chat_tcp(chat_listener, chat_state, cancel.clone())
+        .await
+        .unwrap();
+    let chat_base = format!("http://{chat_addr}");
+    let http = reqwest::Client::new();
+
+    let created_room: RoomDetailResponse = http
+        .post(format!("{chat_base}/api/v1/rooms"))
+        .bearer_auth(chat_auth_token)
+        .json(&CreateRoomRequest {
+            name: "PeekIsolationRoom".to_string(),
+            description: String::new(),
+            default_agent_name: Some("Lead".to_string()),
+            default_agent_role: Some("主导者".to_string()),
+            default_agent_persona: Some("You are @Lead.".to_string()),
+            default_agent_model: Some("gpt-4.1-mini".to_string()),
+            reasoning_effort: None,
+            reasoning_summary: None,
+            web_search: None,
+            prompt_hint: None,
+            node_id: None,
+            workspace_path: None,
+            room_prompts: None,
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let room_id = created_room.room.room_id.clone();
+    let lead_id = created_room.agents[0].agent_id.clone();
+
+    // Add a second agent (`Peer`) so the room operates as a group chatroom where unmentioned
+    // messages trigger PeekMuted on idle members (`Lead`).
+    let _: RoomAgentPublic = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/agents"))
+        .bearer_auth(chat_auth_token)
+        .json(&CreateAgentRequest {
+            name: "Peer".to_string(),
+            role_title: "协作者".to_string(),
+            avatar: "🧪".to_string(),
+            persona_prompt: "You are @Peer.".to_string(),
+            model: Some("gpt-4.1-mini".to_string()),
+            reasoning_effort: None,
+            reasoning_summary: None,
+            web_search: None,
+            prompt_hint: None,
+            node_id: None,
+            workspace_path: None,
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Configure PerAgent muted peek (peek_enabled = true, interject_enabled = false, 1s idle, 1 msg)
+    let patched: Room = http
+        .patch(format!("{chat_base}/api/v1/rooms/{room_id}"))
+        .bearer_auth(chat_auth_token)
+        .json(&PatchRoomRequest {
+            peek_enabled: Some(true),
+            interject_enabled: Some(false),
+            peek_idle_secs: Some(1),
+            peek_msg_interval: Some(1),
+            peek_idle_mode: Some(PeekIdleMode::PerAgent),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(patched.peek_enabled);
+    assert!(!patched.interject_enabled);
+
+    // Post a message mentioning only `@Peer` so `Peer` consumes it directly while `Lead`
+    // stays unmentioned and enters PeekMuted 1s later.
+    let _: RoomMessage = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/messages"))
+        .bearer_auth(chat_auth_token)
+        .json(&PostMessageRequest {
+            sender_name: "Alice".to_string(),
+            content: "@Peer 收到请记录，Lead 稍后通过窥屏旁听".to_string(),
+            mentions: vec!["Peer".to_string()],
+            visible_to: vec![],
+            reply_to_seq: None,
+            is_realtime: false,
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Wait until muted peek actually reaches the model backend
+    tokio::time::timeout(Duration::from_secs(10), peek_entered.notified())
+        .await
+        .expect("muted peek must trigger and reach model backend");
+
+    // During PeekMuted:
+    // 1) `chatroom_speak` tool is absent from the muted peek activation
+    {
+        let turns = seen_turns.lock().unwrap();
+        let peek_turn = turns
+            .iter()
+            .find(|(prompt, _)| prompt.contains("[Chatroom Unread Peek") && prompt.contains("(Muted"))
+            .expect("muted peek turn recorded");
+        assert!(
+            !peek_turn.1.iter().any(|t| t == "chatroom_speak"),
+            "PeekMuted turn must strip chatroom_speak tool, got {:?}",
+            peek_turn.1
+        );
+    }
+
+    // 2) Send a REALTIME @Lead message while PeekMuted is still running!
+    // Under Dual-Queue ragent-base, coordinator pushes directly into `QueueKind::Realtime`
+    // with `QueueToolPolicy::with_enabled(["chatroom_speak"])`, and `ragent-base` inspects
+    // it cleanly in the Inspector `realtime_messages` queue while PeekMuted is running!
+    let lead_internal = chat_store.get_agent(&lead_id).unwrap().unwrap();
+    let _: RoomMessage = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/messages"))
+        .bearer_auth(chat_auth_token)
+        .json(&PostMessageRequest {
+            sender_name: "Alice".to_string(),
+            content: "请汇报实时消息".to_string(),
+            mentions: vec!["Lead".to_string()],
+            visible_to: vec![],
+            reply_to_seq: None,
+            is_realtime: true,
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Verify the realtime message is persisted in ragent-base's Realtime queue BEFORE PeekMuted finishes
+    let queues = ragents_client
+        .list_session_queues(&lead_internal.active_session_id)
+        .await
+        .unwrap();
+    assert_eq!(queues.realtime.len(), 1);
+    assert_eq!(
+        queues.realtime[0].tool_policy.enabled_tools,
+        vec!["chatroom_speak".to_string()]
+    );
+    let insp_queues: AgentMessageQueueSnapshot = http
+        .get(format!("{chat_base}/api/v1/agents/{lead_id}/queues"))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(insp_queues.realtime_messages.len(), 1);
+
+    // Also push a non-realtime `@Lead` message into ragent-base Pending queue and withdraw it cleanly
+    let withdrawable_msg: RoomMessage = http
+        .post(format!("{chat_base}/api/v1/rooms/{room_id}/messages"))
+        .bearer_auth(chat_auth_token)
+        .json(&PostMessageRequest {
+            sender_name: "Alice".to_string(),
+            content: "DRAFT_IN_PENDING_QUEUE_TO_WITHDRAW".to_string(),
+            mentions: vec!["Lead".to_string()],
+            visible_to: vec![],
+            reply_to_seq: None,
+            is_realtime: false,
+        })
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let insp_with_pd: AgentMessageQueueSnapshot = http
+        .get(format!("{chat_base}/api/v1/agents/{lead_id}/queues"))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(insp_with_pd.pending_messages.len(), 1);
+    let pd_q_id = insp_with_pd.pending_messages[0].id;
+    let withdrawn_q: WithdrawQueuedMessageResponse = http
+        .post(format!(
+            "{chat_base}/api/v1/agents/{lead_id}/queue/{pd_q_id}/withdraw"
+        ))
+        .bearer_auth(chat_auth_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(withdrawn_q.removed_queue_id, pd_q_id);
+    assert_eq!(
+        withdrawn_q.withdrawn_message.as_ref().map(|m| m.msg_seq),
+        Some(withdrawable_msg.msg_seq)
+    );
+    assert!(withdrawn_q.message_queues.pending_messages.is_empty());
+
+    // Release the blocked PeekMuted turn -> ragent-base drains Realtime mid-Activation and
+    // dynamically re-enables `chatroom_speak` for Turn 2!
+    peek_release.notify_waiters();
+
+    let mut rt_reply_seen = false;
+    for _ in 0..50 {
+        let detail: RoomDetailResponse = http
+            .get(format!("{chat_base}/api/v1/rooms/{room_id}"))
+            .bearer_auth(chat_auth_token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if detail
+            .messages
+            .iter()
+            .any(|m| m.content.contains("收到禁言期间排队的实时消息"))
+            && detail
+                .agents
+                .iter()
+                .all(|a| a.runtime_state == AgentRuntimeState::Idle)
+        {
+            rt_reply_seen = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        rt_reply_seen,
+        "Realtime @mention drained after PeekMuted must re-enable chatroom_speak mid-activation and succeed"
+    );
+
+    // 3) Simulate direct apiserver background process exit wakeup via QueueKind::Realtime
+    // Because tool_policy does NOT leak across Activation boundaries, the new Activation
+    // starts with Session's full base tools (`chatroom_speak` enabled)!
+    let mut bg_meta = BTreeMap::new();
+    bg_meta.insert("source".to_string(), "background_process_exit".to_string());
+    ragents_client
+        .enqueue_session_message(
+            &lead_internal.active_session_id,
+            QueueKind::Realtime,
+            EnqueueSessionMessageRequest {
+                content: vec![MessageContent::InputText {
+                    text: "[System Notification: Background Process Exited]\nExit code: 0".to_string(),
+                }],
+                tool_policy: QueueToolPolicy::default(),
+                metadata: bg_meta,
+                model_override: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut bg_reply_seen = false;
+    for _ in 0..50 {
+        let detail: RoomDetailResponse = http
+            .get(format!("{chat_base}/api/v1/rooms/{room_id}"))
+            .bearer_auth(chat_auth_token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if detail
+            .messages
+            .iter()
+            .any(|m| m.content.contains("后台进程已完成并汇报！"))
+        {
+            bg_reply_seen = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        bg_reply_seen,
+        "Direct apiserver background wakeup must inherit full Session base tools (chatroom_speak enabled)"
+    );
+
+    cancel.cancel();
+}
+

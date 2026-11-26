@@ -36,6 +36,30 @@ pub enum AgentScheduleSpec {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleDeliveryMode {
+    #[default]
+    Pending,
+    Realtime,
+}
+
+impl ScheduleDeliveryMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Realtime => "realtime",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "realtime" => Self::Realtime,
+            _ => Self::Pending,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentSchedule {
     pub schedule_id: String,
@@ -45,6 +69,8 @@ pub struct AgentSchedule {
     pub task_prompt: String,
     pub spec: AgentScheduleSpec,
     pub schedule_summary: String,
+    #[serde(default)]
+    pub delivery_mode: ScheduleDeliveryMode,
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_runs: Option<u64>,
@@ -92,6 +118,8 @@ pub struct InternalAgentScheduleRequest {
     pub timezone_offset_minutes: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_runs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_mode: Option<ScheduleDeliveryMode>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -102,6 +130,8 @@ pub struct PatchAgentScheduleRequest {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_mode: Option<ScheduleDeliveryMode>,
 }
 
 pub fn format_tz_label(offset_minutes: i32) -> String {

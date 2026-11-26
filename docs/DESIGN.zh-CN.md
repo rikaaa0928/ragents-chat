@@ -56,10 +56,11 @@
 ### 1.1 为什么能做到对 `ragents/` 零代码侵入？
 1. **WASI 0.2 原生网络直通**：
    `ragents-core` 已原生实现 WASI 0.2 `wasi:http/outgoing-handler`。因此 `chatroom.wasm` 可以直接在 WASM 内部向 `chatroom-server` 发起 HTTP 请求（调用公开发言接口），无需修改 `ragents/wit/ragent-extension.wit` 或 `ragents-core` 宿主代码。
-2. **统一通过 `push_realtime_message` 投递（无需在聊天室侧区分 Idle / Busy）**：
-   因为 `ragents-apiserver` 的 `push_realtime_message` 已经在单个 SQLite 事务内实现了**“忙碌时注入当前运行循环、空闲时自动创建并调度 `Continuation` Activation 唤醒”**的原子语义：
-   - `chatroom-server` 向任何群内 Agent 投递消息（无论是 `@` 唤醒还是窥屏投递）时，**完全不需要自己判断该 Agent 当前是不是 `Idle`，统一直接调用 `client.push_realtime_message` 即可**！
-   - 这不仅大幅简化了 `chatroom-server` 的投递代码，还彻底消除了“`chatroom-server` 以为 Agent 还在忙，结果请求到达前 1ms Agent 刚跑完导致状态判断竞态”的分布式并发问题。
+2. **统一通过双消息队列投递（无需在聊天室侧区分 Idle / Busy，也不硬编码禁言状态）**：
+   因为 `ragents-apiserver` 的双消息队列（`Realtime` + `Pending`）已经把**“何时新建 `Activation`、何时插进当前运行中 `Activation`、何时等结束后逐条出队、以及每次 `Turn` 动态刷新工具配置”**完全封装在 `ragent-base` 内部：
+   - `chatroom-server` 不再自己判断 Agent 是否空闲，也不再维护 `allow_speak_in_turn` 镜像；需要投递时统一写入 `base` 的 `Realtime`（需插队）或 `Pending`（按序独立执行）队列，并在消息参数中显式通过 `QueueToolPolicy` 开启或禁用 `chatroom_speak`；
+   - 禁言窥屏运行期间若突然来了实时 `@` 点名，只需往 `Realtime` 队列投一条显式启用 `chatroom_speak` 的消息即可直接插入当前 `Activation` 并实时恢复发言能力，无需等待禁言窥屏结束。
+   - **可观测分层**：Agent `Inspector` 仅透视真正进入 `base` 双队列的持久化条目（通过 `SessionQueueUpdated` SSE 实时刷新）；尚停留在 `chatroom-server` 等待窥屏/点名的未读积压归属于房间级「未投递暂存池」单独管理。
 3. **三会话压缩血缘事件已完备**：
    `ragents-apiserver` 在触发上下文压缩时会广播 `SessionEvent::SessionCompacted { from_session_id, compaction_session_id, continued_session_id, continued_activation_id, .. }`，且 `push_realtime_message` 对旧 Session 的请求也会自动顺着 `continued_in_session_id` 路由并返回最新的 `target_session_id`。
 
@@ -125,7 +126,6 @@ CREATE TABLE IF NOT EXISTS room_agents (
     session_chain_json      TEXT NOT NULL,          -- 完整压缩血缘链记录: [{gen, working_session_id, compaction_session_id}]
     last_delivered_seq      INTEGER NOT NULL DEFAULT 0, -- 已投递给该 Agent 的最高房间消息序号 msg_seq
     last_roster_version     INTEGER NOT NULL DEFAULT 0, -- 已同步给该 Agent 的群成员名册版本号 (仅变动时增量同步)
-    allow_speak_in_turn     INTEGER NOT NULL DEFAULT 1, -- 当前轮次是否允许调用 chatroom_speak (禁言窥屏时为 0)
     runtime_state           TEXT NOT NULL DEFAULT 'idle', -- 'idle' | 'thinking' | 'waiting_permission'
     active_activation_id    TEXT,                   -- 当前正在运行的 ActivationId
     agent_secret_token      TEXT NOT NULL,          -- 供 chatroom.wasm 回调鉴权使用的一次性/专属 Token
@@ -221,11 +221,11 @@ CREATE TABLE IF NOT EXISTS room_messages (
    }
    ```
 
-### 3.3 Hook 2：`tools.call`（WASI 0.2 HTTP 公开发言回传与激活级 `disabled_tools` 禁言隔离）
-1. **被禁言时的激活级工具硬隔离（`ActivationSpec.disabled_tools`）**：
-   - 当某次唤醒属于“被禁言的只读窥屏”（`allow_speak == false`）时，`chatroom-server` 在调用 `client.push_realtime_message` 时直接传入 `disabled_tools: vec!["chatroom_speak"]`；
-   - `ragents-apiserver` 与 `agent-core` 在激活准备阶段直接根据 `ActivationSpec.disabled_tools` 将 `chatroom_speak` 从本轮 `effective_tools` 中剔除（并回写至 `ConfigRevision.effective_tools` 与 `SessionStatus.effective_tools`），无需在 `chatroom.wasm` 中扫描消息文本暗号或挂载 `model.request.prepare` 钩子；
-   - 同时若模型仍尝试调用 `chatroom_speak`，`chatroom-server` 校验 `allow_speak_in_turn == 0` 也会直接返回无权限错误，实现双重硬隔离。
+### 3.3 Hook 2：`tools.call`（WASI 0.2 HTTP 公开发言回传与队列 `QueueToolPolicy` 物理禁言）
+1. **通过队列工具策略进行物理级禁言/动态解禁（`QueueToolPolicy`）**：
+   - 当某次投递属于“被禁言的只读窥屏”（`allow_speak == false`）时，`chatroom-server` 向 `Pending` 队列投递消息时显式带上 `disabled_tools: ["chatroom_speak"]`；其余所有允许发言的投递（直连点名、可插话窥屏、定时任务、Auto-Nudge）则显式带上 `enabled_tools: ["chatroom_speak"]`；
+   - `agent-core` 根据 `QueueToolPolicy` 将 `chatroom_speak` 从当前 `Activation` 的 `active_tools` 与 `request_tools` 中剔除（并由 `prepare_tool_call` 白名单拒绝执行，实现物理级零泄露拦截），`chatroom-server` 无需额外同步 `allow_speak_in_turn`；
+   - 若禁言窥屏运行中收到实时 `@` 点名并携带 `enabled_tools: ["chatroom_speak"]` 进入 `Realtime` 队列，`agent-core` 在下一次 `Turn` 前原子 `drain` 时会当场重新启用 `chatroom_speak`，并在下一个 `Activation` 开启时自动清除先前任何禁用配置。
 2. **公开发言回调 (`tools.call`)**：
    - 当获准发言的 Agent 调用 `chatroom_speak` 时，`chatroom.wasm` 通过 WASI 0.2 `wasi:http/outgoing-handler` 向 `chatroom-server` 发送 `POST /api/v1/internal/agent-speak`；
    - 请求头携带 `Authorization: Bearer <agent_token>`；
@@ -269,7 +269,7 @@ CREATE TABLE IF NOT EXISTS room_messages (
  - If you have valuable input, corrections, or follow-up points, call `chatroom_speak` to chime in.
  - If no response is needed, do NOT call `chatroom_speak` and finish your turn to observe silently.)
 ```
-*(注：当处于禁言只读态 `allow_speak == false` 时，`chatroom-server` 同时下发 `disabled_tools: ["chatroom_speak"]` 并在尾注提示本轮处于 Muted Observation Mode，无需调用 `chatroom_speak`。)*
+*(注：当处于禁言只读态 `allow_speak == false` 时，`chatroom-server` 向 `Pending` 队列投递时同时下发 `disabled_tools: ["chatroom_speak"]` 并在尾注提示本轮处于 Muted Observation Mode，无需调用 `chatroom_speak`；若途中插入带 `enabled_tools: ["chatroom_speak"]` 的实时消息，`agent-core` 会立即恢复发言工具。)*
 
 ### 4.2 房间级实时可调参数与“掷骰排序 · 轮流插嘴 · 发言即重排”算法
 

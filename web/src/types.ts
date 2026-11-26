@@ -72,18 +72,57 @@ export interface AgentTokenUsage {
   turn_count: number;
 }
 
-export interface QueuedMessageEntry {
-  msg_seq: number;
-  sender_name: string;
-  content: string;
-  is_realtime: boolean;
+export interface QueueToolPolicy {
+  enabled_tools?: string[];
+  disabled_tools?: string[];
+}
+
+export interface BaseQueuedMessageEntry {
+  id: number;
+  queue_kind: 'realtime' | 'pending';
+  sender_label: string;
+  preview: string;
+  tool_policy?: QueueToolPolicy;
+  metadata?: Record<string, string>;
+  msg_seqs: number[];
+  primary_msg_seq?: number | null;
   status_label: string;
   created_at: string;
 }
 
 export interface AgentMessageQueueSnapshot {
-  realtime_messages: QueuedMessageEntry[];
-  normal_messages: QueuedMessageEntry[];
+  realtime_messages: BaseQueuedMessageEntry[];
+  pending_messages: BaseQueuedMessageEntry[];
+}
+
+export interface RoomPendingPoolMessageEntry {
+  msg_seq: number;
+  sender_name: string;
+  sender_kind: 'human' | 'agent' | 'manager' | 'system';
+  content: string;
+  mentions: string[];
+  is_realtime: boolean;
+  can_withdraw: boolean;
+  waiting_agent_names: string[];
+  delivered_agent_names: string[];
+  created_at: string;
+}
+
+export interface RoomPendingPoolAgentStatus {
+  agent_id: string;
+  agent_name: string;
+  avatar: string;
+  last_delivered_seq: number;
+  unread_count: number;
+  countable_unread_count: number;
+}
+
+export interface RoomPendingPoolResponse {
+  room_id: string;
+  room_last_seq: number;
+  total_undelivered_messages: number;
+  waiting_messages: RoomPendingPoolMessageEntry[];
+  per_agent: RoomPendingPoolAgentStatus[];
 }
 
 export interface RoomAgent {
@@ -100,13 +139,14 @@ export interface RoomAgent {
   prompt_hint?: boolean;
   scheduling?: AgentScheduling;
   runtime_state: RuntimeState;
-  allow_speak_in_turn: boolean;
   last_delivered_seq: number;
   active_session_id: string;
   active_activation_id?: string | null;
   session_chain: SessionChainEntry[];
   token_usage?: AgentTokenUsage;
   active_schedule_count?: number;
+  realtime_queue_count?: number;
+  pending_queue_count?: number;
 }
 
 export type SendShortcutMode = 'enter_send' | 'shift_enter_send';
@@ -142,6 +182,7 @@ export interface RoomDetailResponse {
   agents: RoomAgent[];
   messages: ChatMessage[];
   flow_logs: FlowLogEntry[];
+  pending_pool?: RoomPendingPoolResponse;
 }
 
 export interface PendingPermission {
@@ -219,6 +260,8 @@ export interface AgentPermissionSummary {
   rules: PermissionRuleEntry[];
 }
 
+export type ScheduleDeliveryMode = 'pending' | 'realtime';
+
 export interface AgentSchedule {
   schedule_id: string;
   room_id: string;
@@ -226,6 +269,7 @@ export interface AgentSchedule {
   title: string;
   task_prompt: string;
   schedule_summary: string;
+  delivery_mode: ScheduleDeliveryMode;
   enabled: boolean;
   max_runs?: number | null;
   run_count: number;

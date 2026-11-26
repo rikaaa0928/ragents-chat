@@ -77,6 +77,14 @@ pub fn build_chat_router(state: ChatServerState) -> Router {
             post(handle_mutate_room_prompts),
         )
         .route(
+            "/api/v1/rooms/{room_id}/pending-pool",
+            get(handle_get_room_pending_pool),
+        )
+        .route(
+            "/api/v1/rooms/{room_id}/pending-pool/{msg_seq}/withdraw",
+            post(handle_withdraw_room_pending_message),
+        )
+        .route(
             "/api/v1/rooms/{room_id}/messages",
             post(handle_post_message),
         )
@@ -122,7 +130,11 @@ pub fn build_chat_router(state: ChatServerState) -> Router {
             post(handle_retry_agent_activation),
         )
         .route(
-            "/api/v1/agents/{agent_id}/queue/{msg_seq}/withdraw",
+            "/api/v1/agents/{agent_id}/queues",
+            get(handle_get_agent_queues),
+        )
+        .route(
+            "/api/v1/agents/{agent_id}/queue/{queue_id}/withdraw",
             post(handle_withdraw_queued_message),
         )
         .route(
@@ -607,13 +619,43 @@ async fn handle_get_room(
     }
     let messages = state.coordinator.store.list_room_messages(&room_id, 0)?;
     let flow_logs = state.coordinator.get_room_flow_logs(&room_id);
+    let pending_pool = state.coordinator.build_room_pending_pool(&room_id);
     Ok(Json(RoomDetailResponse {
         room,
         manager_agent,
         agents,
         messages,
         flow_logs,
+        pending_pool,
     }))
+}
+
+async fn handle_get_room_pending_pool(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Path(room_id): Path<String>,
+) -> Result<Json<RoomPendingPoolResponse>, ChatApiError> {
+    let principal = verify_user_auth(&state, &headers)?;
+    verify_room_access(&state, &principal, &room_id)?;
+    Ok(Json(state.coordinator.build_room_pending_pool(&room_id)))
+}
+
+async fn handle_withdraw_room_pending_message(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Path((room_id, msg_seq)): Path<(String, u64)>,
+) -> Result<Json<serde_json::Value>, ChatApiError> {
+    let principal = verify_user_auth(&state, &headers)?;
+    verify_room_access(&state, &principal, &room_id)?;
+    let (withdrawn_message, pending_pool) = state
+        .coordinator
+        .withdraw_room_pending_message(&room_id, msg_seq)
+        .await
+        .map_err(|e| ChatApiError::Http(StatusCode::CONFLICT, e.to_string()))?;
+    Ok(Json(json!({
+        "withdrawn_message": withdrawn_message,
+        "pending_pool": pending_pool,
+    })))
 }
 
 async fn handle_patch_room(
@@ -763,6 +805,7 @@ async fn handle_room_stream(
                 ChatroomEvent::MessagePosted { room_id, .. }
                 | ChatroomEvent::MessageWithdrawn { room_id, .. }
                 | ChatroomEvent::AgentUpdated { room_id, .. }
+                | ChatroomEvent::AgentQueueUpdated { room_id, .. }
                 | ChatroomEvent::AgentRemoved { room_id, .. }
                 | ChatroomEvent::RoomUpdated { room_id, .. }
                 | ChatroomEvent::PermissionAlert { room_id, .. }
@@ -974,7 +1017,8 @@ async fn handle_get_inspector(
 
     let message_queues = state
         .coordinator
-        .build_agent_message_queues(&agent, &events);
+        .build_agent_message_queues(&agent)
+        .await;
     let permission_summary = state
         .coordinator
         .build_agent_permission_summary(&agent, session.as_ref(), &events)
@@ -1196,15 +1240,32 @@ async fn handle_retry_agent_activation(
     Ok(Json(act))
 }
 
+async fn handle_get_agent_queues(
+    State(state): State<ChatServerState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+) -> Result<Json<AgentMessageQueueSnapshot>, ChatApiError> {
+    let principal = verify_user_auth(&state, &headers)?;
+    let agent = state
+        .coordinator
+        .store
+        .get_agent(&agent_id)?
+        .ok_or_else(|| ChatApiError::Http(StatusCode::NOT_FOUND, "agent not found".into()))?;
+    verify_room_access(&state, &principal, &agent.room_id)?;
+    Ok(Json(
+        state.coordinator.build_agent_message_queues(&agent).await,
+    ))
+}
+
 async fn handle_withdraw_queued_message(
     State(state): State<ChatServerState>,
     headers: HeaderMap,
-    Path((agent_id, msg_seq)): Path<(String, u64)>,
+    Path((agent_id, queue_id)): Path<(String, i64)>,
 ) -> Result<Json<WithdrawQueuedMessageResponse>, ChatApiError> {
     verify_user_auth(&state, &headers)?;
     let resp = state
         .coordinator
-        .withdraw_agent_queued_message(&agent_id, msg_seq)
+        .withdraw_agent_queued_message(&agent_id, queue_id)
         .await
         .map_err(|e| ChatApiError::Http(StatusCode::CONFLICT, e.to_string()))?;
     Ok(Json(resp))

@@ -35,13 +35,16 @@
   - 自动黏性绑定一台在线节点（Sticky Node Binding），将该节点的 `/tmp/ragents/rooms/<room_id>` 同时作为所有群内 Agent 的当前工作目录（`cwd`），使同一房间内的多个浮动 Agent 与文件面板天然共享同一目录。
   - 支持在顶栏手动切换绑定节点（漂移），并在原绑定节点离线且有新消息触发时自动容灾漂移至健康节点。
 
-### 1.4 私密内部思考 vs 公开群聊发言 + 协议提示词沉降
+### 1.4 私密内部思考 vs 公开群聊发言、双队列配置禁言与协议提示词沉降
 - **1 Agent $\leftrightarrow$ 1 `ragents` `Session`**：Agent 内部的思维链、Shell 命令执行与文件读写完全隔离在其私有 Session 中，仅当显式调用 `chatroom_speak` 时才向聊天室投递公开消息。
+- **双消息队列驱动 + 纯 `QueueToolPolicy` 禁言**：
+  - `ragents-chat` 仅管理尚未投递的聊天室未读暂存池；一旦决定投递，直接按需写入 `ragent-base` 的 `Realtime` 或 `Pending` 队列并显式配置工具开关（禁言窥屏配置 `disabled_tools: ["chatroom_speak"]`，直连点名/可插话窥屏/定时任务/Auto-Nudge 配置 `enabled_tools: ["chatroom_speak"]`）。
+  - 当正在运行禁言窥屏 `Activation` 时若收到实时点名，直接投入 `Realtime` 队列并配置 `enabled_tools: ["chatroom_speak"]`，无需等待窥屏结束即可插进当前 `Activation` 并实时恢复发言能力；`chatroom-server` 不再维护 `allow_speak_in_turn` 镜像。
 - **发言协议沉降于 `<chatroom_protocol>` System Prompt**：完整的 `@Human` 与 `@Agent` 点名回复/终止规则统一注入在 `<chatroom_protocol>` 系统提示词中，日常消息体保持干净，不重复拼接长串协议指令（仅提供可选 `prompt_hint` 开关，默认关闭，供指令遵循较弱的小模型按需开启单行简短提醒）。
-- **排队消息撤回、纯续跑重试与自治定时任务（`chatroom_schedule`）**：
-  - 支持一键撤回尚在排队（未送入模型）的未读消息并自动回填输入框。
-  - 当任务因网络或节点中断失败时，点击「直接重试」仅重发未读队列或提交纯 `Continuation` 激活（由 `api-server` 自动闭合未完成的 `FunctionCallOutput`），**绝不向历史上下文注入伪造的人工提示文本**。
-  - 房间内每个工作 Agent 均具备 `chatroom_schedule` 工具，可根据用户自然语言指令自主创建、查看、暂停、恢复或删除定时任务（支持 `daily` 每日固定时间、`interval` 间隔轮询、`once` 单次延时、`cron` 5 段式表达式）；到点后自动携带 `<scheduled_task_trigger>` 唤醒该 Agent 的私有 Session 执行并在透视面板支持人类一键执行/暂停/删除。
+- **双层队列透视撤回、纯续跑重试与自治定时任务（`chatroom_schedule`）**：
+  - **Agent `Inspector` 队列区**：直查并实时订阅 `ragent-base` 真实持久化的 `Realtime` + `Pending` 双队列（支持单条原子撤回）；**房间顶部「未投递暂存池」**单独展示尚未送出 `chatroom-server` 的积压消息。
+  - 当任务因网络或节点中断失败时，点击「直接重试」仅重发未读队列或调用 `resume` 续跑已有上下文（由 `api-server` 自动闭合未完成的 `FunctionCallOutput`），**绝不向历史上下文注入伪造的人工提示文本**。
+  - 房间内每个工作 Agent 均具备 `chatroom_schedule` 工具，可根据用户自然语言指令自主创建、查看、暂停、恢复或删除定时任务（支持 `daily` / `interval` / `once` / `cron` 以及 `delivery_mode = "pending" | "realtime"` 通知模式，默认 `"pending"` 阻塞等待当前主任务完成后独立开 `Activation` 执行），并在透视面板支持人类一键执行/暂停/删除/切换模式。
 
 ### 1.5 全栈可插拔扩展架构（Backend API Gateway + Frontend UI Slots）
 - 后端提供 `ChatServerExtension` 与 `/api/v1/ext/{plugin_id}/*` 路由网关，前端提供 `ExtensionSlotHost` 动态加载 ES Module 插件：
@@ -49,7 +52,7 @@
   - **`workspace_fs`**：远程节点工作区与房间临时目录穿透、在线预览、服务器暂存上传与大文件预载下载插件。
 
 ### 1.6 独立可折叠多栏 UI 与实时配置/权限透视
-- 右侧面板（`流程轨迹`、`群成员`、`Agent Session 透视`、`文件穿透`）均为独立垂直分栏，默认收起、按需独立展开（移动端自适应为抽屉）。
+- 右侧面板（`流程轨迹`、`群成员`、`Agent Session 透视`、`文件穿透`）均为独立垂直分栏，默认收起、按需独立展开（移动端自适应为抽屉）；房间顶部提供「公共 Prompt」「未投递暂存池」「流程日志」等独立折叠抽屉。
 - **Agent Session 透视面板（`RightInspectorPane`）**：
   - `ToolCall`、`WebSearch` 与结构化 `ToolResult` 采用无转义 YAML 块文本渲染，配有一键复制原始 `[JSON]` 按钮与精确到秒（`HH:mm:ss`）的卡片时间戳。
   - 实时展示四段式 System Prompt 快照、当前生效的模型与内置工具开关（如官方内置 `web_search`），以及当前实时生效的 **Agent 级、项目工作区级、节点级权限规则**，支持一键撤销任意非默认持久化授权规则。
