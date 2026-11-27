@@ -1161,17 +1161,75 @@ You hold full visibility over the room's configuration, workspace/node bindings,
             ],
         )?;
 
-        // If an Agent sent this message, advance its own `last_delivered_seq` if it had already read up to `msg_seq - 1`
-        if sender_kind == SenderKind::Agent {
-            tx.execute(
-                "UPDATE room_agents SET last_delivered_seq = ?1
-                 WHERE agent_id = ?2 AND last_delivered_seq = ?3",
-                params![
-                    msg.msg_seq as i64,
-                    sender_id,
-                    (msg.msg_seq - 1) as i64,
-                ],
-            )?;
+        // If an Agent or Manager sent this message, advance its own `last_delivered_seq` to `msg.msg_seq`
+        // whenever there are no deliverable unread messages from other senders in `(cur_seq, msg.msg_seq)`.
+        if matches!(sender_kind, SenderKind::Agent | SenderKind::Manager) {
+            let agent_row: Option<(String, i64)> = tx
+                .query_row(
+                    "SELECT name, last_delivered_seq FROM room_agents WHERE agent_id = ?1",
+                    params![sender_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            if let Some((agent_name, cur_seq)) = agent_row {
+                let cur_seq_u64 = cur_seq.max(0) as u64;
+                if cur_seq_u64 < msg.msg_seq {
+                    let mut has_unread_gap = false;
+                    let mut stmt = tx.prepare(
+                        "SELECT room_id, msg_seq, message_id, sender_kind, sender_id, sender_name,
+                                content, mentions_json, visible_to_json, reply_to_seq, is_realtime,
+                                source_session_id, source_activation_id, created_at
+                         FROM room_messages
+                         WHERE room_id = ?1 AND msg_seq > ?2 AND msg_seq < ?3
+                         ORDER BY msg_seq ASC",
+                    )?;
+                    let rows = stmt.query_map(
+                        params![room_id, cur_seq_u64 as i64, msg.msg_seq as i64],
+                        |r| {
+                            let mentions_str: String = r.get(7)?;
+                            let visible_str: String = r.get(8)?;
+                            Ok(RoomMessage {
+                                room_id: r.get(0)?,
+                                msg_seq: r.get::<_, i64>(1)? as u64,
+                                message_id: r.get(2)?,
+                                sender_kind: SenderKind::from_str(&r.get::<_, String>(3)?),
+                                sender_id: r.get(4)?,
+                                sender_name: r.get(5)?,
+                                content: r.get(6)?,
+                                mentions: serde_json::from_str(&mentions_str).unwrap_or_default(),
+                                visible_to: serde_json::from_str(&visible_str).unwrap_or_default(),
+                                reply_to_seq: r.get::<_, Option<i64>>(9)?.map(|s| s as u64),
+                                is_realtime: r.get::<_, i64>(10).unwrap_or(0) != 0,
+                                source_session_id: r
+                                    .get::<_, Option<String>>(11)?
+                                    .map(SessionId::new),
+                                source_activation_id: r
+                                    .get::<_, Option<String>>(12)?
+                                    .map(ActivationId::new),
+                                created_at: parse_dt(&r.get::<_, String>(13)?),
+                            })
+                        },
+                    )?;
+                    for row in rows {
+                        let gap_msg = row?;
+                        if Self::is_message_deliverable_to_agent(
+                            &gap_msg,
+                            sender_id,
+                            &agent_name,
+                        ) {
+                            has_unread_gap = true;
+                            break;
+                        }
+                    }
+                    drop(stmt);
+                    if !has_unread_gap {
+                        tx.execute(
+                            "UPDATE room_agents SET last_delivered_seq = MAX(last_delivered_seq, ?1) WHERE agent_id = ?2",
+                            params![msg.msg_seq as i64, sender_id],
+                        )?;
+                    }
+                }
+            }
         }
 
         tx.commit()?;
@@ -1216,26 +1274,43 @@ You hold full visibility over the room's configuration, workspace/node bindings,
         Ok(out)
     }
 
-    /// Returns unread room messages after `after_seq` filtered by `visible_to` for `agent_name`:
-    /// - Messages with `visible_to.is_empty()` are public to all agents.
-    /// - Messages with non-empty `visible_to` are visible ONLY to their sender (`sender_name`) and
-    ///   agents explicitly listed in `visible_to`.
+    /// Returns true if `msg` should be delivered into `(agent_id, agent_name)`'s unread queue:
+    /// - `System` messages are UI-only notifications and never enter agent unread queues.
+    /// - Messages authored by this agent itself are never re-delivered into its own queue.
+    /// - Messages with `visible_to.is_empty()` are public; otherwise `agent_name` must appear in `visible_to`.
+    pub fn is_message_deliverable_to_agent(
+        msg: &RoomMessage,
+        agent_id: &str,
+        agent_name: &str,
+    ) -> bool {
+        if msg.sender_kind == SenderKind::System {
+            return false;
+        }
+        if msg.sender_id == agent_id
+            || (matches!(msg.sender_kind, SenderKind::Agent | SenderKind::Manager)
+                && msg.sender_name.eq_ignore_ascii_case(agent_name))
+        {
+            return false;
+        }
+        msg.visible_to.is_empty()
+            || msg
+                .visible_to
+                .iter()
+                .any(|v| v.eq_ignore_ascii_case(agent_name))
+    }
+
+    /// Returns unread room messages after `after_seq` deliverable to `(agent_id, agent_name)`.
     pub fn list_room_messages_for_agent(
         &self,
         room_id: &str,
         after_seq: u64,
+        agent_id: &str,
         agent_name: &str,
     ) -> Result<Vec<RoomMessage>, ChatStoreError> {
         let all = self.list_room_messages(room_id, after_seq)?;
         Ok(all
             .into_iter()
-            .filter(|m| {
-                m.visible_to.is_empty()
-                    || m.sender_name.eq_ignore_ascii_case(agent_name)
-                    || m.visible_to
-                        .iter()
-                        .any(|v| v.eq_ignore_ascii_case(agent_name))
-            })
+            .filter(|m| Self::is_message_deliverable_to_agent(m, agent_id, agent_name))
             .collect())
     }
 
@@ -1508,6 +1583,7 @@ fn parse_dt(s: &str) -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_manager_and_default_agent_model_persist_across_restarts() {
@@ -1549,5 +1625,215 @@ mod tests {
             .unwrap();
         assert_eq!(s2.manager_model, "gemini-4-hydrogen");
         assert_eq!(s2.default_agent_model, "gemini-4-argon");
+    }
+
+    #[test]
+    fn test_self_messages_excluded_from_agent_unread_and_cursor_advances_across_non_deliverable_gaps() {
+        let store = ChatroomStore::open_in_memory("gpt-4.1-mini", vec![]).unwrap();
+        let room = store.create_room("amd-manager", "test").unwrap();
+
+        let make_agent = |id: &str, name: &str| RoomAgent {
+            agent_id: id.to_string(),
+            room_id: room.room_id.clone(),
+            name: name.to_string(),
+            role_title: "Lead".to_string(),
+            avatar: "🤖".to_string(),
+            persona_prompt: String::new(),
+            model: "gpt-4.1-mini".to_string(),
+            reasoning_effort: None,
+            reasoning_summary: None,
+            web_search: false,
+            prompt_hint: false,
+            scheduling: SchedulingMode::Floating {
+                node_selector: BTreeMap::new(),
+            },
+            root_session_id: SessionId::new(format!("sess_{id}")),
+            active_session_id: SessionId::new(format!("sess_{id}")),
+            session_chain: vec![],
+            last_delivered_seq: 0,
+            runtime_state: AgentRuntimeState::Idle,
+            active_activation_id: None,
+            agent_secret_token: "tok".to_string(),
+            created_by: "human".to_string(),
+            created_at: Utc::now(),
+        };
+
+        let (moss, _) = store
+            .insert_agent(make_agent("agt_moss", "MossLead"))
+            .unwrap();
+        let (_gufo, _) = store
+            .insert_agent(make_agent("agt_gufo", "GufoCore"))
+            .unwrap();
+
+        // Scenario 1 (mirrors amd-manager #154 -> deleted #155 system -> #156 MossLead -> #157 Admin -> @MossLead):
+        let (m1, _) = store
+            .append_message(
+                &room.room_id,
+                SenderKind::Agent,
+                "agt_gufo",
+                "GufoCore",
+                "handoff to MossLead".to_string(),
+                vec!["MossLead".to_string()],
+                vec![],
+                None,
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .advance_agent_delivery_cursor(&moss.agent_id, m1.msg_seq)
+            .unwrap();
+
+        let (sys_msg, _) = store
+            .append_message(
+                &room.room_id,
+                SenderKind::System,
+                "system",
+                "System",
+                "⚠️ @MossLead 任务执行已中断".to_string(),
+                vec![],
+                vec![],
+                None,
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .delete_room_message(&room.room_id, sys_msg.msg_seq)
+            .unwrap();
+
+        let (moss_reply, _) = store
+            .append_message(
+                &room.room_id,
+                SenderKind::Agent,
+                "agt_moss",
+                "MossLead",
+                "已接棒启动 LoRA 微调".to_string(),
+                vec![],
+                vec![],
+                Some(m1.msg_seq),
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Even with deleted #2 System gap, MossLead's last_delivered_seq must advance to #3.
+        let moss_after_reply = store.get_agent("agt_moss").unwrap().unwrap();
+        assert_eq!(moss_after_reply.last_delivered_seq, moss_reply.msg_seq);
+
+        let (admin_q, _) = store
+            .append_message(
+                &room.room_id,
+                SenderKind::Human,
+                "human",
+                "Admin",
+                "大概要多久".to_string(),
+                vec!["MossLead".to_string()],
+                vec![],
+                None,
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+        let unread = store
+            .list_room_messages_for_agent(
+                &room.room_id,
+                moss_after_reply.last_delivered_seq,
+                &moss.agent_id,
+                &moss.name,
+            )
+            .unwrap();
+        assert_eq!(
+            unread.iter().map(|m| m.msg_seq).collect::<Vec<_>>(),
+            vec![admin_q.msg_seq]
+        );
+        store
+            .advance_agent_delivery_cursor(&moss.agent_id, admin_q.msg_seq)
+            .unwrap();
+
+        // Scenario 2: Another agent posts an unread message (#5), THEN MossLead posts its own (#6),
+        // THEN System posts (#7), THEN Admin asks MossLead (#8).
+        // MossLead's cursor must NOT skip #5, AND list_room_messages_for_agent must return [#5, #8]
+        // while excluding MossLead's own #6 and System #7.
+        let (gufo_note, _) = store
+            .append_message(
+                &room.room_id,
+                SenderKind::Agent,
+                "agt_gufo",
+                "GufoCore",
+                "顺便看下日志".to_string(),
+                vec![],
+                vec![],
+                None,
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+        let (_moss_self, _) = store
+            .append_message(
+                &room.room_id,
+                SenderKind::Agent,
+                "agt_moss",
+                "MossLead",
+                "收到，进度正常".to_string(),
+                vec![],
+                vec![],
+                None,
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+        let moss_before_admin2 = store.get_agent("agt_moss").unwrap().unwrap();
+        assert_eq!(moss_before_admin2.last_delivered_seq, admin_q.msg_seq);
+
+        let (_sys2, _) = store
+            .append_message(
+                &room.room_id,
+                SenderKind::System,
+                "system",
+                "System",
+                "系统提示".to_string(),
+                vec![],
+                vec![],
+                None,
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+        let (admin_q2, _) = store
+            .append_message(
+                &room.room_id,
+                SenderKind::Human,
+                "human",
+                "Admin",
+                "现在呢？".to_string(),
+                vec!["MossLead".to_string()],
+                vec![],
+                None,
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let unread2 = store
+            .list_room_messages_for_agent(
+                &room.room_id,
+                moss_before_admin2.last_delivered_seq,
+                &moss.agent_id,
+                &moss.name,
+            )
+            .unwrap();
+        assert_eq!(
+            unread2.iter().map(|m| m.msg_seq).collect::<Vec<_>>(),
+            vec![gufo_note.msg_seq, admin_q2.msg_seq]
+        );
     }
 }

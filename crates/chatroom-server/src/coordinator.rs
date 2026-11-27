@@ -375,15 +375,7 @@ impl RoomCoordinator {
             }
 
             for ag in &agents {
-                if m.sender_id == ag.agent_id {
-                    continue;
-                }
-                let is_visible = m.visible_to.is_empty()
-                    || m.sender_name.eq_ignore_ascii_case(&ag.name)
-                    || m.visible_to
-                        .iter()
-                        .any(|v| v.eq_ignore_ascii_case(&ag.name));
-                if !is_visible {
+                if !ChatroomStore::is_message_deliverable_to_agent(&m, &ag.agent_id, &ag.name) {
                     continue;
                 }
                 let mentions_mgr_only = m
@@ -602,6 +594,7 @@ impl RoomCoordinator {
         let unread = self.store.list_room_messages_for_agent(
             &room.room_id,
             agent.last_delivered_seq,
+            &agent.agent_id,
             &agent.name,
         )?;
 
@@ -2915,8 +2908,8 @@ impl RoomCoordinator {
                 visible_to,
                 req.reply_to_seq,
                 false,
-                Some(agent.active_session_id),
-                agent.active_activation_id,
+                Some(agent.active_session_id.clone()),
+                agent.active_activation_id.clone(),
             )
             .map_err(|e| (500, e.to_string()))?;
 
@@ -2928,6 +2921,14 @@ impl RoomCoordinator {
             room_id: req.room_id.clone(),
             room: updated_room,
         });
+        if let Ok(Some(updated_sender)) = self.store.get_agent(&agent.agent_id) {
+            if updated_sender.last_delivered_seq != agent.last_delivered_seq {
+                self.emit_room_event(ChatroomEvent::AgentUpdated {
+                    room_id: req.room_id.clone(),
+                    agent: self.to_agent_public(updated_sender),
+                });
+            }
+        }
 
         let coord = self.clone();
         let msg_clone = msg.clone();
@@ -3606,7 +3607,12 @@ impl RoomCoordinator {
         // Include any unread room messages since `agent.last_delivered_seq` + the scheduled task prompt
         let unread = self
             .store
-            .list_room_messages_for_agent(&room.room_id, agent.last_delivered_seq, &agent.name)
+            .list_room_messages_for_agent(
+                &room.room_id,
+                agent.last_delivered_seq,
+                &agent.agent_id,
+                &agent.name,
+            )
             .unwrap_or_default();
         let max_seq = room.last_msg_seq;
 
@@ -3879,6 +3885,7 @@ Task Instructions:\n\
         let unread = self.store.list_room_messages_for_agent(
             &room.room_id,
             target_agent.last_delivered_seq,
+            &target_agent.agent_id,
             &target_agent.name,
         )?;
         if unread.is_empty() {
@@ -3958,6 +3965,7 @@ Task Instructions:\n\
         let unread = self.store.list_room_messages_for_agent(
             &room.room_id,
             mgr_agent.last_delivered_seq,
+            &mgr_agent.agent_id,
             &mgr_agent.name,
         )?;
         if unread.is_empty() {
@@ -4233,6 +4241,7 @@ Task Instructions:\n\
                             .list_room_messages_for_agent(
                                 room_id,
                                 ag.last_delivered_seq,
+                                &ag.agent_id,
                                 &ag.name,
                             )
                             .unwrap_or_default();
@@ -4333,6 +4342,7 @@ Task Instructions:\n\
         let Ok(unread) = self.store.list_room_messages_for_agent(
             room_id,
             target_agent.last_delivered_seq,
+            &target_agent.agent_id,
             &target_agent.name,
         ) else {
             return;
@@ -4567,7 +4577,12 @@ Task Instructions:\n\
             .filter(|a| {
                 let unread_msgs = self
                     .store
-                    .list_room_messages_for_agent(room_id, a.last_delivered_seq, &a.name)
+                    .list_room_messages_for_agent(
+                        room_id,
+                        a.last_delivered_seq,
+                        &a.agent_id,
+                        &a.name,
+                    )
                     .unwrap_or_default();
                 let countable_unread = unread_msgs
                     .iter()
@@ -4718,6 +4733,7 @@ Task Instructions:\n\
             let Ok(unread) = self.store.list_room_messages_for_agent(
                 room_id,
                 target_agent.last_delivered_seq,
+                &target_agent.agent_id,
                 &target_agent.name,
             ) else {
                 return;

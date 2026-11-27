@@ -1871,7 +1871,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "ragents-apiserver"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#5e1935331c0dbf71c9dd29f55f593a60a3c129e7"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#125a94fb7f16ae1b748c3a83ab5fe0ef0af6f091"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1894,7 +1894,7 @@ dependencies = [
 [[package]]
 name = "ragents-client"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#5e1935331c0dbf71c9dd29f55f593a60a3c129e7"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#125a94fb7f16ae1b748c3a83ab5fe0ef0af6f091"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1907,6 +1907,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "socket2",
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite",
@@ -1918,7 +1919,7 @@ dependencies = [
 [[package]]
 name = "ragents-core"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#5e1935331c0dbf71c9dd29f55f593a60a3c129e7"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#125a94fb7f16ae1b748c3a83ab5fe0ef0af6f091"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1947,7 +1948,7 @@ dependencies = [
 [[package]]
 name = "ragents-daemon"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#5e1935331c0dbf71c9dd29f55f593a60a3c129e7"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#125a94fb7f16ae1b748c3a83ab5fe0ef0af6f091"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1972,7 +1973,7 @@ dependencies = [
 [[package]]
 name = "ragents-protocol"
 version = "0.1.0"
-source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#5e1935331c0dbf71c9dd29f55f593a60a3c129e7"
+source = "git+https://github.com/rikaaa0928/ragents.git?branch=main#125a94fb7f16ae1b748c3a83ab5fe0ef0af6f091"
 dependencies = [
  "chrono",
  "openresponses-rust",
